@@ -22,6 +22,7 @@ else
 fi
 export KZ_PROJECT_ROOT
 # The OS of the host that started the container picks the default config.
+# shellcheck disable=SC2034  # read by lib/config.sh
 KZ_CALLER_OS=${KZ_HOST_OS:-}
 
 # shellcheck disable=SC1091
@@ -139,6 +140,21 @@ kz_configure() {
     printf '%s\n' "$configure_sig" > "$build_p/.kazarov-configure"
 }
 
+# Deletes a build directory but keeps the ninja log entries of outputs outside
+# it (disc extraction, split stamp), so a clean build does not redo them.
+kz_clean() {
+    local dir=$1 kept
+    kept=
+    if [ -f "$dir/.ninja_log" ]; then
+        kept=$(awk -F '\t' -v dir="$dir/" 'NR == 1 || (substr($4, 1, 1) == "/" && index($4, dir) != 1)' "$dir/.ninja_log")
+    fi
+    rm -rf "$dir"
+    if [ -n "$kept" ] && [ "$(printf '%s\n' "$kept" | wc -l)" -gt 1 ]; then
+        mkdir -p "$dir"
+        printf '%s\n' "$kept" > "$dir/.ninja_log"
+    fi
+}
+
 # Builds in the project root under the locks. $1 is build or run; the rest
 # are targets for build, or the program's arguments for run.
 kz_do_work() {
@@ -152,7 +168,7 @@ kz_do_work() {
     fi
 
     if [ -n "${CLEAN:-}" ] && [ "$CLEAN" != 0 ]; then
-        rm -rf "$(kz_abs "$KZ_BUILD_DIR")"
+        kz_clean "$(kz_abs "$KZ_BUILD_DIR")"
     fi
 
     if [ "${#KZ_REQUIRE_ANY[@]}" -gt 0 ]; then
