@@ -14,6 +14,12 @@
 #include "sce/sdk_params.hpp"
 #include "platform_fixture.hpp"
 
+// Not every game's libmc.h declares these; keep them C-linked like the rest of the family.
+extern "C" {
+int sceMcEnd(void);
+int sceMcSeek(int fd, int offset, int origin);
+}
+
 // libmc on a save root in a temporary directory.
 
 namespace fs = std::filesystem;

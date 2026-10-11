@@ -15,6 +15,12 @@
 #include "platform/paths.hpp"
 #include "sdk_params.hpp"
 
+// Not every game's libmc.h declares these; keep them C-linked like the rest of the family.
+extern "C" {
+int sceMcEnd(void);
+int sceMcSeek(int fd, int offset, int origin);
+}
+
 // Each card is a directory, <save root>/mc0 and mc1, and every command
 // finishes inside the call that issues it. The game still sees libmc's
 // protocol: a call returns 0 when it accepts a command, and the next
