@@ -174,3 +174,12 @@ def test_touching_the_assembler_script_rebuilds_assembly(tmp_path):
     assert len(pending_now) == 1
     assert pending_now[0].startswith("AS ")
     assert pending_now[0].endswith("unit_c.s")
+
+
+def test_single_word_assembler_configures(tmp_path):
+    # The projects name the assembler by one word; only the fixture uses a command list.
+    result = subprocess.run(
+        ["cmake", "-DKZ_AS=as", f"-DCMAKE_SOURCE_DIR={tmp_path}", f"-DKZ_ROOT={ROOT}",
+         "-P", str(ROOT / "cmake" / "KazarovToolchain.cmake")],
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
