@@ -13,6 +13,7 @@ host/           kazarov.cmd and kazarov.ps1, the Windows entry point; kazarov-qu
 cmake/          Kazarov.cmake and the modules it includes
 image/          Dockerfile and the MWCC debugging tools
 include/kazarov/port.h
+port/            shared PC port: gfx, audio, platform, sce and tests (see Shared port code)
 python/kazarov_elf/   ELF reader and writer for post-processing scripts
 scripts/        m2ctx.py (declaration context), port_override.py
 tests/          pytest suites and CMake graph checks
@@ -212,6 +213,37 @@ PORT_OVERRIDE void MGClearScreen(u_char r) { /* replaces the ps2/src definition 
 Do not wrap `PORT_RETURN` in a PS2-visible `if`. The PS2 build then compiles that code. Under MWCC the expansions are empty apart from the stray `;` that `PORT_RETURN(...);` and `PORT_FIX(...);` leave. `tests/port_h/run.sh MWCC_EXE` checks that the macro uses compile to the same code as their hand-written PS2 text, and that a PORT build takes the values the macros give.
 
 `#include "kazarov/port.h"` resolves through an `-i` directory: `-i <root>/tools/kazarov/include`. Angle-bracket includes do not search `-i` directories, so they need `MWCIncludes`.
+
+## Shared port code
+
+`port/` is the host code that every PC port shares. Its include root is `port/`: consumers write `#include "gfx/gfx.hpp"` and `#include "platform/clock.hpp"`.
+
+| Directory | Contents |
+|---|---|
+| `gfx/` | Vulkan renderer: display lists, pipelines, readback, `shaders/` (compiled to headers by the consumer) |
+| `audio/` | Sony HD/BD/SQ/VAG stack, mixer, reverb, sequencer, WAV/FLAC/Vorbis decoding |
+| `platform/` | Host services: window, input, display, clock, files, paths, settings, glyphs, overlay, TrueType font, memory, audio output, image files |
+| `sce/` | PS2 SDK replacements (eekernel, libcdvd, libgraph, libmc, libpad, libvu0, sifdev, sifrpc); `sce/unimplemented.cpp` defines `Ps2Unimplemented`, behind `PS2_UNIMPLEMENTED()` in `kazarov/port.h` |
+| `sce/stubs/` | Stubs for libdma, libgraph, libpkt |
+| `tests/` | GoogleTest cases and fixtures, compiled into each game's test executable |
+
+- `gfx/`, `audio/` and `platform/` never include a game header and are built without the game's `port.h`.
+- `sce/` is compiled by each consumer with its own `ps2/include/sce` on the include path and its `port.h` force-included. The SDK family selects which `sce` files are built.
+- The game provides:
+  - `SettingsGet()` and `SettingsChange(const HostSettings &)`, the definitions behind `settings.hpp`. The game calls `SettingsSetEnvPrefix` to name its environment variables (`<prefix>_<name>`).
+  - `PathsConfigure(PathsConfig)`: the per-user directory name and the data and save environment variables.
+  - `WindowSetIdentity()`: the window title and icon.
+  - `gfx::RendererConfig`: `app_name`, `logical_width` and `logical_height`, and `display_aspect`.
+- Shared tests run after the game's `main()` has set its identity. They must not assume a particular game.
+
+CMake entry points are in `cmake/KazarovPort.cmake`:
+
+| Name | Purpose |
+|---|---|
+| `kz_port_host_library(<target>)` | Builds `gfx/`, `audio/` and `platform/` as one host library |
+| `kz_port_sce_sources(<out-var> LIBS <family>...)` | Sets `<out-var>` to the `sce/` sources for the SDK families named |
+| `kz_port_tests(<target>)` | Builds the shared tests into the consumer's test executable |
+| `KZ_PORT_VENDOR_DIRS` | Include directories of the vendored single-header libraries (stb, dr_libs) |
 
 ## Windows
 
