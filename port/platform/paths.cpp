@@ -90,6 +90,15 @@ fs::path Absolute(const fs::path &path) {
 
 void PathsConfigure(const PathsConfig &settings) { config = settings; }
 
+void PathsReset() {
+    config = {};
+    program.clear();
+    data_override.reset();
+    save_override.reset();
+    data_root.reset();
+    save_root.reset();
+}
+
 fs::path PathsExecutable() {
     std::error_code error;
 #if defined(__APPLE__)

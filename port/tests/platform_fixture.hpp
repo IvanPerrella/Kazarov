@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 #ifdef _WIN32
@@ -48,6 +49,44 @@ inline int UnsetEnv(const char *name) {
     return _putenv_s(name, "");
 #else
     return unsetenv(name);
+#endif
+}
+
+// Wide on Windows: the narrow environment cannot carry a non-ASCII value back unchanged.
+struct EnvSnapshot {
+    std::string name;
+#ifdef _WIN32
+    std::optional<std::wstring> value;
+#else
+    std::optional<std::string> value;
+#endif
+};
+
+inline EnvSnapshot SaveEnv(const char *name) {
+    EnvSnapshot snapshot{name, {}};
+#ifdef _WIN32
+    const std::wstring wide_name(name, name + std::strlen(name));
+    if (const wchar_t *value = ::_wgetenv(wide_name.c_str())) {
+        snapshot.value = value;
+    }
+#else
+    if (const char *value = std::getenv(name)) {
+        snapshot.value = value;
+    }
+#endif
+    return snapshot;
+}
+
+inline void RestoreEnv(const EnvSnapshot &snapshot) {
+#ifdef _WIN32
+    const std::wstring wide_name(snapshot.name.begin(), snapshot.name.end());
+    ::_wputenv_s(wide_name.c_str(), snapshot.value ? snapshot.value->c_str() : L"");
+#else
+    if (snapshot.value) {
+        setenv(snapshot.name.c_str(), snapshot.value->c_str(), 1);
+    } else {
+        unsetenv(snapshot.name.c_str());
+    }
 #endif
 }
 

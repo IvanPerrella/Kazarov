@@ -44,6 +44,7 @@ enum McFunction {
     kFuncGetInfo = 0x01,
     kFuncOpen = 0x02,
     kFuncClose = 0x03,
+    kFuncSeek = 0x04,
     kFuncRead = 0x05,
     kFuncWrite = 0x06,
     kFuncFlush = 0x0A,
@@ -541,11 +542,19 @@ int sceMcUnformat(int port, int slot) {
 }
 
 int sceMcEnd(void) {
-    PS2_UNIMPLEMENTED();
+    return 0;
 }
 
 int sceMcSeek(int fd, int offset, int origin) {
-    PS2_UNIMPLEMENTED();
+    OpenFile *open = FileFor(fd);
+    if (open == nullptr) {
+        return Finish(kFuncSeek, sceMcResNoEntry);
+    }
+    constexpr std::array<int, 3> kWhence = {SEEK_SET, SEEK_CUR, SEEK_END};
+    if (origin < 0 || origin >= static_cast<int>(kWhence.size()) || std::fseek(open->file, offset, kWhence[origin]) != 0) {
+        return Finish(kFuncSeek, sceMcResDeniedPermit);
+    }
+    return Finish(kFuncSeek, static_cast<int>(std::ftell(open->file)));
 }
 
 int sceMcRename(int port, int slot, char *old_name, char *new_name) {

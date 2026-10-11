@@ -29,6 +29,9 @@ struct PathsConfig {
 
 void PathsConfigure(const PathsConfig &config);
 
+// Test hook: lets every case in one process start from the state a fresh process has.
+void PathsReset();
+
 // Removes --data <dir>, --data=<dir>, --save <dir> and --save=<dir> from argv, keeping the order of
 // the rest, and returns the new argc.
 int PathsConsumeArgs(int argc, char **argv);

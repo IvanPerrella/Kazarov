@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "platform/paths.hpp"
 #include "platform_fixture.hpp"
@@ -20,12 +21,31 @@ namespace {
 class PathsXdg : public testing::Test {
 protected:
     void SetUp() override {
+        saved_cwd_ = fs::current_path();
+        for (const char *name : {"LOCALAPPDATA", "KZTEST_DATA", "KZTEST_SAVE", "XDG_DATA_HOME", "HOME"}) {
+            saved_env_.push_back(dc::test::SaveEnv(name));
+        }
+        PathsReset();
         PathsConfigure({.app_dir = "kazarov-test", .env_data = "KZTEST_DATA", .env_save = "KZTEST_SAVE"});
         fs::path beside = PathsExecutable().parent_path();
         if (fs::exists(beside / "data") || fs::exists(beside / "save")) {
             GTEST_SKIP() << "the build directory holds data/ or save/";
         }
     }
+
+    void TearDown() override {
+        std::error_code error;
+        fs::current_path(saved_cwd_, error);
+        for (const dc::test::EnvSnapshot &snapshot : saved_env_) {
+            dc::test::RestoreEnv(snapshot);
+        }
+        saved_env_.clear();
+        PathsReset();
+    }
+
+private:
+    fs::path                           saved_cwd_;
+    std::vector<dc::test::EnvSnapshot> saved_env_;
 };
 
 // An empty working directory and nothing in the environment but XDG_DATA_HOME and HOME.

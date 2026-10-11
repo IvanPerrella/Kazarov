@@ -1,21 +1,5 @@
 #include <eekernel.h>
 
-int CreateSema(struct SemaParam *param) {
-    PS2_UNIMPLEMENTED();
-}
-
-int DeleteSema(int sema_id) {
-    PS2_UNIMPLEMENTED();
-}
-
-int WaitSema(int sema_id) {
-    PS2_UNIMPLEMENTED();
-}
-
-int SignalSema(int sema_id) {
-    PS2_UNIMPLEMENTED();
-}
-
 int DIntr(void) {
     PS2_UNIMPLEMENTED();
 }
@@ -49,25 +33,5 @@ int EnableDmac(int channel) {
 }
 
 int DisableDmac(int channel) {
-    PS2_UNIMPLEMENTED();
-}
-
-int CreateThread(struct ThreadParam *param) {
-    PS2_UNIMPLEMENTED();
-}
-
-int StartThread(int thread_id, void *arg) {
-    PS2_UNIMPLEMENTED();
-}
-
-int RotateThreadReadyQueue(int priority) {
-    PS2_UNIMPLEMENTED();
-}
-
-int TerminateThread(int thread_id) {
-    PS2_UNIMPLEMENTED();
-}
-
-int DeleteThread(int thread_id) {
     PS2_UNIMPLEMENTED();
 }

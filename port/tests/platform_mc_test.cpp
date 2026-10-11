@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <libmc.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -31,6 +32,15 @@ fs::path UseTempSaveRoot() {
 std::vector<char> ReadFile(const fs::path &path) {
     std::ifstream file(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+int Settle(int issued, int function) {
+    int cmd = -1;
+    int result = 0;
+    EXPECT_EQ(issued, 0);
+    EXPECT_EQ(sceMcSync(MC_WAIT, &cmd, &result), 1);
+    EXPECT_EQ(cmd, function);
+    return result;
 }
 
 } // namespace
@@ -119,6 +129,72 @@ TEST(PlatformMc, SyncReportsCommandCodes) {
     ASSERT_TRUE(sceMcSync(MC_WAIT, &cmd, &result) == 1 && result == sceMcResNoFormat && formatted == 0);
     ASSERT_TRUE(sceMcFormat(0, 0) == 0);
     ASSERT_TRUE(sceMcSync(MC_WAIT, &cmd, &result) == 1 && cmd == 0x10 && result == 0);
+}
+
+TEST(PlatformMc, SeekMovesPositionForReadAndWrite) {
+    UseTempSaveRoot();
+    ASSERT_EQ(sceMcInit(), sceMcIniSucceed);
+    int cmd = -1;
+    int result = -1;
+    ASSERT_EQ(sceMcOpen(0, 0, (char *) "file", 0x203), 0);
+    ASSERT_EQ(sceMcSync(MC_WAIT, &cmd, &result), 1);
+    ASSERT_GE(result, 0);
+    int  fd = result;
+    char digits[] = "0123456789";
+    ASSERT_EQ(Settle(sceMcWrite(fd, digits, 10), 6), 10);
+
+    ASSERT_EQ(Settle(sceMcSeek(fd, 3, SEEK_SET), 4), 3);
+    char back[4] = {};
+    ASSERT_EQ(Settle(sceMcRead(fd, back, 2), 5), 2);
+    ASSERT_EQ(std::memcmp(back, "34", 2), 0);
+
+    ASSERT_EQ(Settle(sceMcSeek(fd, 1, SEEK_CUR), 4), 6);
+    char ab[] = "AB";
+    ASSERT_EQ(Settle(sceMcWrite(fd, ab, 2), 6), 2);
+
+    ASSERT_EQ(Settle(sceMcSeek(fd, -3, SEEK_END), 4), 7);
+    ASSERT_EQ(Settle(sceMcRead(fd, back, 3), 5), 3);
+    ASSERT_EQ(std::memcmp(back, "B89", 3), 0);
+    ASSERT_EQ(Settle(sceMcClose(fd), 3), 0);
+
+    ASSERT_EQ(sceMcOpen(0, 0, (char *) "file", 1), 0);
+    ASSERT_EQ(sceMcSync(MC_WAIT, &cmd, &result), 1);
+    fd = result;
+    char whole[16] = {};
+    ASSERT_EQ(Settle(sceMcRead(fd, whole, 16), 5), 10);
+    ASSERT_EQ(std::memcmp(whole, "012345AB89", 10), 0);
+    ASSERT_EQ(Settle(sceMcClose(fd), 3), 0);
+}
+
+TEST(PlatformMc, SeekRejectsBadFileAndOrigin) {
+    UseTempSaveRoot();
+    ASSERT_EQ(sceMcInit(), sceMcIniSucceed);
+    int cmd = -1;
+    int result = -1;
+    ASSERT_EQ(Settle(sceMcSeek(-1, 0, SEEK_SET), 4), sceMcResNoEntry);
+    ASSERT_EQ(Settle(sceMcSeek(1000, 0, SEEK_SET), 4), sceMcResNoEntry);
+
+    ASSERT_EQ(sceMcOpen(0, 0, (char *) "file", 0x203), 0);
+    ASSERT_EQ(sceMcSync(MC_WAIT, &cmd, &result), 1);
+    int fd = result;
+    ASSERT_EQ(Settle(sceMcSeek(fd, 0, 3), 4), sceMcResDeniedPermit);
+    ASSERT_EQ(Settle(sceMcSeek(fd, -1, SEEK_SET), 4), sceMcResDeniedPermit);
+    ASSERT_EQ(Settle(sceMcSeek(fd, 0, SEEK_CUR), 4), 0);
+    ASSERT_EQ(Settle(sceMcClose(fd), 3), 0);
+    ASSERT_EQ(Settle(sceMcSeek(fd, 0, SEEK_SET), 4), sceMcResNoEntry);
+}
+
+TEST(PlatformMc, EndReturnsZeroAndKeepsOpenFiles) {
+    UseTempSaveRoot();
+    ASSERT_EQ(sceMcInit(), sceMcIniSucceed);
+    int cmd = -1;
+    int result = -1;
+    ASSERT_EQ(sceMcOpen(0, 0, (char *) "file", 0x203), 0);
+    ASSERT_EQ(sceMcSync(MC_WAIT, &cmd, &result), 1);
+    int fd = result;
+    ASSERT_EQ(sceMcEnd(), 0);
+    ASSERT_EQ(Settle(sceMcSeek(fd, 0, SEEK_CUR), 4), 0);
+    ASSERT_EQ(Settle(sceMcClose(fd), 3), 0);
 }
 
 #ifdef _WIN32
