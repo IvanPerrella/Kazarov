@@ -4,8 +4,8 @@
     kz-mwcc --obj OBJ --depfile DEP -- FLAGS... SOURCE
 
 Run from the project root. KZ_MWCC is the compiler and KZ_MWCC_RUNNER the wibo-style runner
-(see kz-mwcc-exec). Without a dependency map the depfile is an empty rule for OBJ, so Ninja
-does not rebuild the unit forever.
+(see kz-mwcc-exec). Without a dependency flag (-MD or -MMD) and without a map, the depfile is
+an empty rule for OBJ, so Ninja does not rebuild the unit forever. With one, a missing map fails.
 """
 
 import os
@@ -75,6 +75,10 @@ def main(argv):
     if dep is not None:
         if os.path.isfile(dep_tmp):
             os.replace(dep_tmp, dep)
+        elif any(flag in ("-MD", "-MMD") for flag in flags):
+            remove(obj)
+            print("kz-mwcc: the compiler wrote no dependency map for %s" % obj, file=sys.stderr)
+            return 1
         else:
             with open(dep, "w", encoding="utf-8") as f:
                 f.write("%s:\n" % obj)

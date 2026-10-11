@@ -71,7 +71,8 @@ function(kz_asm_object obj src)
 
     add_custom_command(
         OUTPUT "${obj_abs}"
-        COMMAND ${KZ_AS} ${KZ_AS_FLAGS} ${KZA_FLAGS} -o "${obj_abs}" "${src_abs}"
+        COMMAND ${CMAKE_COMMAND} -E env KZ_IMAGE_ID=${KZ_IMAGE_ID}
+                ${KZ_AS} ${KZ_AS_FLAGS} ${KZA_FLAGS} -o "${obj_abs}" "${src_abs}"
         ${post_args}
         DEPENDS "${src_abs}" ${KZ_TOOL_DEPENDS} ${extra}
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -123,6 +124,7 @@ function(kz_mwcc_object obj src)
     set(compile
         ${CMAKE_COMMAND} -E env
             PYTHONPATH=${KZ_PYTHONPATH}
+            KZ_IMAGE_ID=${KZ_IMAGE_ID}
             KZ_MWCC=${mwcc_abs}
             "KZ_MWCC_RUNNER=${runner}"
             KZ_PROJECT_ROOT=${CMAKE_SOURCE_DIR}
@@ -145,7 +147,7 @@ function(kz_mwcc_object obj src)
         ${retarget}
         ${post_args}
         DEPFILE "${depfile}"
-        DEPENDS "${src_abs}" ${KZ_TOOL_DEPENDS} ${extra}
+        DEPENDS "${src_abs}" ${mwcc_abs} ${KZ_TOOL_DEPENDS} ${extra}
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         COMMENT "${comment}"
         VERBATIM)

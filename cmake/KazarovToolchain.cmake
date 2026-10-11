@@ -40,9 +40,13 @@ if(NOT DEFINED KZ_LIB_INCLUDE_DIRS)
 endif()
 
 # Every compile and assembly depends on these, so a changed tool or image rebuilds
-# the objects. The image id file exists only inside the container image.
+# the objects. The image id file exists only inside the container image; KZ_IMAGE_ID is
+# also put in each command line, so a changed image changes the command.
 set(KZ_TOOL_DEPENDS ${KZ_BIN}/kz-mwcc ${KZ_BIN}/kz-mwcc-exec)
+set(KZ_IMAGE_ID "")
 if(EXISTS /opt/kazarov/image-id)
+    file(READ /opt/kazarov/image-id KZ_IMAGE_ID)
+    string(STRIP "${KZ_IMAGE_ID}" KZ_IMAGE_ID)
     list(APPEND KZ_TOOL_DEPENDS /opt/kazarov/image-id)
 endif()
 

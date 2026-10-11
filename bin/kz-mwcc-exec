@@ -55,6 +55,11 @@ def find_map(directory, target):
     return os.path.join(directory, names[0]) if names else None
 
 
+def escape(path):
+    """A path as a Make rule reads it: $, space and # are escaped."""
+    return path.replace("$", "$$").replace(" ", "\\ ").replace("#", "\\#")
+
+
 def rewrite_map(text, target, root, temp_prefixes):
     """Rewrite a compiler dependency map into a Ninja rule with absolute paths."""
     lines = []
@@ -84,7 +89,7 @@ def rewrite_map(text, target, root, temp_prefixes):
             path = root + "/" + path
         deps.append(posixpath.normpath(path))
 
-    return target + ":" + "".join(" \\\n\t" + dep for dep in deps) + "\n"
+    return escape(target) + ":" + "".join(" \\\n\t" + escape(dep) for dep in deps) + "\n"
 
 
 def main(argv):

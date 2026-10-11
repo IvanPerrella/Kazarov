@@ -4,6 +4,8 @@ The fake is the EXE and the runner is this interpreter (KZ_MWCC_RUNNER=sys.execu
 test_relative_runner runs the runner from the project root instead.
 """
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shlex
@@ -151,6 +153,37 @@ def test_depfile_falls_back_to_object_rule(root, tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert (root / "build/a/foo.d").read_text() == "%s/build/a/foo.o:\n" % root
     assert not (root / "build/a/foo.d.tmp").exists()
+
+
+def test_missing_map_fails_when_a_dependency_flag_is_given(root, tmp_path):
+    proc = subprocess.run(
+        command("build/a/foo.o", "build/a/foo.d", "a/foo.cpp", flags=("-c", "-MD", "-i", "ps2/include")),
+        cwd=root, env=compile_env(tmp_path / "log.json", FAKE_MWCC_DEP="none"),
+        capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert "no dependency map" in proc.stderr
+    assert not (root / "build/a/foo.o").exists()
+    assert not (root / "build/a/foo.d").exists()
+    assert not (root / "build/a/foo.d.tmp").exists()
+
+
+def test_map_with_a_dependency_flag_is_rewritten(root, tmp_path):
+    proc = subprocess.run(
+        command("build/a/foo.o", "build/a/foo.d", "a/foo.cpp", flags=("-c", "-MMD", "-i", "ps2/include")),
+        cwd=root, env=compile_env(tmp_path / "log.json"), capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert (root / "build/a/foo.d").read_text().startswith("%s/build/a/foo.o:" % root)
+
+
+def test_map_rewrite_escapes_space_hash_and_dollar(tmp_path):
+    """Emitted target and dependency paths escape space, # and $; input is still split on whitespace."""
+    loader = importlib.machinery.SourceFileLoader("kz_mwcc_exec", str(BIN / "kz-mwcc-exec"))
+    spec = importlib.util.spec_from_loader("kz_mwcc_exec", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    text = "a.o: src/a.c \\\n  inc/h.h\n"
+    out = mod.rewrite_map(text, "/my root/build dir/a#1$x.o", "/my root", [])
+    assert out == ("/my\\ root/build\\ dir/a\\#1$$x.o: \\\n\t/my\\ root/src/a.c \\\n\t/my\\ root/inc/h.h\n")
 
 
 def test_map_named_after_object(root, tmp_path):

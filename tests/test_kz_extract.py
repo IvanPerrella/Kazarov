@@ -227,6 +227,22 @@ def test_force_extracts_everything_again(setup):
     _assert_tree(setup.out)
 
 
+def test_new_content_with_same_names_and_sizes_rewrites_every_file(setup):
+    assert setup.run().returncode == 0
+    changed = dict(TREE)
+    changed[b'SCES_511.90;1'] = bytes(b ^ 0xFF for b in TREE[b'SCES_511.90;1'])
+    build_iso(setup.iso, changed)
+    os.utime(setup.iso, (2_000_000_000, 2_000_000_000))
+    new_sha = hashlib.sha256(setup.iso.read_bytes()).hexdigest()
+    _write_checksum(setup.checksum, new_sha, setup.iso.name)
+
+    result = setup.run()
+    assert result.returncode == 0, result.stderr
+    assert 'Extracting 5 files' in result.stdout
+    assert (setup.out / 'iso' / 'SCES_511.90').read_bytes() == changed[b'SCES_511.90;1']
+    assert setup.id_file.read_text() == f'{new_sha} 1\n'
+
+
 def test_checksum_mismatch_exits_1_and_writes_nothing(setup):
     _write_checksum(setup.checksum, '0' * 64, setup.iso.name)
 

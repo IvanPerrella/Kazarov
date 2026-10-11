@@ -56,13 +56,20 @@ def main():
     except KeyboardInterrupt:
         sys.exit(130)
 
+    # The command gets its own process group, so signals reach it through the group below.
     try:
-        proc = subprocess.Popen(command)
+        if sys.version_info >= (3, 11):
+            proc = subprocess.Popen(command, process_group=0)
+        else:
+            proc = subprocess.Popen(command, preexec_fn=os.setpgrp)
     except OSError as err:
         sys.exit(f'kz-lock: cannot run {command[0]}: {err.strerror}')
 
     def forward(signum, _frame):
-        proc.send_signal(signum)
+        try:
+            os.killpg(proc.pid, signum)
+        except ProcessLookupError:
+            pass
 
     signal.signal(signal.SIGINT, forward)
     signal.signal(signal.SIGTERM, forward)

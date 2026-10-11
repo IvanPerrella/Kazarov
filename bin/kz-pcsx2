@@ -20,6 +20,10 @@ iso="$iso_dir/$(basename "$iso")"
 find_pcsx2() {
     local candidate app appimage win_dir
     EMU=()
+    if [ -f "${PCSX2:-}" ]; then
+        EMU=("$PCSX2")
+        return 0
+    fi
     if [ -n "${PCSX2:-}" ]; then
         # shellcheck disable=SC2206  # word splitting is the point: PCSX2 may be a command line
         EMU=($PCSX2)

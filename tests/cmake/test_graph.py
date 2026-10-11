@@ -111,3 +111,28 @@ def test_split_content_change_reassembles_only_that_unit(tmp_path):
     descriptions = pending(build)
     assert len(descriptions) == 1
     assert descriptions[0].startswith("AS ") and descriptions[0].endswith("unit_c.s")
+
+
+def test_compiler_is_an_input_of_each_compile(tmp_path):
+    build = configure(tmp_path)
+    edges = [line for line in (build / "build.ninja").read_text().splitlines()
+             if line.startswith("build ") and "obj/a.o: CUSTOM_COMMAND" in line]
+    assert len(edges) == 1
+    assert str(HERE / "fake_cc.py") in edges[0]
+
+
+def test_object_commands_carry_the_image_id(tmp_path):
+    build = configure(tmp_path)
+    commands = [line for line in (build / "build.ninja").read_text().splitlines()
+                if line.startswith("  COMMAND = ") and ("kz-mwcc " in line or "fake_as.py" in line)]
+    assert len(commands) == 4
+    assert all("KZ_IMAGE_ID=" in line for line in commands)
+
+
+def test_iso_directory_reconfigures_when_the_disc_is_added(tmp_path):
+    # rom/ holds no disc in the fixture; its directory must still be a configure dependency.
+    build = configure(tmp_path)
+    rerun = [line for line in (build / "build.ninja").read_text().splitlines()
+             if line.startswith("build build.ninja: RERUN_CMAKE")]
+    assert len(rerun) == 1
+    assert str(FIXTURE / "rom") in rerun[0]

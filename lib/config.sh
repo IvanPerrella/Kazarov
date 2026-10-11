@@ -86,7 +86,7 @@ kz_check_selected() {
             exit 1 ;;
     esac
     case ${KZ_BUILD_DIR:-} in
-        ""|.|..|/|*/..|*/.) echo "kazarov: $KZ_CONFIG needs a KZ_BUILD_DIR below the project root" >&2
+        ""|.|/|/*|..|../*|*/..|*/../*|*/.) echo "kazarov: $KZ_CONFIG needs a KZ_BUILD_DIR below the project root" >&2
             exit 1 ;;
     esac
     if [ -z "${KZ_PRESET:-}" ] && ! declare -p KZ_CMAKE_ARGS >/dev/null 2>&1; then

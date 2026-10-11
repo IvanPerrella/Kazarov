@@ -33,17 +33,40 @@ kz_host_path() {
     fi
 }
 
-# The image tag: the first 12 hex digits of the git tree of image/, or
-# "dirty" when image/ has uncommitted edits or there is no commit to read.
+# The image tag: the first 12 hex digits of the git tree of image/. When image/ has
+# uncommitted edits or there is no commit to read, dirty-<hash of its files>.
 kz_image_tag() {
     local status tree
     status=$(git -C "$KZ_ROOT" status --porcelain -- image 2>/dev/null) || status=x
     tree=$(git -C "$KZ_ROOT" rev-parse HEAD:image 2>/dev/null) || tree=
     if [ -n "$status" ] || [ -z "$tree" ]; then
-        echo dirty
+        echo "dirty-$(kz_image_content_hash)"
     else
         echo "${tree:0:12}"
     fi
+}
+
+# The sha256 of stdin, as hex.
+kz_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -c1-64
+    else
+        shasum -a 256 | cut -c1-64
+    fi
+}
+
+# Twelve hex digits over the path and content of each file of image/ that git
+# knows, tracked or not, in byte order. A missing file hashes as "missing".
+kz_image_content_hash() {
+    local f
+    git -C "$KZ_ROOT" ls-files -co --exclude-standard -z -- image | LC_ALL=C sort -z |
+    while IFS= read -r -d '' f; do
+        if [ -f "$KZ_ROOT/$f" ]; then
+            printf '%s %s\n' "$(kz_sha256 < "$KZ_ROOT/$f")" "$f"
+        else
+            printf 'missing %s\n' "$f"
+        fi
+    done | kz_sha256 | cut -c1-12
 }
 
 kz_image_name() {
@@ -125,15 +148,20 @@ kz_require_builder() {
     exit 1
 }
 
-# Builds the image when it is missing, when its tag is dirty, or when
+# Builds the image when it is missing, when its tag is dirty-*, or when
 # REBUILD_IMAGE=1. The image is built from image/ alone, labelled with its tag.
+# Sets KZ_IMAGE_REF to the image ID, which is what the containers run.
 kz_ensure_image() {
-    local tag name
+    local tag name dirty=0
     kz_require_builder
     tag=$(kz_image_tag)
     name="kazarov-dev:$tag"
-    if [ "$tag" != dirty ] && [ "${REBUILD_IMAGE:-0}" != 1 ] \
+    case $tag in
+        dirty-*) dirty=1 ;;
+    esac
+    if [ "$dirty" = 0 ] && [ "${REBUILD_IMAGE:-0}" != 1 ] \
        && "$BUILDER" image inspect "$name" >/dev/null 2>&1; then
+        KZ_IMAGE_REF=$("$BUILDER" image inspect --format '{{.Id}}' "$name")
         return 0
     fi
     echo "kazarov: building the image $name (once per image/ change)"
@@ -141,6 +169,7 @@ kz_ensure_image() {
         --build-arg "KZ_IMAGE_ID=$tag" \
         --label "org.themoonpeople.kazarov.image=$tag" \
         -t "$name" "$KZ_ROOT/image"
+    KZ_IMAGE_REF=$("$BUILDER" image inspect --format '{{.Id}}' "$name")
 }
 
 # Says when the runtime's VM has fewer CPUs than the host, since that caps
@@ -184,7 +213,10 @@ kz_container_run() {
     local -a flags=() env_args=()
 
     kz_require_builder
-    name=$(kz_image_name)
+    if [ -z "${KZ_IMAGE_REF:-}" ]; then
+        kz_ensure_image
+    fi
+    name=$KZ_IMAGE_REF
 
     host_root=$(kz_host_path "$KZ_PROJECT_ROOT")
     mount="$host_root:/work/$KZ_PROJECT"

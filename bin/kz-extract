@@ -10,7 +10,9 @@ version and every file extracted with its size. When all of that still
 matches and the files are present, nothing is touched. Otherwise the image is
 hashed once, missing or wrong-size files are written again, leftovers are
 removed, and the id file (sha256 and version) is rewritten only when those
-change, so anything that depends on it rebuilds only then.
+change, so anything that depends on it rebuilds only then. A changed content id
+(sha256 or extractor version) extracts every file again, since same-size files
+can differ.
 """
 
 import argparse
@@ -221,8 +223,10 @@ def extract(iso_path, checksum, out, id_file, force):
                      f'sha256 {sha}, expected {expected}')
 
         id_text = f'{sha} {EXTRACTOR_VERSION}\n'
+        recorded = (state.get('sha256'), state.get('version')) if state else None
+        content_changed = recorded != (sha, EXTRACTOR_VERSION)
         todo = [entry for rel, entry in wanted.items()
-                if force or not is_present(files_dir / rel, entry.size)]
+                if force or content_changed or not is_present(files_dir / rel, entry.size)]
 
         if (fresh and not todo and state.get('files') == sizes
                 and read_text(id_file) == id_text):

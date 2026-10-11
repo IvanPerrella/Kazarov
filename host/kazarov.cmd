@@ -50,8 +50,13 @@ if /i "%CMD%"=="run" set "DEFCFG=%KZ_DEFAULT_RUN_WINDOWS%"
 if not defined DEFCFG if /i "%CMD%"=="build" set "DEFCFG=%KZ_DEFAULT_BUILD%"
 if not defined DEFCFG if /i "%CMD%"=="run" set "DEFCFG=%KZ_DEFAULT_RUN%"
 
-rem The config is the first argument, or the Windows default when none is given.
+rem The config is the first argument, or the default when none is given. A first argument
+rem that starts with - is a program argument: it goes back into REST and the default is used.
 set "CHK=%ARG1%"
+set "FIRST=%ARG1:~0,1%"
+if "%FIRST%"=="-" set "REST=%ARG1% %REST%"
+if "%FIRST%"=="-" set "ARG1="
+if "%FIRST%"=="-" set "CHK="
 if not defined CHK set "CHK=%DEFCFG%"
 set "ISWIN="
 if defined KZ_WINDOWS_CONFIGS if defined CHK for %%c in (%KZ_WINDOWS_CONFIGS%) do if /i "%%c"=="%CHK%" set "ISWIN=1"
@@ -93,6 +98,7 @@ if not defined BLD (
 )
 
 rem Image tag: the first 12 hex digits of the image tree hash. Uncommitted edits or no commit give "dirty".
+rem "dirty" is not content-hashed here: cmd has no tar, and "dirty" is always rebuilt.
 set "FULL="
 for /f "delims=" %%t in ('git -C "%KZ%" rev-parse HEAD:image 2^>nul') do set "FULL=%%t"
 set "DIRTY="
@@ -115,11 +121,18 @@ if defined NEED (
     exit /b 1
   )
 )
+rem The container runs the image ID, not the tag, so it is the image that was just ensured.
+set "IMGID="
+for /f "delims=" %%i in ('"%BLD%" image inspect --format "{{.Id}}" "%IMG%" 2^>nul') do set "IMGID=%%i"
+if not defined IMGID (
+  echo kazarov: image %IMG% not found after the build 1>&2
+  exit /b 1
+)
 
 rem The run descriptor is written inside the project so the host can read it back.
 if not exist "%ROOT%\.kazarov" mkdir "%ROOT%\.kazarov"
 set "DESC=run-%RANDOM%%RANDOM%.txt"
-"%BLD%" run --rm --init -v "%ROOT%:/work/%KZ_PROJECT%" -w "/work/%KZ_PROJECT%" -e HOME=/tmp -e KZ_HOST_OS=windows -e CLEAN -e JOBS -e KZ_RUN_OUT=.kazarov/%DESC% "%IMG%" tools/kazarov/bin/kazarov --inside %CMD% %ARG1% %REST%
+"%BLD%" run --rm --init -v "%ROOT%:/work/%KZ_PROJECT%" -w "/work/%KZ_PROJECT%" -e HOME=/tmp -e KZ_HOST_OS=windows -e CLEAN -e JOBS -e KZ_RUN_OUT=.kazarov/%DESC% "%IMGID%" tools/kazarov/bin/kazarov --inside %CMD% %ARG1% %REST%
 set "RC=%errorlevel%"
 if not "%RC%"=="0" exit /b %RC%
 

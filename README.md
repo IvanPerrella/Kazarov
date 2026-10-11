@@ -119,7 +119,7 @@ Inside the container the driver also reads `KZ_PROJECT_ROOT`, `KZ_HOST_OS` and `
 
 All are Python 3 with the standard library, except `kazarov` and `kz-pcsx2`, which are bash.
 
-- `kz-lock [--lock FILE]... [--message TEXT] -- CMD...` takes the exclusive `flock` locks in sorted order, announces a wait once, forwards SIGINT and SIGTERM, and exits with CMD's status.
+- `kz-lock [--lock FILE]... [--message TEXT] -- CMD...` takes the exclusive `flock` locks in sorted order, announces a wait once, runs CMD in its own process group, forwards SIGINT and SIGTERM to the group, and exits with CMD's status.
 - `kz-extract --iso ISO --checksum FILE --out DIR --id-file FILE [--force]` extracts the disc's files into `DIR/iso`. It checks the image against the sha256 checksum file, and records a state file (the id file name without `.id`, plus `.json`) with the image size, mtime, sha256, extractor version and each file's size. When nothing changed, it touches nothing. The id file changes only when the content id (sha256 and version) changes. Writes are atomic.
 - `kz-split-stamp snapshot DIR SNAP` and `kz-split-stamp restore DIR SNAP STAMP` keep a split's output mtimes steady when a re-split changes nothing. The stamp is rewritten only when the content hash changes.
 - `kz-cached --stamp FILE --input PATH... -- CMD...` runs CMD only when a command line or an input's size or mtime has changed. The stamp is written after success and removed after failure.
@@ -169,9 +169,9 @@ Other included modules: `KazarovToolchain.cmake` (paths, tools and `kz_absolute_
 
 ## Image
 
-Built locally from `image/` only, with `docker build --platform linux/amd64 --build-arg KZ_IMAGE_ID=<tag> -t kazarov-dev:<tag> image`. There is no registry. The driver builds the image when it is missing or when its tag is `dirty`.
+Built locally from `image/` only, with `docker build --platform linux/amd64 --build-arg KZ_IMAGE_ID=<tag> -t kazarov-dev:<tag> image`. There is no registry. The driver builds the image when it is missing or when its tag starts with `dirty-`, and runs containers by the image ID.
 
-- Tag: the first 12 hex digits of `git rev-parse HEAD:image`, or `dirty` when `image/` has uncommitted changes or there is no commit. The image carries the label `org.themoonpeople.kazarov.image=<tag>`.
+- Tag: the first 12 hex digits of `git rev-parse HEAD:image`, or `dirty-<hash>` when `image/` has uncommitted changes or there is no commit, where `<hash>` covers the path and content of each file under `image/` (`kazarov.cmd` uses plain `dirty`, which is always rebuilt). The image carries the label `org.themoonpeople.kazarov.image=<tag>`.
 - `/opt/kazarov/image-id` holds the tag. The last layer writes it, so a changed image id rebuilds the objects and an unchanged one rebuilds nothing.
 - Base: `debian:trixie-slim`, `linux/amd64` only, because wibo needs an x86_64 kernel.
 - Contents:

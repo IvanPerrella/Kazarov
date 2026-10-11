@@ -88,3 +88,41 @@ def test_sigterm_is_forwarded_to_the_command(tmp_path):
         if proc.poll() is None:
             proc.kill()
     assert code == 128 + signal.SIGTERM
+
+
+def _gone(pid):
+    """True once the process has exited; a zombie left for init to reap counts as gone."""
+    stat = Path('/proc') / str(pid) / 'stat'
+    if stat.exists():
+        return stat.read_text().rsplit(')', 1)[1].split()[0] == 'Z'
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def test_sigterm_reaches_the_commands_children(tmp_path):
+    pid_file = tmp_path / 'grandchild.pid'
+    child = ('import subprocess, sys\n'
+             'g = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])\n'
+             'open(sys.argv[1], "w").write(str(g.pid))\n'
+             'print("ready", flush=True)\n'
+             'g.wait()\n')
+    proc = subprocess.Popen(
+        [sys.executable, str(KZ_LOCK), '--lock', str(tmp_path / 'g.lock'), '--',
+         sys.executable, '-c', child, str(pid_file)],
+        stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == 'ready'
+        grandchild = int(pid_file.read_text())
+        proc.send_signal(signal.SIGTERM)
+        code = proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert code != 0
+    deadline = time.monotonic() + 5
+    while not _gone(grandchild) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert _gone(grandchild)
