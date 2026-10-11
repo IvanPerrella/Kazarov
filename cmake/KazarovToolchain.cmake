@@ -15,6 +15,8 @@ set(MIPS_TOOL_PREFIX mips-ps2-decompals-
 if(NOT DEFINED KZ_AS)
     set(KZ_AS ${MIPS_TOOL_PREFIX}as)
 endif()
+# The resolved assembler, so kz_asm_object rebuilds when it changes. Empty when not found.
+find_program(KZ_AS_PATH NAMES ${KZ_AS})
 if(NOT DEFINED KZ_OBJCOPY)
     set(KZ_OBJCOPY ${MIPS_TOOL_PREFIX}objcopy)
 endif()

@@ -6,18 +6,23 @@ project(kz_graph_fixture NONE)
 
 set(FIX ${CMAKE_CURRENT_SOURCE_DIR})
 
-# Stand-ins for the compiler and the assembler, run through python3.
+# Stand-ins for the compiler and the assembler; both are python3 scripts.
 set(KZ_MWCC ${FIX}/../fake_cc.py)
 set(KZ_MWCC_RUNNER python3)
-set(KZ_AS python3 ${FIX}/tools/fake_as.py)
+set(KZ_AS ${FIX}/tools/fake_as.py)
 
 include(${FIX}/../../../cmake/Kazarov.cmake)
 
 set(ASM_DIR ${CMAKE_BINARY_DIR}/asm)
 set(OBJ_DIR ${CMAKE_BINARY_DIR}/obj)
 
+# The disc path can be overridden on the configure line, to test a missing directory.
+if(NOT DEFINED FIXTURE_ISO)
+    set(FIXTURE_ISO ${FIX}/rom/no-disc.iso)
+endif()
+
 kz_disc_setup(
-    ISO ${FIX}/rom/no-disc.iso
+    ISO ${FIXTURE_ISO}
     ISO_CHECKSUM ${FIX}/rom/input.sha256
     EXTRACT_DIR ${CMAKE_BINARY_DIR}/extracted
     INPUTS ${FIX}/rom/input.bin

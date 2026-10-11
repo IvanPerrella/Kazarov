@@ -9,6 +9,7 @@ SHT_STRTAB = 3
 SHT_RELA = 4
 SHT_NOBITS = 8
 SHT_REL = 9
+SHT_GROUP = 17  # sh_info is the symbol index of the group signature
 
 FUNCTION_ST_INFOS = (
     0x12,  # global functions
@@ -212,9 +213,22 @@ class Elf:
         if index is None or force:
             if symbol.name != "":
                 symbol.st_name = self.strtab.add_symbol(symbol.name)
+            before = len(self.symtab.symbols)
             index = self.symtab.add_symbol(symbol)
+            if index < before:
+                self._shift_symbol_indices(index)
 
         return index
+
+    def _shift_symbol_indices(self, index: int):
+        """Renumbers the references at or after index, for a symbol inserted there."""
+        for record in self.relocations:
+            for reloc in record.relocations:
+                if reloc.symbol_index >= index:
+                    reloc.symbol_index += 1
+        for section in self.sections:
+            if section.sh_type == SHT_GROUP and section.sh_info >= index:
+                section.sh_info += 1
 
     def add_section(self, section) -> int:
         self.sections.append(section)
@@ -237,6 +251,14 @@ class Elf:
         section_headers = bytes()
         section_data = bytes()
         for section in self.sections:
+            # Each file-backed section starts at its own alignment. NOBITS takes no file bytes,
+            # so its offset is left where the previous section ended.
+            alignment = section.sh_addralign
+            if alignment > 1 and section.sh_type != SHT_NOBITS and sh_offset % alignment:
+                bytes_needed = alignment - (sh_offset % alignment)
+                section_data += bytes(bytes_needed)
+                sh_offset += bytes_needed
+
             section.sh_offset = sh_offset
             header, data = section.pack()
 
@@ -244,13 +266,6 @@ class Elf:
             section_data += data
 
             sh_offset += len(data)
-
-            alignment = section.sh_addralign
-            if alignment:
-                if sh_offset % alignment:
-                    bytes_needed = alignment - (sh_offset % alignment)
-                    section_data += bytes(bytes_needed)
-                    sh_offset += bytes_needed
 
         if sh_offset % 4:
             bytes_needed = 4 - (sh_offset % 4)

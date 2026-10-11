@@ -140,20 +140,31 @@ kz_configure() {
     printf '%s\n' "$configure_sig" > "$build_p/.kazarov-configure"
 }
 
-# Makes the build directory and stops unless its physical path is strictly
-# below the physical project root, so a symlink cannot send deletes outside.
+# Stops unless the build directory's physical path is strictly below the physical project
+# root, so a symlink cannot send deletes outside. The check runs before anything is created:
+# the nearest existing ancestor is resolved, the missing components are appended, and only
+# then is the directory made.
 kz_build_dir_check() {
-    local dir root
+    local dir root anc rest phys
     dir=$(kz_abs "$KZ_BUILD_DIR")
-    mkdir -p "$dir"
-    dir=$(cd "$dir" && pwd -P)
     root=$(cd "$KZ_PROJECT_ROOT" && pwd -P)
-    case $dir in
+    anc=$dir
+    rest=
+    while [ ! -d "$anc" ]; do
+        rest="/$(basename "$anc")$rest"
+        anc=$(dirname "$anc")
+    done
+    phys=$(cd "$anc" && pwd -P)$rest
+    case $rest in
+        */..|*/../*|*/.|*/./*) phys= ;;
+    esac
+    case $phys in
         "$root"/?*) ;;
         *)
             echo "kazarov: $KZ_CONFIG: KZ_BUILD_DIR $KZ_BUILD_DIR is not below the project root" >&2
             exit 1 ;;
     esac
+    mkdir -p "$dir"
 }
 
 # Deletes a build directory but keeps the ninja log entries of outputs outside

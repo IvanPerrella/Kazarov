@@ -65,8 +65,17 @@ function(kz_disc_setup)
         set(split_input ${inputs})
     endif()
     # Reconfigure when the disc is added to its directory, which creates the extract rule.
-    if(EXISTS "${iso_dir}")
-        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${iso_dir}")
+    # While that directory is missing, its nearest existing ancestor is watched instead.
+    set(watch "${iso_dir}")
+    while(NOT EXISTS "${watch}")
+        get_filename_component(parent "${watch}" DIRECTORY)
+        if(parent STREQUAL watch)
+            break()
+        endif()
+        set(watch "${parent}")
+    endwhile()
+    if(EXISTS "${watch}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${watch}")
     endif()
     if(EXISTS "${split_stamp}")
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${split_stamp}")
@@ -97,6 +106,8 @@ function(kz_disc_setup)
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         USES_TERMINAL
         VERBATIM)
+    # The forced split runs after the incremental one, never alongside it.
+    add_dependencies(disassemble setup)
 
     set(KZ_EXTRACT_ID "${extract_id}" PARENT_SCOPE)
     set(KZ_SPLIT_STAMP "${split_stamp}" PARENT_SCOPE)

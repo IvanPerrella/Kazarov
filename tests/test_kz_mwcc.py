@@ -30,6 +30,9 @@ def root(tmp_path):
     for rel in SOURCES:
         (root / rel).write_text("int f;\n")
     (root / "ps2/include/common.h").write_text("#define COMMON 1\n")
+    (root / "own.h").write_text("int own;\n")
+    (root / "private").mkdir()
+    (root / "private/win.h").write_text("int win;\n")
     (root / ".git").mkdir()
     (root / "stale.o").write_text("stale\n")
     (root / "stale.d").write_text("stale\n")
@@ -86,7 +89,7 @@ def test_cwd_is_private_and_removed(root, tmp_path):
     assert cwd.name.startswith("kz-mwcc.")
     assert run_record["env_cwd"] == str(cwd)
     # Every top-level entry is symlinked, except .git and *.d / *.o names.
-    assert run_record["listing"] == sorted(["a", "b", "build", "ps2"])
+    assert run_record["listing"] == sorted(["a", "b", "build", "own.h", "private", "ps2"])
     assert not cwd.exists()
     assert root_listing(root) == before
 
@@ -123,6 +126,16 @@ def test_nothing_left_in_root(root, tmp_path):
                "a/foo.cpp").returncode == 0
     assert root_listing(root) == before
     assert (root / "stale.o").exists() and (root / "stale.d").exists()
+
+
+def test_missing_dependency_fails_without_depfile(root, tmp_path):
+    (root / "own.h").unlink()
+    proc = run(root, tmp_path / "log.json", "build/a/foo.o", "build/a/foo.d", "a/foo.cpp")
+    assert proc.returncode == 1
+    assert ("kz-mwcc-exec: dependency map names a missing file: %s/own.h "
+            "(paths with spaces are not supported)" % root) in proc.stderr
+    assert not (root / "build/a/foo.d").exists()
+    assert not (root / "build/a/foo.d.tmp").exists()
 
 
 def test_exit_code_passes_through(root, tmp_path):

@@ -148,10 +148,12 @@ def test_round_trip_is_byte_identical(path):
                     reason="needs baseline objects and the patched upstream elf.py")
 @pytest.mark.parametrize("path", OBJECTS, ids=lambda p: str(p))
 def test_matches_upstream_serialisation(path):
+    # Upstream pads after each section, so its layout differs where a section is misaligned;
+    # the content and the parsed description must still agree.
     data = path.read_bytes()
     ours = Elf(data)
     theirs = UPSTREAM.Elf(data)
-    assert ours.pack() == theirs.pack()
+    assert content(Elf(ours.pack())) == content(Elf(theirs.pack()))
     assert describe(ours) == describe(theirs)
 
 
@@ -182,7 +184,7 @@ def test_round_trip_of_built_object_is_stable():
     once = Elf(data).pack()
     assert Elf(once).pack() == once
     if UPSTREAM is not None:
-        assert once == UPSTREAM.Elf(data).pack()
+        assert content(Elf(once)) == content(Elf(UPSTREAM.Elf(data).pack()))
 
 
 def test_bss_section_reports_sh_size_and_packs_no_bytes():
@@ -208,6 +210,20 @@ def test_local_symbol_is_inserted_before_globals():
     assert index == before
     assert symtab.sh_info == before + 1
     assert symtab.symbols[index].name == "added_local"
+
+
+def test_local_symbol_insert_renumbers_later_relocations():
+    elf = Elf(build_object())
+    local = Symbol(0, 0, 0, 0x02, 0, 4)
+    local.name = "added_local"
+    index = elf.add_symbol(local)
+    assert index == 2
+    (record,) = elf.relocations
+    assert [r.symbol_index for r in record.relocations] == [1, 3]
+
+    reparsed = Elf(elf.pack())
+    (record,) = reparsed.relocations
+    assert [r.symbol for r in record.relocations] == ["helper", "main"]
 
 
 def test_add_symbol_reuses_an_existing_name():
@@ -239,6 +255,17 @@ def test_added_section_and_symbol_survive_a_round_trip():
     assert reparsed.sections[-1].data == b"\1\2\3\4"
     assert reparsed.symtab.get_symbol_by_name("table")[1].st_size == 4
     assert reparsed.e_shnum == len(reparsed.sections)
+
+
+def test_each_section_starts_at_its_own_alignment():
+    elf = Elf(build_object())
+    elf.add_section(Section(elf.add_sh_symbol(".odd"), 1, 0, 0, 0, 0, 0, 0, 1, 0, b"x" * 5))
+    elf.add_section(Section(elf.add_sh_symbol(".aligned"), 1, 0, 0, 0, 0, 0, 0, 16, 0, b"y" * 4))
+
+    reparsed = Elf(elf.pack())
+    aligned = next(s for s in reparsed.sections if s.name == ".aligned")
+    assert aligned.sh_offset % 16 == 0
+    assert aligned.data == b"y" * 4
 
 
 def test_relocation_fields_pack_back_to_the_same_words():

@@ -38,9 +38,9 @@ def run(args, env=None):
     return result.stdout
 
 
-def configure(tmp_path):
+def configure(tmp_path, *extra):
     build = tmp_path / "build"
-    run(["cmake", "-S", str(FIXTURE), "-B", str(build), "-G", "Ninja"])
+    run(["cmake", "-S", str(FIXTURE), "-B", str(build), "-G", "Ninja", *extra])
     return build
 
 
@@ -136,3 +136,30 @@ def test_iso_directory_reconfigures_when_the_disc_is_added(tmp_path):
              if line.startswith("build build.ninja: RERUN_CMAKE")]
     assert len(rerun) == 1
     assert str(FIXTURE / "rom") in rerun[0]
+
+
+def test_missing_iso_directory_watches_its_nearest_ancestor(tmp_path):
+    ancestor = tmp_path / "discs"
+    ancestor.mkdir()
+    build = configure(tmp_path, "-DFIXTURE_ISO=%s" % (ancestor / "new" / "game.iso"))
+    rerun = [line for line in (build / "build.ninja").read_text().splitlines()
+             if line.startswith("build build.ninja: RERUN_CMAKE")]
+    assert len(rerun) == 1
+    assert str(ancestor) in rerun[0]
+    assert str(ancestor / "new") not in rerun[0]
+
+
+def test_disassemble_runs_after_setup(tmp_path):
+    build = configure(tmp_path)
+    text = (build / "build.ninja").read_text()
+    edge = [line for line in text.splitlines() if line.startswith("build disassemble: phony")]
+    assert len(edge) == 1
+    assert "setup" in edge[0]
+
+
+def test_assembler_is_an_input_of_each_assembly(tmp_path):
+    build = configure(tmp_path)
+    edges = [line for line in (build / "build.ninja").read_text().splitlines()
+             if line.startswith("build ") and "unit_c.o: CUSTOM_COMMAND" in line]
+    assert len(edges) == 1
+    assert str(FIXTURE / "tools" / "fake_as.py") in edges[0]

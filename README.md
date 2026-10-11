@@ -31,6 +31,7 @@ A project provides `kazarov.conf` at its root, and its own CMake lists, game sou
 | `KZ_DEFAULT_BUILD`, `KZ_DEFAULT_RUN` | Default configuration for `build` and `run`. |
 | `KZ_DEFAULT_BUILD_{LINUX,DARWIN,WINDOWS}`, `KZ_DEFAULT_RUN_{LINUX,DARWIN,WINDOWS}` | Per-OS defaults; these win on that OS. |
 | `KZ_WINDOWS_HOST_SCRIPT` | Optional PowerShell script for `KZ_WHERE=windows` configurations. |
+| `KZ_CONTAINER_CONFIGS` | Optional single-line, space-separated list of container configuration names. `host/kazarov.cmd` takes the first argument as a config only when it is listed here or in `KZ_WINDOWS_CONFIGS`; without this variable, any first argument not starting with `-` is taken as the config. |
 | `KZ_ENV_PASS` | Optional array of variable names to pass into the container. |
 
 It also defines `kz_config NAME`, which returns 1 for an unknown name and otherwise sets:
@@ -214,7 +215,7 @@ Do not wrap `PORT_RETURN` in a PS2-visible `if`. The PS2 build then compiles tha
 
 ## Windows
 
-- `host/kazarov.cmd ROOT build|run [config] [args...]` is the Windows entry point. `ROOT` is the project directory, and the script reads `KZ_PROJECT`, the default configurations and `KZ_WINDOWS_CONFIGS` from its `kazarov.conf`. A configuration listed in `KZ_WINDOWS_CONFIGS` runs through `KZ_WINDOWS_HOST_SCRIPT` with PowerShell. Any other configuration runs in the container, through `docker` or `podman`. `run` starts PCSX2 or the executable after the container exits.
+- `host/kazarov.cmd ROOT build|run [config] [args...]` is the Windows entry point. `ROOT` is the project directory, and the script reads `KZ_PROJECT`, the default configurations and `KZ_WINDOWS_CONFIGS` from its `kazarov.conf`. A configuration listed in `KZ_WINDOWS_CONFIGS` runs through `KZ_WINDOWS_HOST_SCRIPT` with PowerShell. A configuration listed in `KZ_CONTAINER_CONFIGS` runs in the container. A first argument in neither list is a program argument, and the default configuration is used. Arguments are forwarded as typed. Any other configuration runs in the container, through `docker` or `podman`. `run` starts PCSX2 or the executable after the container exits.
 - `.gitattributes` keeps scripts LF and `.cmd`/`.bat` files CRLF. `host/kazarov.cmd` must stay CRLF.
 - Git Bash (MSYS) runs `bin/kazarov` directly. The driver sets `MSYS_NO_PATHCONV=1` and converts mounts with `cygpath -m`.
 - Clone the project inside the WSL filesystem (`~/`), not under `/mnt/c`. Bind mounts of Windows drives are much slower for the many small reads of a build.

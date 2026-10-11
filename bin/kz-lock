@@ -6,7 +6,8 @@
 The locks are taken in sorted order, so two callers never hold them in
 opposite orders. A lock that is busy is waited for, and the wait is announced
 on stderr. Signals to kz-lock are forwarded to CMD, and kz-lock exits with
-CMD's exit code.
+CMD's exit code. Processes CMD left in its process group are ended before the
+locks are released.
 """
 
 import argparse
@@ -15,6 +16,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 
 
 def acquire(path):
@@ -29,6 +31,44 @@ def acquire(path):
     print(f'kazarov: waiting for {path}', file=sys.stderr, flush=True)
     fcntl.flock(fd, fcntl.LOCK_EX)
     return fd, True
+
+
+def group_alive(pgid):
+    """True while any process is left in the process group."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def wait_group_gone(pgid, timeout=5.0):
+    """Polls every 0.1 s for up to timeout seconds; True once the group is empty."""
+    deadline = time.monotonic() + timeout
+    while group_alive(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def end_group(pgid):
+    """SIGTERM to the group, then SIGKILL if anything survives 5 s."""
+    if not group_alive(pgid):
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    if wait_group_gone(pgid):
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    wait_group_gone(pgid)
 
 
 def main():
@@ -74,6 +114,7 @@ def main():
     signal.signal(signal.SIGINT, forward)
     signal.signal(signal.SIGTERM, forward)
     code = proc.wait()
+    end_group(proc.pid)
     for fd in fds:
         os.close(fd)
     sys.exit(128 - code if code < 0 else code)

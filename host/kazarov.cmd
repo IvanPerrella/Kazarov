@@ -16,9 +16,11 @@ for %%I in ("%~1") do set "ROOT=%%~fI"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
 set "CMD=%~2"
+rem ARG1 is compared dequoted. ARG1RAW is forwarded as typed, so it is never expanded twice.
 set "ARG1=%~3"
+set "ARG1RAW=%3"
 
-rem The first config slot is ARG1. Forward the rest by hand, since shift does not move %*.
+rem Forward the rest by hand, since shift does not move %*.
 shift
 shift
 shift
@@ -43,6 +45,7 @@ call :readvar KZ_DEFAULT_RUN
 call :readvar KZ_DEFAULT_RUN_WINDOWS
 call :readvar KZ_WINDOWS_HOST_SCRIPT
 call :readvar KZ_WINDOWS_CONFIGS
+call :readvar KZ_CONTAINER_CONFIGS
 
 rem The Windows default is the per-OS default, then the generic one.
 set "DEFCFG=%KZ_DEFAULT_BUILD_WINDOWS%"
@@ -50,16 +53,23 @@ if /i "%CMD%"=="run" set "DEFCFG=%KZ_DEFAULT_RUN_WINDOWS%"
 if not defined DEFCFG if /i "%CMD%"=="build" set "DEFCFG=%KZ_DEFAULT_BUILD%"
 if not defined DEFCFG if /i "%CMD%"=="run" set "DEFCFG=%KZ_DEFAULT_RUN%"
 
-rem The config is the first argument, or the default when none is given. A first argument
-rem that starts with - is a program argument: it goes back into REST and the default is used.
-set "CHK=%ARG1%"
-set "FIRST=%ARG1:~0,1%"
-if "%FIRST%"=="-" set "REST=%ARG1% %REST%"
-if "%FIRST%"=="-" set "ARG1="
-if "%FIRST%"=="-" set "CHK="
-if not defined CHK set "CHK=%DEFCFG%"
+rem ARG1 is the config when it names one listed in KZ_WINDOWS_CONFIGS or KZ_CONTAINER_CONFIGS.
+rem Otherwise it is a program argument or target: it goes back into REST, and the default config is used.
+rem Without KZ_CONTAINER_CONFIGS, any ARG1 that does not start with - is the container config.
 set "ISWIN="
-if defined KZ_WINDOWS_CONFIGS if defined CHK for %%c in (%KZ_WINDOWS_CONFIGS%) do if /i "%%c"=="%CHK%" set "ISWIN=1"
+set "ISCTR="
+set "SLOT="
+set "CFG="
+if defined ARG1 if defined KZ_WINDOWS_CONFIGS for %%c in (%KZ_WINDOWS_CONFIGS%) do if /i "%%c"=="%ARG1%" set "ISWIN=1"
+if defined ARG1 if defined KZ_CONTAINER_CONFIGS for %%c in (%KZ_CONTAINER_CONFIGS%) do if /i "%%c"=="%ARG1%" set "ISCTR=1"
+if defined ARG1 if not defined KZ_CONTAINER_CONFIGS if not "%ARG1:~0,1%"=="-" set "ISCTR=1"
+if defined ISWIN set "CFG=%ARG1RAW%"
+if defined ISWIN goto :windows
+if defined ISCTR set "SLOT=%ARG1RAW%"
+if defined ISCTR goto :container
+if defined ARG1 set "REST=%ARG1RAW% %REST%"
+set "CFG=%DEFCFG%"
+if defined KZ_WINDOWS_CONFIGS if defined CFG for %%c in (%KZ_WINDOWS_CONFIGS%) do if /i "%%c"=="%CFG%" set "ISWIN=1"
 if defined ISWIN goto :windows
 goto :container
 
@@ -76,7 +86,7 @@ if not defined PS (
   exit /b 1
 )
 pushd "%ROOT%"
-"%PS%" -NoProfile -File "%ROOT%\%KZ_WINDOWS_HOST_SCRIPT%" %CMD% %CHK% %REST%
+"%PS%" -NoProfile -File "%ROOT%\%KZ_WINDOWS_HOST_SCRIPT%" %CMD% %CFG% %REST%
 set "RC=%errorlevel%"
 popd
 exit /b %RC%
@@ -132,7 +142,7 @@ if not defined IMGID (
 rem The run descriptor is written inside the project so the host can read it back.
 if not exist "%ROOT%\.kazarov" mkdir "%ROOT%\.kazarov"
 set "DESC=run-%RANDOM%%RANDOM%.txt"
-"%BLD%" run --rm --init -v "%ROOT%:/work/%KZ_PROJECT%" -w "/work/%KZ_PROJECT%" -e HOME=/tmp -e KZ_HOST_OS=windows -e CLEAN -e JOBS -e KZ_RUN_OUT=.kazarov/%DESC% "%IMGID%" tools/kazarov/bin/kazarov --inside %CMD% %ARG1% %REST%
+"%BLD%" run --rm --init -v "%ROOT%:/work/%KZ_PROJECT%" -w "/work/%KZ_PROJECT%" -e HOME=/tmp -e KZ_HOST_OS=windows -e CLEAN -e JOBS -e KZ_RUN_OUT=.kazarov/%DESC% "%IMGID%" tools/kazarov/bin/kazarov --inside %CMD% %SLOT% %REST%
 set "RC=%errorlevel%"
 if not "%RC%"=="0" exit /b %RC%
 

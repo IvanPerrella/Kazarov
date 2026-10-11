@@ -126,3 +126,39 @@ def test_sigterm_reaches_the_commands_children(tmp_path):
     while not _gone(grandchild) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert _gone(grandchild)
+
+
+def test_grandchild_left_behind_by_a_normal_exit_is_ended_before_unlock(tmp_path):
+    pid_file = tmp_path / 'left.pid'
+    child = ('import subprocess, sys\n'
+             'g = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])\n'
+             'open(sys.argv[1], "w").write(str(g.pid))\n')
+    result = subprocess.run(
+        [sys.executable, str(KZ_LOCK), '--lock', str(tmp_path / 'left.lock'), '--',
+         sys.executable, '-c', child, str(pid_file)],
+        timeout=30)
+    assert result.returncode == 0
+    assert _gone(int(pid_file.read_text()))
+
+
+def test_grandchild_ignoring_sigterm_is_killed_after_the_wait(tmp_path):
+    pid_file = tmp_path / 'stubborn.pid'
+    ready = tmp_path / 'ready'
+    grandchild = ('import signal, sys, time\n'
+                  'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+                  'open(sys.argv[1], "w").close()\n'
+                  'time.sleep(60)\n')
+    child = ('import os, subprocess, sys, time\n'
+             'g = subprocess.Popen([sys.executable, "-c", sys.argv[2], sys.argv[3]])\n'
+             'open(sys.argv[1], "w").write(str(g.pid))\n'
+             'while not os.path.exists(sys.argv[3]):\n'
+             '    time.sleep(0.01)\n')
+    start = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, str(KZ_LOCK), '--lock', str(tmp_path / 'stubborn.lock'), '--',
+         sys.executable, '-c', child, str(pid_file), grandchild, str(ready)],
+        timeout=30)
+    waited = time.monotonic() - start
+    assert result.returncode == 0
+    assert waited >= 5.0
+    assert _gone(int(pid_file.read_text()))

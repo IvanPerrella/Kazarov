@@ -55,14 +55,23 @@ kz_sha256() {
     fi
 }
 
-# Twelve hex digits over the path and content of each file of image/ that git
-# knows, tracked or not, in byte order. A missing file hashes as "missing".
+# The permission bits of a file, octal. stat -f is the BSD form.
+kz_file_mode() {
+    stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
+
+# Twelve hex digits over the path, mode and content of each file of image/ that git
+# knows, tracked, untracked or ignored, in byte order; Python bytecode is skipped.
+# A missing file hashes as "missing".
 kz_image_content_hash() {
     local f
-    git -C "$KZ_ROOT" ls-files -co --exclude-standard -z -- image | LC_ALL=C sort -z |
+    git -C "$KZ_ROOT" ls-files -co -z -- image | LC_ALL=C sort -z |
     while IFS= read -r -d '' f; do
+        case $f in
+            */__pycache__/*|*.pyc) continue ;;
+        esac
         if [ -f "$KZ_ROOT/$f" ]; then
-            printf '%s %s\n' "$(kz_sha256 < "$KZ_ROOT/$f")" "$f"
+            printf '%s %s %s\n' "$(kz_sha256 < "$KZ_ROOT/$f")" "$(kz_file_mode "$KZ_ROOT/$f")" "$f"
         else
             printf 'missing %s\n' "$f"
         fi
