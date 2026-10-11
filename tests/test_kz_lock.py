@@ -162,3 +162,60 @@ def test_grandchild_ignoring_sigterm_is_killed_after_the_wait(tmp_path):
     assert result.returncode == 0
     assert waited >= 5.0
     assert _gone(int(pid_file.read_text()))
+
+
+def _hold(lock, mode, seconds):
+    """A kz-lock holder that prints 'ready' once it holds the lock, then sleeps."""
+    args = ['--shared'] if mode == 'shared' else []
+    return subprocess.Popen(
+        [sys.executable, str(KZ_LOCK), *args, '--lock', str(lock), '--',
+         sys.executable, '-c', f'import time; print("ready", flush=True); time.sleep({seconds})'],
+        stdout=subprocess.PIPE, text=True)
+
+
+def _run_timed(lock, mode):
+    args = ['--shared'] if mode == 'shared' else []
+    start = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, str(KZ_LOCK), *args, '--lock', str(lock), '--', 'true'],
+        capture_output=True, text=True)
+    return result, time.monotonic() - start
+
+
+def test_two_shared_holders_run_concurrently(tmp_path):
+    lock = tmp_path / 'shared.lock'
+    holder = _hold(lock, 'shared', 3)
+    try:
+        assert holder.stdout.readline().strip() == 'ready'
+        result, waited = _run_timed(lock, 'shared')
+    finally:
+        holder.wait(timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert waited < 1.5
+    assert 'waiting' not in result.stderr
+
+
+def test_exclusive_waits_for_shared_holders(tmp_path):
+    lock = tmp_path / 'mixed.lock'
+    holder = _hold(lock, 'shared', 1.0)
+    try:
+        assert holder.stdout.readline().strip() == 'ready'
+        result, waited = _run_timed(lock, 'exclusive')
+    finally:
+        holder.wait(timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert waited >= 0.5
+    assert result.stderr.count(f'kazarov: waiting for {lock}') == 1
+
+
+def test_shared_waits_for_an_exclusive_holder(tmp_path):
+    lock = tmp_path / 'mixed2.lock'
+    holder = _hold(lock, 'exclusive', 1.0)
+    try:
+        assert holder.stdout.readline().strip() == 'ready'
+        result, waited = _run_timed(lock, 'shared')
+    finally:
+        holder.wait(timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert waited >= 0.5
+    assert result.stderr.count(f'kazarov: waiting for {lock}') == 1

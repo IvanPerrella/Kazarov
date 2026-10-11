@@ -9,7 +9,7 @@ It builds PS2 executables from the original game disc with the Metrowerks MWCC c
 ```
 bin/            kazarov (driver), kz-* helper tools
 lib/            config.sh and host.sh, sourced by bin/kazarov
-host/           kazarov.cmd, the Windows entry point
+host/           kazarov.cmd and kazarov.ps1, the Windows entry point; kazarov-quote.ps1 is its argument quoting
 cmake/          Kazarov.cmake and the modules it includes
 image/          Dockerfile and the MWCC debugging tools
 include/kazarov/port.h
@@ -54,7 +54,7 @@ Optional hooks, run with the project root as the working directory:
 
 - `kz_after_build` runs inside the container, after the default targets only.
 - `kz_after_run_build` runs inside, after the run targets. A failure here is reported and does not stop the run.
-- `kz_before_launch` runs on the host, before an executable starts.
+- `kz_before_launch` runs on the host, in the project root, before an executable starts. It may set `KZ_LAUNCH_PREFIX`, an array of command words (for example a lock wrapper) put in front of the executable: the launch is `exec "${KZ_LAUNCH_PREFIX[@]}" <exe> "$@"`. It is empty unless the hook sets it.
 
 A minimal example:
 
@@ -120,7 +120,7 @@ Inside the container the driver also reads `KZ_PROJECT_ROOT`, `KZ_HOST_OS` and `
 
 All are Python 3 with the standard library, except `kazarov` and `kz-pcsx2`, which are bash.
 
-- `kz-lock [--lock FILE]... [--message TEXT] -- CMD...` takes the exclusive `flock` locks in sorted order, announces a wait once, runs CMD in its own process group, forwards SIGINT and SIGTERM to the group, and exits with CMD's status.
+- `kz-lock [--shared] [--lock FILE]... [--message TEXT] -- CMD...` takes the `flock` locks in sorted order, exclusive unless `--shared` is given (shared holders run together and wait only for an exclusive one), announces a wait once, runs CMD in its own process group, forwards SIGINT and SIGTERM to the group, and exits with CMD's status.
 - `kz-extract --iso ISO --checksum FILE --out DIR --id-file FILE [--force]` extracts the disc's files into `DIR/iso`. It checks the image against the sha256 checksum file, and records a state file (the id file name without `.id`, plus `.json`) with the image size, mtime, sha256, extractor version and each file's size. When nothing changed, it touches nothing. The id file changes only when the content id (sha256 and version) changes. Writes are atomic.
 - `kz-split-stamp snapshot DIR SNAP` and `kz-split-stamp restore DIR SNAP STAMP` keep a split's output mtimes steady when a re-split changes nothing. The stamp is rewritten only when the content hash changes.
 - `kz-cached --stamp FILE --input PATH... -- CMD...` runs CMD only when a command line or an input's size or mtime has changed. The stamp is written after success and removed after failure.

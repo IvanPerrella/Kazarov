@@ -21,9 +21,30 @@ if ($trimmedRoot) { $Root = $trimmedRoot } else { $Root = $fullRoot }
 
 if ($null -eq $Rest) { $Rest = @() }
 
+. (Join-Path $PSScriptRoot 'kazarov-quote.ps1')
+
 function Fail([string]$Message) {
     [Console]::Error.WriteLine("kazarov: $Message")
     exit 1
+}
+
+# Runs a native program with an argument array, leaving the output on the console and its exit code in
+# $script:NativeExit. Windows PowerShell 5.1 joins the array without quoting, so there the command line
+# is quoted by ConvertTo-WindowsArgument and the program is started as a process.
+function Invoke-Native([string]$FilePath, [string[]]$NativeArgs) {
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        & $FilePath @NativeArgs
+        $script:NativeExit = $LASTEXITCODE
+        return
+    }
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FilePath
+    $psi.Arguments = (@($NativeArgs | ForEach-Object { ConvertTo-WindowsArgument $_ })) -join ' '
+    $psi.UseShellExecute = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if ($null -eq $proc) { Fail "cannot start $FilePath" }
+    $proc.WaitForExit()
+    $script:NativeExit = $proc.ExitCode
 }
 
 # Words of a space-separated configuration list.
@@ -111,9 +132,9 @@ function Invoke-Container([string]$Config, [string[]]$ContainerArgs) {
     }
     if ($need) {
         $imageDir = Join-Path $Kz 'image'
-        & $bld build --platform linux/amd64 --build-arg "KZ_IMAGE_ID=$tag" `
-            --label "org.themoonpeople.kazarov.image=$tag" -t $img $imageDir
-        if ($LASTEXITCODE -ne 0) { Fail 'image build failed' }
+        Invoke-Native $bld @('build', '--platform', 'linux/amd64', '--build-arg', "KZ_IMAGE_ID=$tag",
+            '--label', "org.themoonpeople.kazarov.image=$tag", '-t', $img, $imageDir)
+        if ($script:NativeExit -ne 0) { Fail 'image build failed' }
     }
 
     # The container runs the image ID, not the tag, so it is the image that was just ensured.
@@ -138,8 +159,8 @@ function Invoke-Container([string]$Config, [string[]]$ContainerArgs) {
         $imgId, 'tools/kazarov/bin/kazarov', '--inside', $Command)
     if ($Config) { $runArgs += $Config }
     $runArgs += $ContainerArgs
-    & $bld @runArgs
-    $rc = $LASTEXITCODE
+    Invoke-Native $bld $runArgs
+    $rc = $script:NativeExit
     if ($rc -ne 0) { exit $rc }
 
     if ($Command -ne 'run') { exit 0 }
@@ -152,20 +173,15 @@ function Invoke-Container([string]$Config, [string[]]$ContainerArgs) {
         $pcsx2 = Find-Pcsx2
         if (-not $pcsx2) { Fail 'pcsx2-qt.exe not found: set PCSX2 or install PCSX2' }
         $target = Join-Path $Root $dline.Substring(4)
-        # Windows PowerShell 5.1 does not quote an argument array, so the path is quoted by hand there.
-        if ($PSVersionTable.PSEdition -eq 'Core') {
-            $pcsxArgs = @('-fastboot', '--', $target)
-        }
-        else {
-            $pcsxArgs = @('-fastboot', '--', ('"{0}"' -f $target))
-        }
+        # One command-line string, so the path is quoted the same way in every PowerShell edition.
+        $pcsxArgs = '-fastboot -- ' + (ConvertTo-WindowsArgument $target)
         Start-Process -FilePath $pcsx2 -ArgumentList $pcsxArgs | Out-Null
         exit 0
     }
     if ($dline.StartsWith('exe:')) {
         $target = Join-Path $Root $dline.Substring(4)
-        & $target
-        exit $LASTEXITCODE
+        Invoke-Native $target $ContainerArgs
+        exit $script:NativeExit
     }
     Fail 'unreadable run descriptor'
 }
@@ -210,4 +226,5 @@ if ($useContainer) { Invoke-Container $arg1 $tail }
 if ($defaultCfg -and ($windowsConfigs -contains $defaultCfg)) {
     Invoke-WindowsHost $defaultCfg $Rest
 }
-Invoke-Container '' $Rest
+if (-not $defaultCfg) { Fail "no default $Command configuration for this OS" }
+Invoke-Container $defaultCfg $Rest

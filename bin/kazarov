@@ -80,10 +80,13 @@ kz_launch() {
                 echo "kazarov: $KZ_CONFIG runs on $KZ_RUN_OS, not on this host" >&2
                 exit 1
             fi
+            # kz_before_launch may set KZ_LAUNCH_PREFIX, an array of command words put in front of the program.
+            # It runs in this shell, not a subshell, so the array survives to the exec.
+            KZ_LAUNCH_PREFIX=()
             if declare -F kz_before_launch >/dev/null; then
-                (cd "$KZ_PROJECT_ROOT" && kz_before_launch)
+                cd "$KZ_PROJECT_ROOT" && kz_before_launch
             fi
-            exec "$(kz_abs "$path")" "$@" ;;
+            exec ${KZ_LAUNCH_PREFIX[@]+"${KZ_LAUNCH_PREFIX[@]}"} "$(kz_abs "$path")" "$@" ;;
         *)
             echo "kazarov: bad run descriptor in $desc" >&2
             exit 1 ;;

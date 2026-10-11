@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Run a command while holding exclusive flock locks.
+"""Run a command while holding flock locks, exclusive unless --shared is given.
 
-    kz-lock [--lock FILE]... [--message TEXT] -- CMD [ARG...]
+    kz-lock [--shared] [--lock FILE]... [--message TEXT] -- CMD [ARG...]
 
-The locks are taken in sorted order, so two callers never hold them in
-opposite orders. A lock that is busy is waited for, and the wait is announced
-on stderr. Signals to kz-lock are forwarded to CMD, and kz-lock exits with
+With --shared every lock is taken shared, so shared holders run together and
+wait only for an exclusive holder. The locks are taken in sorted order, so two
+callers never hold them in opposite orders. A lock that is busy is waited for,
+and the wait is announced on stderr. Signals to kz-lock are forwarded to CMD, and kz-lock exits with
 CMD's exit code. Processes CMD left in its process group are ended before the
 locks are released.
 """
@@ -19,17 +20,18 @@ import sys
 import time
 
 
-def acquire(path):
+def acquire(path, shared):
     """Take one lock; returns the file descriptor and whether the wait was needed."""
+    mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, mode | fcntl.LOCK_NB)
         return fd, False
     except BlockingIOError:
         pass
     print(f'kazarov: waiting for {path}', file=sys.stderr, flush=True)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    fcntl.flock(fd, mode)
     return fd, True
 
 
@@ -74,9 +76,10 @@ def end_group(pgid):
 def main():
     argv = sys.argv[1:]
     if '--' not in argv:
-        sys.exit('usage: kz-lock [--lock FILE]... [--message TEXT] -- CMD [ARG...]')
+        sys.exit('usage: kz-lock [--shared] [--lock FILE]... [--message TEXT] -- CMD [ARG...]')
     split = argv.index('--')
-    parser = argparse.ArgumentParser(description='Run a command under exclusive locks.')
+    parser = argparse.ArgumentParser(description='Run a command under flock locks.')
+    parser.add_argument('--shared', action='store_true', help='take the locks shared, not exclusive')
     parser.add_argument('--lock', action='append', default=[], metavar='FILE')
     parser.add_argument('--message', metavar='TEXT', help='printed once when a lock is waited for')
     args = parser.parse_args(argv[:split])
@@ -88,7 +91,7 @@ def main():
     waited = False
     try:
         for path in sorted({os.path.abspath(p) for p in args.lock}):
-            fd, did_wait = acquire(path)
+            fd, did_wait = acquire(path, args.shared)
             fds.append(fd)
             if did_wait and not waited and args.message:
                 print(f'kazarov: {args.message}', file=sys.stderr, flush=True)
