@@ -87,6 +87,7 @@ RUN apt-get update \
         doxygen \
         libsdl3-dev \
         libvulkan-dev \
+        mesa-vulkan-drivers \
         nlohmann-json3-dev \
         glslang-tools \
         libgtest-dev \
