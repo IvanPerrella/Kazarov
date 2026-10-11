@@ -30,6 +30,23 @@ int PumpFromTick(int) {
     return 0;
 }
 
+bool g_pumping_in_tick;
+bool g_pumping_in_hook;
+bool g_pumping_in_idle;
+
+int RecordPumpingInTick(int) {
+    g_pumping_in_tick = ClockPumping();
+    return 0;
+}
+
+void RecordPumpingInHook() {
+    g_pumping_in_hook = ClockPumping();
+}
+
+void RecordPumpingInIdle() {
+    g_pumping_in_idle = ClockPumping();
+}
+
 void Start(double hertz, bool unbounded) {
     ClockSetTickRate(hertz);
     ClockSetUnbounded(unbounded);
@@ -82,6 +99,25 @@ TEST(PlatformClock, PumpIsNotReentrant) {
     ASSERT_TRUE(g_ticks == 1);
     ASSERT_TRUE(g_pumps_inside == 1);
     ASSERT_TRUE(ClockGetTickCallback() == PumpFromTick);
+}
+
+TEST(PlatformClock, PumpingFlagCoversCallbackAndHooks) {
+    Start(50.0, true);
+    ClockAddPumpHook(RecordPumpingInHook);
+    ClockSetTickCallback(RecordPumpingInTick);
+    ClockSetIdleHook(RecordPumpingInIdle);
+    g_pumping_in_tick = false;
+    g_pumping_in_hook = false;
+    g_pumping_in_idle = false;
+    ASSERT_TRUE(!ClockPumping());
+    ASSERT_TRUE(ClockPump() == 1);
+    ASSERT_TRUE(g_pumping_in_tick);
+    ASSERT_TRUE(g_pumping_in_hook);
+    ASSERT_TRUE(g_pumping_in_idle);
+    ASSERT_TRUE(!ClockPumping());
+    ClockRemovePumpHook(RecordPumpingInHook);
+    ClockSetTickCallback(nullptr);
+    ClockSetIdleHook(nullptr);
 }
 
 TEST(PlatformClock, RateChangeKeepsCount) {

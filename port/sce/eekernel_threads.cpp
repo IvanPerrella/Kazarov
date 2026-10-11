@@ -2,6 +2,8 @@
 
 #include "threads.hpp"
 
+#include "platform/clock.hpp"
+
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -199,6 +201,11 @@ void Run(Scheduler &s, Thread *next) {
     next->state = State::Running;
     s.running = next;
     if (next != prev) {
+        // A switch inside ClockPump would leave its guard set on this stack and run host code on another one.
+        if (ClockPumping()) {
+            std::fprintf(stderr, "eekernel_threads: thread switch inside ClockPump (a tick callback or pump hook called a switching kernel call)\n");
+            std::abort();
+        }
         ContextSwitch(prev->context, next->context);
     }
 }
@@ -392,4 +399,52 @@ int SignalSema(int sema_id) {
     }
     ++sema->count;
     return sema_id;
+}
+
+namespace {
+
+// There are no asynchronous interrupts on the host: the VSync handler runs synchronously inside ClockPump,
+// so the flag only has to report and restore the state the game expects.
+bool g_interrupts_enabled = true;
+
+} // namespace
+
+int DIntr(void) {
+    const int previous = g_interrupts_enabled ? 1 : 0;
+    g_interrupts_enabled = false;
+    return previous;
+}
+
+int EIntr(...) {
+    const int previous = g_interrupts_enabled ? 1 : 0;
+    g_interrupts_enabled = true;
+    return previous;
+}
+
+int AddIntcHandler(int cause, int (*handler)(int), int next) {
+    PS2_UNIMPLEMENTED();
+}
+
+int RemoveIntcHandler(int cause, int handler) {
+    PS2_UNIMPLEMENTED();
+}
+
+int EnableIntc(int cause) {
+    PS2_UNIMPLEMENTED();
+}
+
+int AddDmacHandler(int channel, int (*handler)(int), int next) {
+    PS2_UNIMPLEMENTED();
+}
+
+int RemoveDmacHandler(int channel, int handler) {
+    PS2_UNIMPLEMENTED();
+}
+
+int EnableDmac(int channel) {
+    PS2_UNIMPLEMENTED();
+}
+
+int DisableDmac(int channel) {
+    PS2_UNIMPLEMENTED();
 }

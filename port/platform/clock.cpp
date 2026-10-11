@@ -159,6 +159,10 @@ std::int64_t ClockPump() {
     return g_clock.count;
 }
 
+bool ClockPumping() {
+    return g_clock.pumping;
+}
+
 void ClockWaitNextTick() {
     if (g_clock.unbounded) {
         return;

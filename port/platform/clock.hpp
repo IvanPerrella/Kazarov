@@ -65,6 +65,9 @@ void ClockRemovePumpHook(ClockIdleHook hook);
 
 std::int64_t ClockPump();
 
+// True while ClockPump runs the tick callback or a hook. Code that switches stacks must not run then.
+bool ClockPumping();
+
 void ClockWaitNextTick();
 
 // The same wait, running hook until it is done or the next tick is due. Unbounded, it returns at
