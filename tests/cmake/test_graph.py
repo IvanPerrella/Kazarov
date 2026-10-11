@@ -1,0 +1,113 @@
+"""Ninja graph checks for cmake/Kazarov.cmake, on the fixture in fixture/.
+
+Each test configures the fixture into its own build directory, with the fake compiler and
+assembler, and asks ninja what it would do. Skipped while kz-mwcc, kz-mwcc-exec or
+kz-split-stamp is not in bin/.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
+FIXTURE = HERE / "fixture"
+BIN = ROOT / "bin"
+NEEDED_TOOLS = ("kz-mwcc", "kz-mwcc-exec", "kz-split-stamp")
+DESCRIPTION = re.compile(r"^\[\d+/\d+\] (.*)$", re.M)
+
+
+@pytest.fixture(autouse=True)
+def require_tools():
+    missing = [name for name in NEEDED_TOOLS if not (BIN / name).is_file()]
+    if missing:
+        pytest.skip("not present yet in bin/: " + ", ".join(missing))
+    for tool in ("cmake", "ninja"):
+        if shutil.which(tool) is None:
+            pytest.skip(tool + " is not on PATH")
+
+
+def run(args, env=None):
+    result = subprocess.run(args, capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout
+
+
+def configure(tmp_path):
+    build = tmp_path / "build"
+    run(["cmake", "-S", str(FIXTURE), "-B", str(build), "-G", "Ninja"])
+    return build
+
+
+def build_all(build, env=None):
+    run(["ninja", "-C", str(build)], env=env)
+
+
+def pending(build):
+    """What ninja would run now, one description per edge."""
+    out = run(["ninja", "-C", str(build), "-n"])
+    if "no work to do" in out:
+        return []
+    return DESCRIPTION.findall(out)
+
+
+def touch(path):
+    os.utime(path, None)
+
+
+def test_second_build_is_a_no_op(tmp_path):
+    build = configure(tmp_path)
+    build_all(build)
+    assert "no work to do" in run(["ninja", "-C", str(build), "-n"])
+
+
+def test_private_header_rebuilds_exactly_one_object(tmp_path):
+    build = configure(tmp_path)
+    build_all(build)
+    touch(FIXTURE / "src" / "a_private.h")
+    assert pending(build) == ["CC src/a.c"]
+
+
+def test_shared_header_rebuilds_both_compiled_objects(tmp_path):
+    build = configure(tmp_path)
+    build_all(build)
+    touch(FIXTURE / "src" / "shared.h")
+    assert sorted(pending(build)) == ["CC src/a.c", "CC src/b.c"]
+
+
+def test_raw_object_rebuilds_only_for_its_source(tmp_path):
+    build = configure(tmp_path)
+    build_all(build)
+    touch(FIXTURE / "src" / "c.c")
+    assert pending(build) == ["CC src/c.c"]
+
+
+def test_touching_a_post_tool_rebuilds_both_objects(tmp_path):
+    build = configure(tmp_path)
+    build_all(build)
+    touch(FIXTURE / "tools" / "post.py")
+    assert sorted(pending(build)) == ["CC src/a.c", "CC src/b.c"]
+
+
+def test_split_restore_leaves_objects_up_to_date(tmp_path):
+    build = configure(tmp_path)
+    build_all(build)
+    # Forces the split: it rewrites unit_c.s with the same content, and the restore step
+    # must put the old mtimes back so the assembled object is not stale.
+    run(["ninja", "-C", str(build), "disassemble"])
+    assert pending(build) == []
+
+
+def test_split_content_change_reassembles_only_that_unit(tmp_path):
+    build = configure(tmp_path)
+    build_all(build)
+    env = dict(os.environ, FIXTURE_VARIANT="2")
+    run(["ninja", "-C", str(build), "disassemble"], env=env)
+    descriptions = pending(build)
+    assert len(descriptions) == 1
+    assert descriptions[0].startswith("AS ") and descriptions[0].endswith("unit_c.s")

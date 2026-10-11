@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Run a command while holding exclusive flock locks.
+
+    kz-lock [--lock FILE]... [--message TEXT] -- CMD [ARG...]
+
+The locks are taken in sorted order, so two callers never hold them in
+opposite orders. A lock that is busy is waited for, and the wait is announced
+on stderr. Signals to kz-lock are forwarded to CMD, and kz-lock exits with
+CMD's exit code.
+"""
+
+import argparse
+import fcntl
+import os
+import signal
+import subprocess
+import sys
+
+
+def acquire(path):
+    """Take one lock; returns the file descriptor and whether the wait was needed."""
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd, False
+    except BlockingIOError:
+        pass
+    print(f'kazarov: waiting for {path}', file=sys.stderr, flush=True)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd, True
+
+
+def main():
+    argv = sys.argv[1:]
+    if '--' not in argv:
+        sys.exit('usage: kz-lock [--lock FILE]... [--message TEXT] -- CMD [ARG...]')
+    split = argv.index('--')
+    parser = argparse.ArgumentParser(description='Run a command under exclusive locks.')
+    parser.add_argument('--lock', action='append', default=[], metavar='FILE')
+    parser.add_argument('--message', metavar='TEXT', help='printed once when a lock is waited for')
+    args = parser.parse_args(argv[:split])
+    command = argv[split + 1:]
+    if not command:
+        sys.exit('kz-lock: no command given after --')
+
+    fds = []
+    waited = False
+    try:
+        for path in sorted({os.path.abspath(p) for p in args.lock}):
+            fd, did_wait = acquire(path)
+            fds.append(fd)
+            if did_wait and not waited and args.message:
+                print(f'kazarov: {args.message}', file=sys.stderr, flush=True)
+            waited = waited or did_wait
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+    try:
+        proc = subprocess.Popen(command)
+    except OSError as err:
+        sys.exit(f'kz-lock: cannot run {command[0]}: {err.strerror}')
+
+    def forward(signum, _frame):
+        proc.send_signal(signum)
+
+    signal.signal(signal.SIGINT, forward)
+    signal.signal(signal.SIGTERM, forward)
+    code = proc.wait()
+    for fd in fds:
+        os.close(fd)
+    sys.exit(128 - code if code < 0 else code)
+
+
+if __name__ == '__main__':
+    main()
