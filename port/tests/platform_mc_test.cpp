@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "platform/paths.hpp"
+#include "sce/sdk_params.hpp"
 #include "platform_fixture.hpp"
 
 // libmc on a save root in a temporary directory.
@@ -92,7 +93,7 @@ TEST(PlatformMc, SyncReportsCommandCodes) {
     ASSERT_TRUE(sceMcSync(MC_WAIT, &cmd, &result) == 1);
 
     unsigned char table[4][0x40] = {};
-    ASSERT_TRUE(sceMcGetDir(0, 0, (char *) "*", 0, 4, table) == 0);
+    ASSERT_TRUE(sceMcGetDir(0, 0, (char *) "*", 0, 4, reinterpret_cast<SdkParams<decltype(sceMcGetDir)>::At<5>>(table)) == 0);
     ASSERT_TRUE(sceMcSync(MC_WAIT, &cmd, &result) == 1 && cmd == 0xD && result == 3);
     ASSERT_TRUE(std::strcmp(reinterpret_cast<char *>(table[0] + 0x20), ".") == 0);
     ASSERT_TRUE(std::strcmp(reinterpret_cast<char *>(table[1] + 0x20), "..") == 0);
@@ -154,7 +155,7 @@ TEST(PlatformMc, WindowsPathsCannotEscapeCardRoot) {
         rejected(sceMcChdir(0, 0, dir.data(), nullptr));
         std::string   listing = dir + "/*";
         unsigned char table[4][0x40] = {};
-        rejected(sceMcGetDir(0, 0, listing.data(), 0, 4, table));
+        rejected(sceMcGetDir(0, 0, listing.data(), 0, 4, reinterpret_cast<SdkParams<decltype(sceMcGetDir)>::At<5>>(table)));
         dir = prefix + "new-directory";
         rejected(sceMcMkdir(0, 0, dir.data()));
         ASSERT_EQ(ReadFile(root / "sentinel.bin"), sentinel);

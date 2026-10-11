@@ -12,3 +12,11 @@ void iSyncDCache(void *start, void *end) {}
 void Exit(int status) {
     std::exit(status);
 }
+
+int ChangeThreadPriority(int thread_id, int priority) {
+    return 0;
+}
+
+int GetThreadId(void) {
+    return 0;
+}

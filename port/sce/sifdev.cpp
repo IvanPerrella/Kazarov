@@ -1,5 +1,7 @@
-#include <fcntl.h>
+// Host headers define st_ctime/st_atime/st_mtime as macros that would rewrite sce_stat's members.
 #include <sifdev.h>
+
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -87,7 +89,7 @@ bool Known(int fd) {
 
 void sceFsReset() {}
 
-int sceOpen(const char *name, int flags) {
+int sceOpen(const char *name, int flags, ...) {
     fs::path path;
     if (!HostPath(name, path)) {
         return -ENOENT;
@@ -138,4 +140,12 @@ int sceWrite(int fd, void *buffer, int size) {
     }
     ssize_t result = ::write(fd, buffer, static_cast<std::size_t>(std::max(size, 0)));
     return result < 0 ? -errno : static_cast<int>(result);
+}
+
+int sceGetstat(const char *name, struct sce_stat *stat) {
+    PS2_UNIMPLEMENTED();
+}
+
+int sceIoctl(int fd, int request, void *argument) {
+    PS2_UNIMPLEMENTED();
 }

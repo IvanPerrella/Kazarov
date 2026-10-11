@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "platform/input.hpp"
+#include "sdk_params.hpp"
 
 namespace {
 
@@ -15,6 +16,8 @@ constexpr int           kTerminalId = kDualShockId >> 4;
 constexpr int           kReadLength = 2 + (kDualShockId & 0x0F) * 2;
 constexpr int           kActuatorCount = 2;
 constexpr int           kReadBufferSize = 32;
+
+using PadPortBuffer = SdkParams<decltype(scePadPortOpen)>::At<2>;
 
 std::array<bool, kInputPadCount> g_open;
 
@@ -29,7 +32,7 @@ int scePadInit(int mode) {
     return 1;
 }
 
-int scePadPortOpen(int port, int slot, void *buffer) {
+int scePadPortOpen(int port, int slot, PadPortBuffer buffer) {
     if (port < 0 || port >= kInputPadCount) {
         return 0;
     }
@@ -90,4 +93,12 @@ int scePadSetActDirect(int port, int slot, unsigned char *values) {
     }
     InputSetRumble(port, {values[0] != 0, values[1]});
     return 1;
+}
+
+int scePadEnd(void) {
+    PS2_UNIMPLEMENTED();
+}
+
+int scePadPortClose(int port, int slot) {
+    PS2_UNIMPLEMENTED();
 }

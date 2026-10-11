@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "platform/paths.hpp"
+#include "sdk_params.hpp"
 
 // Each card is a directory, <save root>/mc0 and mc1, and every command
 // finishes inside the call that issues it. The game still sees libmc's
@@ -31,6 +32,13 @@ constexpr int kMaxFiles = 16;
 constexpr int kFreeClusters = 8000;
 
 constexpr int kResultNoCard = -10;
+
+using McOpenName = SdkParams<decltype(sceMcOpen)>::At<2>;
+using McChdirName = SdkParams<decltype(sceMcChdir)>::At<2>;
+using McMkdirName = SdkParams<decltype(sceMcMkdir)>::At<2>;
+using McGetDirName = SdkParams<decltype(sceMcGetDir)>::At<2>;
+using McGetDirMode = SdkParams<decltype(sceMcGetDir)>::At<3>;
+using McGetDirTable = SdkParams<decltype(sceMcGetDir)>::At<5>;
 
 enum McFunction {
     kFuncGetInfo = 0x01,
@@ -292,7 +300,7 @@ int sceMcGetInfo(int port, int slot, int *type, int *free_size, int *formatted) 
     return Finish(kFuncGetInfo, g_cards[port].unformatted ? sceMcResNoFormat : sceMcResSucceed);
 }
 
-int sceMcOpen(int port, int slot, char *name, int flag) {
+int sceMcOpen(int port, int slot, McOpenName name, int flag) {
     if (!ValidPort(port)) {
         return -1;
     }
@@ -380,7 +388,7 @@ int sceMcFlush(int fd) {
     return Finish(kFuncFlush, std::fflush(open->file) == 0 ? sceMcResSucceed : sceMcResFailReplace);
 }
 
-int sceMcChdir(int port, int slot, char *name, char *current) {
+int sceMcChdir(int port, int slot, McChdirName name, char *current) {
     if (!ValidPort(port)) {
         return -1;
     }
@@ -405,7 +413,7 @@ int sceMcChdir(int port, int slot, char *name, char *current) {
     return Finish(kFuncChdir, sceMcResSucceed);
 }
 
-int sceMcMkdir(int port, int slot, char *name) {
+int sceMcMkdir(int port, int slot, McMkdirName name) {
     if (!ValidPort(port)) {
         return -1;
     }
@@ -450,7 +458,7 @@ int sceMcDelete(int port, int slot, char *name) {
     return Finish(kFuncDelete, sceMcResSucceed);
 }
 
-int sceMcGetDir(int port, int slot, char *name, unsigned int mode, int count, void *table) {
+int sceMcGetDir(int port, int slot, McGetDirName name, McGetDirMode mode, int count, McGetDirTable table) {
     if (!ValidPort(port)) {
         return -1;
     }
@@ -501,7 +509,7 @@ int sceMcGetDir(int port, int slot, char *name, unsigned int mode, int count, vo
     }
     int written = 0;
     for (; card.listed < entries.size() && written < count; ++card.listed, ++written) {
-        std::memcpy(static_cast<McDirEntry *>(table) + written, &entries[card.listed], sizeof(McDirEntry));
+        std::memcpy(static_cast<McDirEntry *>(static_cast<void *>(table)) + written, &entries[card.listed], sizeof(McDirEntry));
     }
     return Finish(kFuncGetDir, written);
 }
@@ -530,4 +538,16 @@ int sceMcUnformat(int port, int slot) {
     g_cards[port].unformatted = true;
     g_cards[port].cwd = "/";
     return Finish(kFuncUnformat, sceMcResSucceed);
+}
+
+int sceMcEnd(void) {
+    PS2_UNIMPLEMENTED();
+}
+
+int sceMcSeek(int fd, int offset, int origin) {
+    PS2_UNIMPLEMENTED();
+}
+
+int sceMcRename(int port, int slot, char *old_name, char *new_name) {
+    PS2_UNIMPLEMENTED();
 }

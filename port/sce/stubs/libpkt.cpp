@@ -87,3 +87,11 @@ void sceGifPkAddGsAD(sceGifPacket *packet, int reg, u_long data) {
 void sceGifPkRefLoadImage(sceGifPacket *packet, u_short dbp, u_char dpsm, u_short dbw, u_long128 *src, u_int qwc, u_int dsax, u_int dsay, u_int rrw, u_int rrh) {
     PS2_UNIMPLEMENTED();
 }
+
+void sceGifPkRef(sceGifPacket *packet, u_long128 *address, int count, int pce, int irq, int pad) {
+    PS2_UNIMPLEMENTED();
+}
+
+u_int *sceGifPkReserve(sceGifPacket *packet, int count) {
+    PS2_UNIMPLEMENTED();
+}
