@@ -2,6 +2,10 @@
 """Run a command only when its inputs or its command line have changed.
 
     kz-cached --stamp FILE --input PATH [PATH...] -- CMD [ARG...]
+    kz-cached --stamp FILE --input PATH [PATH...] --then-exec -- CMD [ARG...] -- PROGRAM [ARG...]
+
+With --then-exec, CMD is never run: the stamp must already be current for CMD, and PROGRAM
+replaces this process. A program that reads CMD's output uses it to refuse stale output.
 
 The stamp records the command line and each input's size and mtime_ns. When
 all of them match, CMD is skipped. The stamp is written only after CMD
@@ -35,8 +39,17 @@ def main():
     parser = argparse.ArgumentParser(description='Run a command when its inputs change.')
     parser.add_argument('--stamp', required=True, metavar='FILE')
     parser.add_argument('--input', action='extend', nargs='+', default=[], metavar='PATH')
+    parser.add_argument('--then-exec', action='store_true')
     args = parser.parse_args(argv[:split])
     command = argv[split + 1:]
+    program = []
+    if args.then_exec:
+        if '--' not in command:
+            sys.exit('kz-cached: --then-exec needs -- PROGRAM after the command')
+        end = command.index('--')
+        command, program = command[:end], command[end + 1:]
+        if not program:
+            sys.exit('kz-cached: no program given after the second --')
     if not command:
         sys.exit('kz-cached: no command given after --')
 
@@ -44,10 +57,18 @@ def main():
     current = {'command': shlex.join(command), 'inputs': fingerprint(args.input)}
     try:
         with open(stamp) as f:
-            if json.load(f) == current:
-                return
+            up_to_date = json.load(f) == current
     except (OSError, ValueError):
-        pass
+        up_to_date = False
+    if args.then_exec:
+        if not up_to_date:
+            sys.exit(f'kz-cached: {stamp} no longer matches {command[0]}; run again')
+        try:
+            os.execvp(program[0], program)
+        except OSError as err:
+            sys.exit(f'kz-cached: cannot run {program[0]}: {err.strerror}')
+    if up_to_date:
+        return
 
     try:
         result = subprocess.run(command)

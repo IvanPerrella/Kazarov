@@ -68,3 +68,19 @@ def test_stamp_is_kept_after_a_failed_rerun(tmp_path):
     failing = [sys.executable, '-c', 'import sys; sys.exit(2)']
     assert _cached(stamp, [data], *failing).returncode == 2
     assert not stamp.exists()
+
+
+def test_then_exec_runs_the_program_only_when_the_stamp_is_current(tmp_path):
+    src = tmp_path / "in.txt"
+    src.write_text("a")
+    stamp = tmp_path / "stamp.json"
+    out = tmp_path / "out.txt"
+    base = [sys.executable, str(KZ_CACHED), "--stamp", str(stamp), "--input", str(src)]
+    extract = ["sh", "-c", "true"]
+    program = ["sh", "-c", f"echo ran > {out}"]
+    stale = subprocess.run(base + ["--then-exec", "--"] + extract + ["--"] + program,
+                           capture_output=True, text=True)
+    assert stale.returncode != 0 and not out.exists()
+    assert subprocess.run(base + ["--"] + extract).returncode == 0
+    assert subprocess.run(base + ["--then-exec", "--"] + extract + ["--"] + program).returncode == 0
+    assert out.read_text() == "ran\n"

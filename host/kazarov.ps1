@@ -29,10 +29,10 @@ function Fail([string]$Message) {
 }
 
 # Runs a native program with an argument array, leaving the output on the console and its exit code in
-# $script:NativeExit. Windows PowerShell 5.1 joins the array without quoting, so there the command line
+# $script:NativeExit. Before 7.3, PowerShell joins the array without quoting, so there the command line
 # is quoted by ConvertTo-WindowsArgument and the program is started as a process.
 function Invoke-Native([string]$FilePath, [string[]]$NativeArgs) {
-    if ($PSVersionTable.PSVersion.Major -ge 7) {
+    if ($PSVersionTable.PSVersion -ge [version]'7.3') {
         & $FilePath @NativeArgs
         $script:NativeExit = $LASTEXITCODE
         return
