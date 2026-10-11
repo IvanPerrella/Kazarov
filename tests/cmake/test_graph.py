@@ -163,3 +163,14 @@ def test_assembler_is_an_input_of_each_assembly(tmp_path):
              if line.startswith("build ") and "unit_c.o: CUSTOM_COMMAND" in line]
     assert len(edges) == 1
     assert str(FIXTURE / "tools" / "fake_as.py") in edges[0]
+
+
+def test_touching_the_assembler_script_rebuilds_assembly(tmp_path):
+    # KZ_AS is "python3 tools/fake_as.py" in the fixture: the script is an input, not only python3.
+    build = configure(tmp_path)
+    build_all(build)
+    touch(FIXTURE / "tools" / "fake_as.py")
+    pending_now = pending(build)
+    assert len(pending_now) == 1
+    assert pending_now[0].startswith("AS ")
+    assert pending_now[0].endswith("unit_c.s")

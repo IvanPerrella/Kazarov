@@ -9,7 +9,7 @@ set(FIX ${CMAKE_CURRENT_SOURCE_DIR})
 # Stand-ins for the compiler and the assembler; both are python3 scripts.
 set(KZ_MWCC ${FIX}/../fake_cc.py)
 set(KZ_MWCC_RUNNER python3)
-set(KZ_AS ${FIX}/tools/fake_as.py)
+set(KZ_AS "python3 ${FIX}/tools/fake_as.py")
 
 include(${FIX}/../../../cmake/Kazarov.cmake)
 

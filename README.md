@@ -147,7 +147,7 @@ Inputs, set before the include:
 - `KZ_MWCC`, `KZ_MWLD`: compiler and linker.
 - `KZ_LIB_INCLUDE_DIRS`: directories passed to MWCC as `MWCIncludes`. Angle includes need these. Quoted includes search the `-i` directories only.
 - `KZ_MWCC_RUNNER` (default `wibo`), `KZ_AS_FLAGS`.
-- Optional: `KZ_AS`, `KZ_OBJCOPY`, `KZ_OBJDUMP`, `KZ_READELF`, `KZ_WIBO`, `MIPS_TOOL_PREFIX`, and the overlay variables below.
+- Optional: `KZ_AS` (a command list, such as `python3 tools/fake_as.py`; the script words that name files are rebuild inputs), `KZ_OBJCOPY`, `KZ_OBJDUMP`, `KZ_READELF`, `KZ_WIBO`, `MIPS_TOOL_PREFIX`, and the overlay variables below.
 
 Variables set by the include:
 
@@ -215,7 +215,7 @@ Do not wrap `PORT_RETURN` in a PS2-visible `if`. The PS2 build then compiles tha
 
 ## Windows
 
-- `host/kazarov.cmd ROOT build|run [config] [args...]` is the Windows entry point. `ROOT` is the project directory, and the script reads `KZ_PROJECT`, the default configurations and `KZ_WINDOWS_CONFIGS` from its `kazarov.conf`. A configuration listed in `KZ_WINDOWS_CONFIGS` runs through `KZ_WINDOWS_HOST_SCRIPT` with PowerShell. A configuration listed in `KZ_CONTAINER_CONFIGS` runs in the container. A first argument in neither list is a program argument, and the default configuration is used. Arguments are forwarded as typed. Any other configuration runs in the container, through `docker` or `podman`. `run` starts PCSX2 or the executable after the container exits.
+- `host/kazarov.cmd ROOT build|run [config] [args...]` is the Windows entry point. It is a thin shim: it runs `host/kazarov.ps1` with `pwsh`, or `powershell` when `pwsh` is not on PATH, and forwards the arguments as typed, so cmd never expands them a second time. `ROOT` is the project directory, and the script reads `KZ_PROJECT`, the default configurations and `KZ_WINDOWS_CONFIGS` from its `kazarov.conf`. A configuration listed in `KZ_WINDOWS_CONFIGS` runs through `KZ_WINDOWS_HOST_SCRIPT` with PowerShell. A configuration listed in `KZ_CONTAINER_CONFIGS` runs in the container. A first argument in neither list is a program argument, and the default configuration is used. Any other configuration runs in the container, through `docker` or `podman` (`BUILDER` picks one). `run` starts PCSX2 or the executable after the container exits.
 - `.gitattributes` keeps scripts LF and `.cmd`/`.bat` files CRLF. `host/kazarov.cmd` must stay CRLF.
 - Git Bash (MSYS) runs `bin/kazarov` directly. The driver sets `MSYS_NO_PATHCONV=1` and converts mounts with `cygpath -m`.
 - Clone the project inside the WSL filesystem (`~/`), not under `/mnt/c`. Bind mounts of Windows drives are much slower for the many small reads of a build.
@@ -224,11 +224,12 @@ Do not wrap `PORT_RETURN` in a PS2-visible `if`. The PS2 build then compiles tha
 
 ```bash
 python -m pytest -q tests/test_kz_mwcc.py tests/test_kz_lock.py tests/test_kz_extract.py \
-    tests/test_kz_split_stamp.py tests/test_kz_cached.py tests/test_kazarov_elf.py tests/cmake
+    tests/test_kz_split_stamp.py tests/test_kz_cached.py tests/test_kazarov_elf.py tests/cmake \
+    tests/test_host_ps1.py
 shellcheck bin/kazarov bin/kz-pcsx2 lib/*.sh tests/port_h/run.sh
 ```
 
-`tests/test_kazarov_elf.py` compares `kazarov_elf` with the `elf.py` it was ported from and with baseline objects. It reads them from the paths in `KZ_ELF_FIXTURES` (colon-separated) and `KZ_ELF_REFERENCE`, and skips when they are absent. `tests/test_kz_extract.py` needs `xorriso`, `genisoimage` or `mkisofs` and skips without one. `tests/cmake` needs `cmake`, `ninja` and the helper tools in `bin/`.
+`tests/test_kazarov_elf.py` compares `kazarov_elf` with the `elf.py` it was ported from and with baseline objects. It reads them from the paths in `KZ_ELF_FIXTURES` (colon-separated) and `KZ_ELF_REFERENCE`, and skips when they are absent. `tests/test_kz_extract.py` needs `xorriso`, `genisoimage` or `mkisofs` and skips without one. `tests/cmake` needs `cmake`, `ninja` and the helper tools in `bin/`. `tests/test_host_ps1.py` runs `host/kazarov.ps1` under `pwsh` (from `KZ_PWSH`, or PATH) and skips without one.
 
 ## License
 

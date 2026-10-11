@@ -62,7 +62,8 @@ kz_file_mode() {
 
 # Twelve hex digits over the path, mode and content of each file of image/ that git
 # knows, tracked, untracked or ignored, in byte order; Python bytecode is skipped.
-# A missing file hashes as "missing".
+# A symlink hashes as its target text, not the content behind it. A missing file
+# hashes as "missing".
 kz_image_content_hash() {
     local f
     git -C "$KZ_ROOT" ls-files -co -z -- image | LC_ALL=C sort -z |
@@ -70,7 +71,10 @@ kz_image_content_hash() {
         case $f in
             */__pycache__/*|*.pyc) continue ;;
         esac
-        if [ -f "$KZ_ROOT/$f" ]; then
+        if [ -L "$KZ_ROOT/$f" ]; then
+            printf '%s %s %s\n' "$(printf 'link:%s' "$(readlink -- "$KZ_ROOT/$f")" | kz_sha256)" \
+                "$(kz_file_mode "$KZ_ROOT/$f")" "$f"
+        elif [ -f "$KZ_ROOT/$f" ]; then
             printf '%s %s %s\n' "$(kz_sha256 < "$KZ_ROOT/$f")" "$(kz_file_mode "$KZ_ROOT/$f")" "$f"
         else
             printf 'missing %s\n' "$f"

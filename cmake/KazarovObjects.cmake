@@ -65,6 +65,7 @@ function(kz_asm_object obj src)
     if(KZ_AS_PATH)
         list(APPEND extra "${KZ_AS_PATH}")
     endif()
+    list(APPEND extra ${KZ_AS_FILES})
 
     if(KZA_COMMENT)
         set(comment "${KZA_COMMENT}")
@@ -75,7 +76,7 @@ function(kz_asm_object obj src)
     add_custom_command(
         OUTPUT "${obj_abs}"
         COMMAND ${CMAKE_COMMAND} -E env KZ_IMAGE_ID=${KZ_IMAGE_ID}
-                ${KZ_AS} ${KZ_AS_FLAGS} ${KZA_FLAGS} -o "${obj_abs}" "${src_abs}"
+                ${KZ_AS_CMD} ${KZ_AS_FLAGS} ${KZA_FLAGS} -o "${obj_abs}" "${src_abs}"
         ${post_args}
         DEPENDS "${src_abs}" ${KZ_TOOL_DEPENDS} ${extra}
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
