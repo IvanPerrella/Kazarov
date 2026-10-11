@@ -19,6 +19,7 @@
 #include "shaders/draw.frag.spv.hpp"
 #include "shaders/draw2d.vert.spv.hpp"
 #include "shaders/mesh.vert.spv.hpp"
+#include "shaders/mesh_prog0.vert.spv.hpp"
 
 namespace gfx {
 
@@ -231,6 +232,10 @@ struct PipelineDesc {
     bool           alpha_test;
 };
 
+// Without prog0_meshes the families stop after kFamilyMesh, so such a renderer's pipelines and
+// their indices are the ones it always had.
+uint32_t FamilyCount() { return g.config.prog0_meshes ? kFamilyCount : kFamilyMesh + 1; }
+
 } // namespace
 
 void CreatePipelineLayout() {
@@ -344,9 +349,24 @@ uint32_t PipelineIndex(PipelineFamily family, uint32_t blend_slot, TextureMode m
 }
 
 uint32_t NoColorPipelineIndex(PipelineFamily family, TextureMode mode, bool alpha_test) {
-    uint32_t families = kFamilyCount;
+    uint32_t families = FamilyCount();
     uint32_t modes = kTextureModeCount;
     return families * g.blend_slot_count * modes * 2 + (family * modes + mode) * 2 + (alpha_test ? 1 : 0);
+}
+
+PipelineFamily MeshFamily(const MeshConstants &constants) {
+    if ((constants.flags & kMeshProg0) == 0) {
+        return kFamilyMesh;
+    }
+    if (!g.config.prog0_meshes) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            Error("a kMeshProg0 draw on a renderer without prog0_meshes draws as a plain mesh");
+        }
+        return kFamilyMesh;
+    }
+    return (constants.prog0.flags & kProg0Skinned) != 0 ? kFamilyMeshProg0Skinned : kFamilyMeshProg0;
 }
 
 BlendMapping MapBlend(const GsBlend &blend, bool enable) {
@@ -375,6 +395,8 @@ void CreatePipelines() {
     VkShaderModule draw2d_module = CreateShader(draw2d_vert, sizeof(draw2d_vert));
     VkShaderModule mesh_module = CreateShader(mesh_vert, sizeof(mesh_vert));
     VkShaderModule frag_module = CreateShader(draw_frag, sizeof(draw_frag));
+    VkShaderModule prog0_module =
+        g.config.prog0_meshes ? CreateShader(mesh_prog0_vert, sizeof(mesh_prog0_vert)) : VK_NULL_HANDLE;
 
     VkVertexInputBindingDescription   binding_2d = {0, sizeof(Vertex2D), VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription attributes_2d[4] = {
@@ -399,6 +421,27 @@ void CreatePipelines() {
     VkPipelineVertexInputStateCreateInfo vertex_mesh = vertex_2d;
     vertex_mesh.pVertexBindingDescriptions = &binding_mesh;
     vertex_mesh.pVertexAttributeDescriptions = attributes_mesh;
+
+    // mesh_prog0.vert always reads the skin at locations 4 and 5. Unskinned, they alias bytes of the
+    // vertex itself, which the shader then never uses.
+    VkVertexInputAttributeDescription attributes_prog0[6] = {
+        attributes_mesh[0], attributes_mesh[1], attributes_mesh[2], attributes_mesh[3],
+        {4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(Vertex3D, position)},
+        {5, 0, VK_FORMAT_R8G8B8A8_UINT,       offsetof(Vertex3D, color)   },
+    };
+    VkVertexInputBindingDescription   binding_skinned = {0, 2 * sizeof(Vertex3D),
+                                                         VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription attributes_skinned[6] = {
+        attributes_mesh[0], attributes_mesh[1], attributes_mesh[2], attributes_mesh[3],
+        {4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(Vertex3D) + offsetof(Prog0Skin, weight)},
+        {5, 0, VK_FORMAT_R8G8B8A8_UINT,       sizeof(Vertex3D) + offsetof(Prog0Skin, bone)  },
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_prog0 = vertex_mesh;
+    vertex_prog0.vertexAttributeDescriptionCount = 6;
+    vertex_prog0.pVertexAttributeDescriptions = attributes_prog0;
+    VkPipelineVertexInputStateCreateInfo vertex_skinned = vertex_prog0;
+    vertex_skinned.pVertexBindingDescriptions = &binding_skinned;
+    vertex_skinned.pVertexAttributeDescriptions = attributes_skinned;
 
     VkPipelineInputAssemblyStateCreateInfo triangles = {};
     triangles.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -497,6 +540,13 @@ void CreatePipelines() {
         }
     }
 
+    VkBool32                 skinned_data[2] = {VK_FALSE, VK_TRUE};
+    VkSpecializationMapEntry skinned_entry = {0, 0, sizeof(VkBool32)};
+    VkSpecializationInfo     skinned_info[2] = {
+        {1, &skinned_entry, sizeof(VkBool32), &skinned_data[0]},
+        {1, &skinned_entry, sizeof(VkBool32), &skinned_data[1]},
+    };
+
     // Without a dynamic mask, writing no colour is a pipeline of its own: blending is moot then,
     // so one per family, texture mode and alpha test (the test still discards).
     VkPipelineColorBlendAttachmentState no_color_attachment = {};
@@ -505,15 +555,16 @@ void CreatePipelines() {
     no_color.attachmentCount = 1;
     no_color.pAttachments = &no_color_attachment;
 
-    uint32_t blended = kFamilyCount * g.blend_slot_count * kTextureModeCount * 2;
-    uint32_t families = kFamilyCount;
+    uint32_t family_count = FamilyCount();
+    uint32_t blended = family_count * g.blend_slot_count * kTextureModeCount * 2;
+    uint32_t families = family_count;
     uint32_t modes = kTextureModeCount;
     uint32_t total = blended + (g.dynamic_color_write_mask ? 0 : families * modes * 2);
 
     std::vector<VkPipelineShaderStageCreateInfo> stages(total * 2);
     std::vector<VkGraphicsPipelineCreateInfo>    infos(total);
     uint32_t                                     blend_variants = g.blend_slot_count + (g.dynamic_color_write_mask ? 0 : 1);
-    for (uint32_t family = 0; family < kFamilyCount; family++) {
+    for (uint32_t family = 0; family < family_count; family++) {
         for (uint32_t blend = 0; blend < blend_variants; blend++) {
             bool writes_color = blend < g.blend_slot_count;
             for (uint32_t mode = 0; mode < kTextureModeCount; mode++) {
@@ -528,7 +579,11 @@ void CreatePipelines() {
                     stage[0] = {};
                     stage[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
                     stage[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-                    stage[0].module = family == kFamilyMesh ? mesh_module : draw2d_module;
+                    stage[0].module = family == kFamilyMesh ? mesh_module
+                                      : family > kFamilyMesh ? prog0_module
+                                                             : draw2d_module;
+                    stage[0].pSpecializationInfo =
+                        family > kFamilyMesh ? &skinned_info[family == kFamilyMeshProg0Skinned] : nullptr;
                     stage[0].pName = "main";
                     stage[1] = stage[0];
                     stage[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -541,7 +596,10 @@ void CreatePipelines() {
                     info.pNext = &rendering;
                     info.stageCount = 2;
                     info.pStages = stage;
-                    info.pVertexInputState = family == kFamilyMesh ? &vertex_mesh : &vertex_2d;
+                    info.pVertexInputState = family == kFamilyMesh               ? &vertex_mesh
+                                             : family == kFamilyMeshProg0        ? &vertex_prog0
+                                             : family == kFamilyMeshProg0Skinned ? &vertex_skinned
+                                             : &vertex_2d;
                     info.pInputAssemblyState = family == kFamily2DLines ? &lines : &triangles;
                     info.pViewportState = &viewport;
                     info.pRasterizationState = &raster;
@@ -601,6 +659,9 @@ void CreatePipelines() {
     vkDestroyShaderModule(g.device, draw2d_module, nullptr);
     vkDestroyShaderModule(g.device, mesh_module, nullptr);
     vkDestroyShaderModule(g.device, frag_module, nullptr);
+    if (prog0_module != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(g.device, prog0_module, nullptr);
+    }
     SaveCache(g.config.pipeline_cache);
     g.pipeline_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     std::fprintf(stderr, "gfx: %u pipelines ready in %.2f s\n", total, g.pipeline_seconds);

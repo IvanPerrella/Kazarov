@@ -234,7 +234,7 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
             mode = kTextureRgba;
             texa = binding.ignore_alpha;
             push.texture_slot = PreviousFrameSlot();
-            if (family != kFamilyMesh) {
+            if (family < kFamilyMesh) {
                 push.uv_xform[0] = mapping.scale_x / width;
                 push.uv_xform[1] = mapping.scale_y / height;
                 push.uv_xform[2] = mapping.offset_x / width;
@@ -248,7 +248,7 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
             }
             texture->last_draw_use = g.frame_serial;
             push.texture_slot = binding.texture & kSlotMask;
-            if (family != kFamilyMesh) {
+            if (family < kFamilyMesh) {
                 // Logical texels land on the image through its mapping, letterbox offset included.
                 LogicalMapping mapping = TextureMapping(*texture);
                 float          width = static_cast<float>(texture->image.width);
@@ -302,7 +302,7 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
     // Index textures are looked up texel by texel in the shader, so their sampler never filters.
     Filter filter = mode == kTexturePalette ? Filter::Nearest : binding.filter;
     push.sampler_slot = SamplerIndex(filter, binding.wrap_u, binding.wrap_v);
-    if (family == kFamilyMesh && filter == Filter::Linear && g.anisotropy_level > 0) {
+    if (family >= kFamilyMesh && filter == Filter::Linear && g.anisotropy_level > 0) {
         push.sampler_slot = kBaseSamplerCount + (g.anisotropy_level - 1) * 4 + (push.sampler_slot & 3);
     }
     push.flags = static_cast<uint32_t>(blend.transform) << kPushTransformShift;
@@ -1074,7 +1074,7 @@ void DrawMesh(MeshHandle handle, uint32_t first_index, uint32_t index_count, con
     }
     PushConstants push;
     if (index_count == 0 ||
-        !Prepare(kFamilyMesh, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, binding, state, push)) {
+        !Prepare(MeshFamily(constants), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, binding, state, push)) {
         return;
     }
     mesh->last_draw_use = g.frame_serial;
@@ -1101,7 +1101,7 @@ void DrawMeshImmediate(std::span<const Vertex3D> vertices, std::span<const uint3
     }
     PushConstants push;
     if (vertices.empty() || indices.empty() ||
-        !Prepare(kFamilyMesh, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, binding, state, push)) {
+        !Prepare(MeshFamily(constants), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, binding, state, push)) {
         return;
     }
     VkCommandBuffer cmd = DrawCommands();

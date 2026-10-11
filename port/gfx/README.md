@@ -226,10 +226,55 @@ to is refused: snapshot it first (`SnapshotFrame`, `CopyTexture` from `kMainTarg
 
 3 families (2D triangles, 2D lines, meshes) x 28 blend states x 3 texture modes (none, RGBA,
 index + palette) x alpha test on/off = 504 pipelines (522 without a dynamic colour write mask,
-above), all created in `RendererInit` on up to eight threads against the pipeline cache. Depth
+above), all created in `RendererInit` on up to eight threads against the pipeline cache. With
+`RendererConfig::prog0_meshes` two more mesh families (Vu_prog0 and Vu_prog0 skinned, one vertex
+specialisation constant apart) give 5 x 28 x 3 x 2 = 840 pipelines (870 without a dynamic colour
+write mask); without it the families stop after the plain mesh family, so a renderer that does not
+ask builds exactly the 504 (522) it always did, at the same indices. Depth
 test, depth write, compare op, the whole stencil state, cull mode, front face, viewport, scissor
 and topology within a class are dynamic state, so they add none. The cache file is checked against the device before use and written through a temporary
 file and a rename.
+
+## Dark Chronicle's Vu_prog0 meshes
+
+A draw with `kMeshProg0` uses `shaders/mesh_prog0.vert` and reads only `mvp` and
+`MeshConstants::prog0`. `Prog0Constants` is the VU1 memory the game writes: `model_world`, the four
+world light directions as x/y/z rows, the light colours, ambient times object alpha, object colour,
+the eye in object space, the clip-or-view block, material diffuse and specular with the exponent,
+four point lights relative to the object origin with their power, the fog quadword (0x3B) and the
+32 bone slots. It is in the VU's units: colours on 128 = 1.0, the material on 1.0. The game copies
+what its render-info packet would upload instead of converting units. `prog0` sits after the older
+fields, so `mesh.vert`'s block and its SPIR-V are unchanged; the cost is that every mesh draw's
+constants are 2416 bytes rather than 400.
+
+Dispatch follows the program. The matcap (`kProg0RefSphere`, 0x100) takes its UV from the unblended
+normal. Skinning (0x040) blends the vertices through the bone slots. Then, unless the face is
+`kProg0FaceNoNormal` (0x200) or the flags carry `kProg0Unlit` (0x020), which give the object colour
+times the material diffuse, the ambient and four directional lights are summed; point lights
+(0x010) add in place of Phong specular (0x008), with no specular. Under face 0x100 the vertex colour
+multiplies the result, or under 0x080 is added. Lights reach model space as progmain's setup does.
+Colour saturates at 255 and truncates per vertex as `ftoi0` does. Fog is offset + scale / w,
+clamped against the near value first and the far value last, then truncated.
+
+The flags that are the caller's are set on `DrawState`, not in the constants. Culling (0x004) is
+`DrawState::cull` from `Prog0CullMode`, which also swaps the kept faces for a mirroring model_world
+(progmain's QW 0x1E word). The scissor rectangle is `DrawState::scissor_rect`, enabled by
+`DrawState::scissor`; fog is enabled by `DrawState::fog` and its colour is `DrawState::fog_color`.
+Under 0x002 the shader clips against the six planes of `clip_or_view`, as the VU's clipper does;
+without it Vulkan's own clipping stands in for the guard-band test, so a triangle crossing the near
+or far plane is clipped rather than dropped whole as the GS ADC bit would.
+
+Skinned meshes (`kProg0Skinned`) are pairs of `Vertex3D`: each vertex, then its `Prog0Skin` (four
+weights and four bone slots, in the bytes of a second `Vertex3D`), so `CreateMesh`,
+`DrawMeshImmediate` and the index buffer work unchanged. The skinned family reads them with a doubled
+stride. Weights are not normalised (the game normalises only sums below 1). Such meshes are posed on
+the GPU, so the display list's pose interpolation (the vertex rewrites of the Display lists section)
+does not apply to them; their bones are the tick's.
+
+Retail quirks kept on purpose, with the spec's names: O-4 (a negative point power acts as its
+magnitude), O-8 (influence 3's normal takes column 1 for its z term), O-9 (the matcap ignores
+skinning), O-10 (the add step's alpha is 128 x vertex alpha squared), O-11 (the exponent is
+2^(n+1), r^16 for the game's 3).
 
 ## Readback
 

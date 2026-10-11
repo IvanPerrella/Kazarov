@@ -89,6 +89,8 @@ struct RendererConfig {
     // False sets one stencil reference and compare and write masks for both faces, as on a
     // portability-subset device without separateStencilMaskRef.
     bool separate_stencil_masks = true;
+    // Also precompiles the Vu_prog0 pipelines kMeshProg0 draws need (Dark Chronicle).
+    bool prog0_meshes = false;
 };
 
 // What RendererInit settled on, from the config and the device.
@@ -411,9 +413,79 @@ enum MeshFlags : uint32_t {
     // normalised units. A display render's interpolated camera moves the sample with the vertex.
     kMeshScreenUv = 1u << 6,
     kMeshWorldUv = 1u << 7,
+    // Vu_prog0's paths, from MeshConstants::prog0 and mvp alone; needs RendererConfig::prog0_meshes.
+    kMeshProg0 = 1u << 8,
 };
 
-// Matches the std140 block in shaders/mesh.vert. Colours are modulations with 1.0 as GS 0x80.
+// Vu_prog0's flags word (VU1 QW 0x26.x), as mgCVisualMDT::CreateRenderInfoPacket sets it.
+enum Prog0Flags : uint32_t {
+    kProg0Clip = 0x001,
+    kProg0Scissor = 0x002, // six-plane clip against Prog0Constants::clip_or_view
+    kProg0Cull = 0x004,
+    kProg0Real = 0x008, // Phong specular, unless kProg0PointLights
+    kProg0PointLights = 0x010,
+    kProg0Unlit = 0x020,
+    kProg0Skinned = 0x040,
+    kProg0ColorAdd = 0x080,
+    kProg0RefSphere = 0x100,
+};
+
+// The batch header's face type bits (dw3) Vu_prog0 reads.
+enum Prog0Face : uint32_t {
+    kProg0FaceNoTexture = 0x010,
+    kProg0FaceColor = 0x100,
+    kProg0FaceNoNormal = 0x200,
+};
+
+inline constexpr uint32_t kProg0Bones = 32;
+
+// A kMeshProg0 draw's inputs in Vu_prog0's own terms: the VU1 quadwords the game writes, as
+// floats. Colours are on the VU's scale (128 is 1.0), the material on 1.0.
+struct Prog0Constants {
+    float    model_world[16];       // QW 0x08-0x0B, columns
+    float    light_direction[3][4]; // QW 0x0C-0x0E: x, y, z of four world directions toward the lights
+    float    light_color[4][4];     // QW 0x0F-0x12
+    float    ambient[4];            // QW 0x13, w already times the object's alpha
+    float    object_color[4];       // QW 0x14
+    float    eye[4];                // QW 0x18, object space
+    // QW 0x19-0x1C: world_clip * model, overwritten by view * model under kProg0RefSphere as the
+    // game overlaps the two blocks, so a draw with both clips against the view.
+    float    clip_or_view[16];
+    float    diffuse[4];         // QW 0x28
+    float    specular[4];        // QW 0x29
+    float    point_light[4][4];  // QW 0x2D-0x30: position less the object's origin (world), w power
+    float    point_color[4][4];  // QW 0x31-0x34
+    float    fog[4];             // QW 0x3B: offset, near value, far value, scale
+    uint32_t flags = 0;          // Prog0Flags
+    uint32_t face = 0;           // Prog0Face
+    uint32_t specular_power = 0; // QW 0x2B.x
+    uint32_t pad = 0;
+    // QW 0x3C on: rows 0-2 of each slot's matrix. Row 3 only reaches w, which prog0 drops.
+    float bones[kProg0Bones][3][4];
+};
+
+// A kProg0Skinned mesh is pairs of Vertex3D: each vertex, then its skin in the same bytes.
+struct Prog0Skin {
+    float   weight[4];
+    float   unused[4];
+    uint8_t bone[4]; // slot, the VU's offset / 4
+};
+static_assert(sizeof(Prog0Skin) == sizeof(Vertex3D));
+
+// Vu_prog0 culls only under kProg0Cull; a mirroring model_world (progmain's QW 0x1E word) swaps
+// the faces it keeps.
+inline CullMode Prog0CullMode(const Prog0Constants &constants) {
+    if ((constants.flags & kProg0Cull) == 0) {
+        return CullMode::None;
+    }
+    const float *m = constants.model_world;
+    float det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[4] * (m[1] * m[10] - m[2] * m[9]) +
+                m[8] * (m[1] * m[6] - m[2] * m[5]);
+    return det < 0.0f ? CullMode::Front : CullMode::Back;
+}
+
+// Matches the std140 blocks in shaders/mesh.vert, which stops before prog0, and shaders/mesh_prog0.vert.
+// Colours outside prog0 are modulations with 1.0 as GS 0x80.
 struct MeshConstants {
     float    mvp[16];           // column-major, object to Vulkan clip space (y down, reverse-Z)
     float    normal_matrix[12]; // three columns of xyz_, object to lighting space
@@ -429,7 +501,11 @@ struct MeshConstants {
     uint32_t flags = 0;
     uint32_t light_count = 0;
     uint32_t pad[2] = {};
+    Prog0Constants prog0; // kMeshProg0 only; after the rest so shaders/mesh.vert's block is unchanged
 };
+static_assert(offsetof(MeshConstants, prog0) == 400);
+static_assert(offsetof(Prog0Constants, flags) == 464 && offsetof(Prog0Constants, bones) == 480);
+static_assert(sizeof(Prog0Constants) == 2016);
 
 // How a mesh draw's mvp was made: projection * view * middle * model * local, column-major. Recorded
 // with the draw so a display frame can interpolate the model and the view (the camera) between two

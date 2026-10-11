@@ -224,10 +224,13 @@ enum ExtentAxis : uint32_t {
     kAxisY = 1u << 1,
 };
 
+// Mesh families last: draw code tells a mesh by family >= kFamilyMesh.
 enum PipelineFamily : uint32_t {
     kFamily2DTriangles,
     kFamily2DLines,
     kFamilyMesh,
+    kFamilyMeshProg0,
+    kFamilyMeshProg0Skinned,
     kFamilyCount,
 };
 
@@ -390,6 +393,8 @@ uint32_t PipelineIndex(PipelineFamily family, uint32_t blend_slot, TextureMode m
 // Without a dynamic colour write mask: the pipelines that write no colour, after the others.
 uint32_t     NoColorPipelineIndex(PipelineFamily family, TextureMode mode, bool alpha_test);
 BlendMapping MapBlend(const GsBlend &blend, bool enable);
+// kFamilyMesh, or a prog0 family for a kMeshProg0 draw when the renderer has them.
+PipelineFamily MeshFamily(const MeshConstants &constants);
 
 // displaylist.cpp
 // The public resource calls that record instead of executing while a list is recorded.

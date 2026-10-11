@@ -29,6 +29,7 @@ struct GfxOptions {
     bool offscreen = OffscreenByDefault();
     bool triangle_fans = true;
     bool separate_stencil_masks = true;
+    bool prog0_meshes = false;
     std::filesystem::path pipeline_cache = std::filesystem::temp_directory_path() / "dc_gfx_test" / "pipeline_cache.bin";
 };
 
@@ -55,6 +56,7 @@ struct GfxFixture {
         config.offscreen = options.offscreen;
         config.triangle_fans = options.triangle_fans;
         config.separate_stencil_masks = options.separate_stencil_masks;
+        config.prog0_meshes = options.prog0_meshes;
         config.pipeline_cache = options.pipeline_cache;
         config.progress = [this](uint32_t done, uint32_t total) {
             progress_calls++;
