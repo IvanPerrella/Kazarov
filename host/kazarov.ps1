@@ -33,6 +33,8 @@ function Fail([string]$Message) {
 # is quoted by ConvertTo-WindowsArgument and the program is started as a process.
 function Invoke-Native([string]$FilePath, [string[]]$NativeArgs) {
     if ($PSVersionTable.PSVersion -ge [version]'7.3') {
+        # A session may have chosen Legacy passing; this call needs array passing.
+        $PSNativeCommandArgumentPassing = 'Standard'
         & $FilePath @NativeArgs
         $script:NativeExit = $LASTEXITCODE
         return
