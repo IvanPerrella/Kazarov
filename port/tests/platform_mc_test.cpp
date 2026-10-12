@@ -12,13 +12,8 @@
 
 #include "platform/paths.hpp"
 #include "sce/sdk_params.hpp"
+#include "sce/libmc_extensions.hpp"
 #include "platform_fixture.hpp"
-
-// Not every game's libmc.h declares these; keep them C-linked like the rest of the family.
-extern "C" {
-int sceMcEnd(void);
-int sceMcSeek(int fd, int offset, int origin);
-}
 
 // libmc on a save root in a temporary directory.
 
@@ -135,6 +130,32 @@ TEST(PlatformMc, SyncReportsCommandCodes) {
     ASSERT_TRUE(sceMcSync(MC_WAIT, &cmd, &result) == 1 && result == sceMcResNoFormat && formatted == 0);
     ASSERT_TRUE(sceMcFormat(0, 0) == 0);
     ASSERT_TRUE(sceMcSync(MC_WAIT, &cmd, &result) == 1 && cmd == 0x10 && result == 0);
+}
+
+TEST(PlatformMc, RenameStaysInTheSourceDirectoryAndDoesNotOverwrite) {
+    const auto root = UseTempSaveRoot();
+    sceMcInit();
+    ASSERT_EQ(Settle(sceMcMkdir(0, 0, (char *) "dir"), 0x0B), 0);
+    std::ofstream(root / "mc0" / "dir" / "old") << "original";
+    EXPECT_EQ(Settle(sceMcRename(0, 0, (char *) "/dir/old", (char *) "new"), 0x0E), 0);
+    EXPECT_FALSE(fs::exists(root / "mc0" / "dir" / "old"));
+    EXPECT_EQ(ReadFile(root / "mc0" / "dir" / "new"), (std::vector<char>{'o','r','i','g','i','n','a','l'}));
+    std::ofstream(root / "mc0" / "dir" / "old") << "second";
+    EXPECT_LT(Settle(sceMcRename(0, 0, (char *) "/dir/old", (char *) "new"), 0x0E), 0);
+    EXPECT_TRUE(fs::exists(root / "mc0" / "dir" / "old"));
+    EXPECT_LT(Settle(sceMcRename(0, 0, (char *) "/dir/old", (char *) "../escape"), 0x0E), 0);
+    EXPECT_EQ(Settle(sceMcRename(0, 0, (char *) "/missing", (char *) "new"), 0x0E), sceMcResNoEntry);
+    EXPECT_EQ(sceMcRename(-1, 0, (char *) "old", (char *) "new"), -1);
+}
+
+TEST(PlatformMc, RenamingTheCurrentDirectoryKeepsRelativeOperationsWorking) {
+    const auto root = UseTempSaveRoot();
+    sceMcInit();
+    ASSERT_EQ(Settle(sceMcMkdir(0, 0, (char *) "dir"), 0x0B), 0);
+    ASSERT_EQ(Settle(sceMcChdir(0, 0, (char *) "dir", nullptr), 0x0C), 0);
+    ASSERT_EQ(Settle(sceMcRename(0, 0, (char *) "/dir", (char *) "renamed"), 0x0E), 0);
+    EXPECT_EQ(Settle(sceMcMkdir(0, 0, (char *) "child"), 0x0B), 0);
+    EXPECT_TRUE(fs::is_directory(root / "mc0" / "renamed" / "child"));
 }
 
 TEST(PlatformMc, SeekMovesPositionForReadAndWrite) {

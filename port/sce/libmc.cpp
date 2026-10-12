@@ -14,12 +14,7 @@
 
 #include "platform/paths.hpp"
 #include "sdk_params.hpp"
-
-// Not every game's libmc.h declares these; keep them C-linked like the rest of the family.
-extern "C" {
-int sceMcEnd(void);
-int sceMcSeek(int fd, int offset, int origin);
-}
+#include "libmc_extensions.hpp"
 
 // Each card is a directory, <save root>/mc0 and mc1, and every command
 // finishes inside the call that issues it. The game still sees libmc's
@@ -57,6 +52,7 @@ enum McFunction {
     kFuncMkdir = 0x0B,
     kFuncChdir = 0x0C,
     kFuncGetDir = 0x0D,
+    kFuncRename = 0x0E,
     kFuncDelete = 0x0F,
     kFuncFormat = 0x10,
     kFuncUnformat = 0x11,
@@ -564,5 +560,29 @@ int sceMcSeek(int fd, int offset, int origin) {
 }
 
 int sceMcRename(int port, int slot, char *old_name, char *new_name) {
-    PS2_UNIMPLEMENTED();
+    if (!ValidPort(port)) return -1;
+    if (int status = CardStatus(port); status != 0) return Finish(kFuncRename, status);
+    if (!old_name || !new_name || !*new_name || std::strlen(new_name) >= 32 ||
+        std::strchr(new_name, '/') || std::strchr(new_name, '\\') ||
+        std::strcmp(new_name, ".") == 0 || std::strcmp(new_name, "..") == 0) {
+        return Finish(kFuncRename, sceMcResDeniedPermit);
+    }
+    auto parts = Components(port, old_name);
+    if (parts.empty()) return Finish(kFuncRename, sceMcResDeniedPermit);
+    const auto source = HostPath(port, parts);
+    const std::string old_card_path = CardPath(parts);
+    parts.back() = new_name;
+    const auto destination = HostPath(port, parts);
+    if (source.empty() || destination.empty()) return Finish(kFuncRename, sceMcResDeniedPermit);
+    std::error_code error;
+    if (!fs::exists(source, error)) return Finish(kFuncRename, error ? sceMcResDeniedPermit : sceMcResNoEntry);
+    if (source == destination) return Finish(kFuncRename, sceMcResSucceed);
+    if (fs::exists(destination, error) || error) return Finish(kFuncRename, sceMcResDeniedPermit);
+    fs::rename(source, destination, error);
+    if (error) return Finish(kFuncRename, sceMcResDeniedPermit);
+    auto &cwd = g_cards[port].cwd;
+    if (cwd == old_card_path || cwd.starts_with(old_card_path + "/")) {
+        cwd = CardPath(parts) + cwd.substr(old_card_path.size());
+    }
+    return Finish(kFuncRename, sceMcResSucceed);
 }
