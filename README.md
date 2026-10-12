@@ -270,6 +270,7 @@ Do not wrap `PORT_RETURN` in a PS2-visible `if`. The PS2 build then compiles tha
   - `WindowSetIdentity()`: the window title and icon.
   - `gfx::RendererConfig`: `app_name`, `logical_width` and `logical_height`, and `display_aspect`.
 - Shared tests run after the game's `main()` has set its identity. They must not assume a particular game.
+- Behaviour change (main after f1b8e80): the flanks that carry a full-frame `Draw2D` rectangle to the edge of a window wider or taller than the logical frame always sample with clamped wrap (`gfx/README.md`, "Fill"). A full-frame draw of a repeating texture used to tile into the flanks and now repeats its edge texels there, which removes the seam at the frame's border. Output at the logical aspect is unchanged; only non-4:3 windows differ, and only for such draws.
 
 CMake entry points are in `cmake/KazarovPort.cmake`:
 
