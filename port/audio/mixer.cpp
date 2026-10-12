@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "hsmsg.hpp"
+#include "stream.hpp"
 #include "trace.hpp"
 
 namespace audio {
@@ -38,6 +40,8 @@ void Mixer::Reset() {
     }
     for (Port &port : ports_) {
         port.bank.reset();
+        port.banks = {};
+        port.extra_banks = 0;
         port.sequencer.SetSequence(nullptr);
         port.stream.reset();
         port.stream_playing = false;
@@ -69,6 +73,29 @@ void Mixer::BindBank(int port, std::shared_ptr<const Bank> bank) {
     }
     ports_[port].bank = std::move(bank);
     ports_[port].channels = {};
+}
+
+void Mixer::BindBank(int port, int bank_no, std::shared_ptr<const Bank> bank) {
+    if (bank_no == 0) {
+        BindBank(port, std::move(bank));
+        return;
+    }
+    if (!ValidPort(port) || bank_no < 0 || bank_no >= kBanks) {
+        return;
+    }
+    std::lock_guard lock(mutex_);
+    Port           &p = ports_[port];
+    const bool      was_bound = p.banks[bank_no] != nullptr;
+    if (was_bound) {
+        for (Voice &voice : synth_.Voices()) {
+            if (voice.active && voice.port == port) {
+                voice.active = false;
+                voice.envelope.Kill();
+            }
+        }
+    }
+    p.extra_banks += (bank != nullptr ? 1 : 0) - (was_bound ? 1 : 0);
+    p.banks[bank_no] = std::move(bank);
 }
 
 void Mixer::SetSequence(int port, std::shared_ptr<const SqFile> file) {
@@ -197,6 +224,37 @@ void Mixer::SetMasterGain(float gain) {
     master_ = gain;
 }
 
+void Mixer::SetCoreVolume(int core, float volume) {
+    if (core < 0 || core >= kCores) {
+        return;
+    }
+    std::lock_guard lock(mutex_);
+    core_volume_[core] = volume;
+}
+
+float Mixer::CoreVolume(int core) const {
+    if (core < 0 || core >= kCores) {
+        return 1.0f;
+    }
+    std::lock_guard lock(mutex_);
+    return core_volume_[core];
+}
+
+void Mixer::AddStreamChannel(StreamChannel *channel) {
+    if (channel == nullptr) {
+        return;
+    }
+    std::lock_guard lock(mutex_);
+    if (std::find(stream_channels_.begin(), stream_channels_.end(), channel) == stream_channels_.end()) {
+        stream_channels_.push_back(channel);
+    }
+}
+
+void Mixer::RemoveStreamChannel(StreamChannel *channel) {
+    std::lock_guard lock(mutex_);
+    std::erase(stream_channels_, channel);
+}
+
 void Mixer::KeyOffCore(int core) {
     std::lock_guard lock(mutex_);
     ForVoices([&](const Voice &v) { return v.Core() == core; }, [&](Voice &v) { ReleaseVoice(v); });
@@ -248,6 +306,17 @@ void Mixer::HsMessage(int port, std::span<const std::uint8_t> message) {
         case 0x01:
             ForVoices(match, [&](Voice &v) { v.effect_pan = value; });
             break;
+        case 0x02: {
+            if (message.size() < kHsMsgBytes) {
+                break;
+            }
+            const auto pitch = DecodeHsMsg(message);
+            if (!pitch || pitch->kind != HsMsgKind::Pitch) {
+                break;
+            }
+            ForVoices(match, [&](Voice &v) { v.effect_bend = pitch->value; });
+            break;
+        }
         default:
             break;
     }
@@ -322,6 +391,9 @@ void Mixer::Controller(Port &port, int channel, int controller, int value) {
     Channel &state = port.channels[channel];
     auto     on_channel = [&](const Voice &v) { return v.port == port.index && !v.effect && v.channel == channel; };
     switch (controller) {
+        case 0:
+            state.bank_select = value;
+            break;
         case 6:
             if (state.rpn == 0) {
                 state.bend_range = value;
@@ -372,14 +444,23 @@ void Mixer::Controller(Port &port, int channel, int controller, int value) {
     }
 }
 
+const Bank *Mixer::ChannelBank(const Port &port, int channel) const {
+    const int select = port.channels[channel].bank_select;
+    if (port.extra_banks == 0 || select == 0) {
+        return port.bank.get();
+    }
+    return port.banks[std::clamp(select, 0, kBanks - 1)].get();
+}
+
 void Mixer::NoteOn(Port &port, int channel, int note, int velocity) {
-    if (port.bank == nullptr) {
+    const Bank *bank = ChannelBank(port, channel);
+    if (bank == nullptr) {
         return;
     }
     ForVoices([&](const Voice &v) { return v.port == port.index && !v.effect && v.channel == channel && v.note == note; },
               [&](Voice &v) { ReleaseVoice(v); });
     std::array<Layer, kMaxLayers> layers;
-    const int                     count = port.bank->Resolve(port.channels[channel].program, note, velocity, layers);
+    const int                     count = bank->Resolve(port.channels[channel].program, note, velocity, layers);
     if (count == 0) {
         Trace("  program %d note %d velocity %d: no layer", port.channels[channel].program, note, velocity);
     }
@@ -389,7 +470,7 @@ void Mixer::NoteOn(Port &port, int channel, int note, int velocity) {
     prototype.note = note;
     prototype.program = port.channels[channel].program;
     for (int i = 0; i < count; i++) {
-        StartLayer(port, layers[i], note, velocity, prototype);
+        StartLayer(*bank, layers[i], note, velocity, prototype);
     }
 }
 
@@ -400,14 +481,15 @@ void Mixer::EffectOn(Port &port, int id, int number, int velocity) {
     const int program = port.channels[0].program;
     ForVoices([&](const Voice &v) { return v.port == port.index && v.effect && v.program == program && v.effect_id == id && v.effect_no == number; },
               [&](Voice &v) { ReleaseVoice(v); });
-    if (port.bank == nullptr) {
+    const Bank *bank = ChannelBank(port, 0);
+    if (bank == nullptr) {
         return;
     }
     std::array<Layer, kMaxLayers> layers;
     int                           note = id;
-    int                           count = port.bank->Resolve(program, id, velocity, layers);
+    int                           count = bank->Resolve(program, id, velocity, layers);
     if (count == 0) {
-        count = port.bank->ResolveSplit(program, id, velocity, layers);
+        count = bank->ResolveSplit(program, id, velocity, layers);
         note = -1;
     }
     Voice prototype;
@@ -418,13 +500,14 @@ void Mixer::EffectOn(Port &port, int id, int number, int velocity) {
     prototype.effect_no = number;
     prototype.effect_volume = port.effect_volume;
     prototype.effect_pan = port.effect_pan;
+    prototype.effect_bend = 8192;
     for (int i = 0; i < count; i++) {
-        StartLayer(port, layers[i], note < 0 ? layers[i].sample->base_note : note, velocity, prototype);
+        StartLayer(*bank, layers[i], note < 0 ? layers[i].sample->base_note : note, velocity, prototype);
     }
 }
 
-void Mixer::StartLayer(Port &port, const Layer &layer, int note, int velocity, Voice &prototype) {
-    const HdProgram &program = *port.bank->Program(prototype.program);
+void Mixer::StartLayer(const Bank &bank, const Layer &layer, int note, int velocity, Voice &prototype) {
+    const HdProgram &program = *bank.Program(prototype.program);
     const HdSplit   &split = *layer.split;
     const HdSample  &sample = *layer.sample;
 
@@ -456,7 +539,7 @@ void Mixer::StartLayer(Port &port, const Layer &layer, int note, int velocity, V
     voice.bend_high = split.bend_high;
     if (TraceEnabled()) {
         Trace("  program %d note %d -> sample %d (vag %d, %d Hz, base %d%s): %+.2f st, gain %.3f, core %d",
-              prototype.program, note, static_cast<int>(&sample - port.bank->Header().samples.data()),
+              prototype.program, note, static_cast<int>(&sample - bank.Header().samples.data()),
               sample.vag, layer.rate, sample.base_note, layer.vag->loops ? ", loops" : "", voice.base_pitch,
               voice.base_gain, voice.core);
     }
@@ -476,6 +559,14 @@ void Mixer::UpdateVoices() {
         if (voice.effect) {
             gain *= voice.effect_volume * kVolumeUnit;
             pan += voice.effect_pan;
+            if (voice.effect_bend != 8192) {
+                const int bend = voice.effect_bend - 8192;
+                int       range = bend < 0 ? voice.bend_low : voice.bend_high;
+                if (voice.bend_low == 0 && voice.bend_high == 0) {
+                    range = 2 * kFinePerSemitone;
+                }
+                pitch += bend / 8192.0 * range / kFinePerSemitone;
+            }
         } else {
             const Channel &channel = port.channels[voice.channel];
             gain *= channel.volume * kVolumeUnit * channel.expression * kVolumeUnit;
@@ -487,6 +578,10 @@ void Mixer::UpdateVoices() {
                 range = channel.bend_range * kFinePerSemitone;
             }
             pitch += bend / 8192.0 * range / kFinePerSemitone;
+        }
+        const float core_volume = core_volume_[voice.core];
+        if (core_volume != 1.0f) {
+            gain *= core_volume;
         }
         // The synth's pan law: the near side stays at full scale, the far one falls linearly to
         // silence 63 steps from the centre.
@@ -554,6 +649,9 @@ void Mixer::Render(float *out, int frames) {
             }
         }
         RenderStreams(out, block);
+        for (StreamChannel *channel : stream_channels_) {
+            channel->Render(out, block, rate_, master_);
+        }
         if (!stereo_) {
             for (int i = 0; i < block; i++) {
                 out[i * 2] = out[i * 2 + 1] = (out[i * 2] + out[i * 2 + 1]) * 0.5f;

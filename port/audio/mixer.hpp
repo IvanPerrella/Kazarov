@@ -15,6 +15,8 @@
 
 namespace audio {
 
+class StreamChannel;
+
 constexpr int kPorts = 16;
 constexpr int kChannels = 16;
 constexpr int kFullPortVolume = 256;
@@ -31,6 +33,9 @@ public:
     void Reset();
 
     void BindBank(int port, std::shared_ptr<const Bank> bank);
+
+    // Bank 0 is the port's bank; 1 to 15 are the extra banks a channel selects with CC 0.
+    void BindBank(int port, int bank_no, std::shared_ptr<const Bank> bank);
 
     void SetSequence(int port, std::shared_ptr<const SqFile> file);
 
@@ -66,6 +71,14 @@ public:
 
     void SetMasterGain(float gain);
 
+    void SetCoreVolume(int core, float volume);
+
+    float CoreVolume(int core) const;
+
+    void AddStreamChannel(StreamChannel *channel);
+
+    void RemoveStreamChannel(StreamChannel *channel);
+
     void KeyOffCore(int core);
 
     // A short MIDI message packed status first, little-endian, as libmodmsin queues them.
@@ -81,6 +94,8 @@ public:
     void Render(float *out, int frames);
 
 private:
+    static constexpr int kBanks = 16;
+
     struct Channel {
         int  program = 0;
         int  volume = 100;
@@ -90,21 +105,24 @@ private:
         int  bend_range = 2;
         bool sustain = false;
         int  rpn = 0x3FFF;
+        int  bank_select = 0;
     };
 
     struct Port final : MidiSink {
-        Mixer                          *mixer = nullptr;
-        int                             index = 0;
-        std::shared_ptr<const Bank>     bank;
-        Sequencer                       sequencer;
-        std::array<Channel, kChannels>  channels;
-        int                             volume = 0;
-        int                             attribute = 0;
-        int                             effect_volume = 127;
-        int                             effect_pan = 64;
-        std::shared_ptr<const PcmTrack> stream;
-        double                          stream_position = 0.0;
-        bool                            stream_playing = false;
+        Mixer                                           *mixer = nullptr;
+        int                                             index = 0;
+        std::shared_ptr<const Bank>                     bank;
+        std::array<std::shared_ptr<const Bank>, kBanks> banks;
+        int                                             extra_banks = 0;
+        Sequencer                                       sequencer;
+        std::array<Channel, kChannels>                  channels;
+        int                                             volume = 0;
+        int                                             attribute = 0;
+        int                                             effect_volume = 127;
+        int                                             effect_pan = 64;
+        std::shared_ptr<const PcmTrack>                 stream;
+        double                                          stream_position = 0.0;
+        bool                                            stream_playing = false;
 
         void ChannelMessage(std::uint8_t status, std::uint8_t data1, std::uint8_t data2) override;
     };
@@ -116,11 +134,13 @@ private:
 
     void Controller(Port &port, int channel, int controller, int value);
 
+    const Bank *ChannelBank(const Port &port, int channel) const;
+
     void NoteOn(Port &port, int channel, int note, int velocity);
 
     void EffectOn(Port &port, int id, int number, int velocity);
 
-    void StartLayer(Port &port, const Layer &layer, int note, int velocity, Voice &prototype);
+    void StartLayer(const Bank &bank, const Layer &layer, int note, int velocity, Voice &prototype);
 
     template <class Match, class Action>
     void ForVoices(Match match, Action action);
@@ -132,16 +152,18 @@ private:
 
     void UpdateVoices();
 
-    int                        rate_;
-    mutable std::mutex         mutex_;
-    Synth                      synth_;
-    std::array<Port, kPorts>   ports_;
-    std::array<Reverb, kCores> reverbs_;
-    bool                       stereo_ = true;
-    bool                       reverb_enabled_ = true;
-    float                      master_ = 1.0f;
-    std::vector<float>         core_buffers_[kCores];
-    std::uint64_t              rendered_ = 0;
+    int                          rate_;
+    mutable std::mutex           mutex_;
+    Synth                        synth_;
+    std::array<Port, kPorts>     ports_;
+    std::array<Reverb, kCores>   reverbs_;
+    bool                         stereo_ = true;
+    bool                         reverb_enabled_ = true;
+    float                        master_ = 1.0f;
+    std::array<float, kCores>    core_volume_{1.0f, 1.0f};
+    std::vector<float>           core_buffers_[kCores];
+    std::vector<StreamChannel *> stream_channels_;
+    std::uint64_t                rendered_ = 0;
 };
 
 // The mixer the game's sound driver plays through.

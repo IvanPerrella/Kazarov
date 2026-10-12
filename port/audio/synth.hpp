@@ -75,6 +75,7 @@ struct Voice {
     int  effect_no = 0;
     int  effect_volume = 127;
     int  effect_pan = 64;
+    int  effect_bend = 8192;
     bool held = false;
     bool released = false;
 
