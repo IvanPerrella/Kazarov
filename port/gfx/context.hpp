@@ -353,6 +353,7 @@ VkCommandBuffer DrawCommands();
 void            DeferDestroy(std::function<void()> destroy);
 // Submits recorded uploads outside a frame and waits for them.
 void   SubmitUploadsAndWait();
+void   RetireDeletions();
 void   RunOneShot(const std::function<void(VkCommandBuffer)> &record);
 Image &CurrentMainColor();
 Image &PreviousMainColor();

@@ -664,6 +664,16 @@ void SubmitUploadsAndWait() {
     AdvanceSlot();
 }
 
+// A slot's freed resources come back only when that slot's deletions run, and a full table is
+// otherwise only drained by the frame ring advancing.
+void RetireDeletions() {
+    SubmitUploadsAndWait();
+    for (Frame &frame : g.frames) {
+        WaitFrame(frame);
+        RunDeletions(frame);
+    }
+}
+
 void RunOneShot(const std::function<void(VkCommandBuffer)> &record) {
     SubmitUploadsAndWait();
 

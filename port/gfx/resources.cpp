@@ -61,6 +61,9 @@ void ClearDepth(VkCommandBuffer cmd, Image &image) {
 }
 
 uint32_t AllocateTextureSlot() {
+    if (g.free_texture_slots.empty() && g.textures.size() >= kMaxTextures && !g.in_frame && !RecordingCalls()) {
+        RetireDeletions();
+    }
     if (!g.free_texture_slots.empty()) {
         uint32_t slot = g.free_texture_slots.back();
         g.free_texture_slots.pop_back();
@@ -342,7 +345,8 @@ Texture *LookupTexture(TextureHandle handle) {
         return nullptr;
     }
     Texture &texture = g.textures[slot];
-    if (!texture.live || texture.generation != handle >> kSlotBits || (texture.doomed && !g.replaying)) {
+    if (!texture.live || texture.generation != handle >> kSlotBits ||
+        (texture.doomed && !g.replaying && !RecordingCalls())) {
         return nullptr;
     }
     return &texture;
@@ -354,7 +358,8 @@ Mesh *LookupMesh(MeshHandle handle) {
         return nullptr;
     }
     Mesh &mesh = g.meshes[slot];
-    if (!mesh.live || mesh.generation != handle >> kSlotBits || (mesh.doomed && !g.replaying)) {
+    if (!mesh.live || mesh.generation != handle >> kSlotBits ||
+        (mesh.doomed && !g.replaying && !RecordingCalls())) {
         return nullptr;
     }
     return &mesh;
@@ -623,7 +628,7 @@ TextureHandle FindNamedRenderTarget(std::string_view name) {
 
 void DestroyTexture(TextureHandle handle) {
     Texture *texture = LookupTexture(handle);
-    if (texture == nullptr) {
+    if (texture == nullptr || texture->doomed) {
         return;
     }
     std::erase_if(g.named_targets, [handle](const auto &entry) { return entry.second == handle; });
@@ -746,6 +751,9 @@ MeshHandle CreateMesh(std::span<const Vertex3D> vertices, std::span<const uint32
         Error("CreateMesh: empty mesh");
         return kNullMesh;
     }
+    if (g.free_mesh_slots.empty() && g.meshes.size() >= kMaxMeshes && !g.in_frame && !RecordingCalls()) {
+        RetireDeletions();
+    }
     uint32_t slot;
     if (!g.free_mesh_slots.empty()) {
         slot = g.free_mesh_slots.back();
@@ -793,7 +801,7 @@ bool UpdateMeshVertices(MeshHandle handle, uint32_t first, std::span<const Verte
 
 void DestroyMesh(MeshHandle handle) {
     Mesh *mesh = LookupMesh(handle);
-    if (mesh == nullptr) {
+    if (mesh == nullptr || mesh->doomed) {
         return;
     }
     if (RecordingCalls()) {

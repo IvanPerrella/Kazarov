@@ -28,7 +28,8 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
 - Single-threaded: call everything from one thread.
 - Textures, palettes, meshes and render targets can be created, updated and destroyed at any time,
   inside or outside a frame. Destruction is deferred until the GPU is done with them; a handle is
-  dead as soon as it is destroyed (handles carry a generation).
+  dead as soon as it is destroyed outside a recording (handles carry a generation). When the texture
+  or mesh table is full, a create outside a frame or recording first runs the pending destructions.
 
 ## Spaces
 
@@ -307,8 +308,9 @@ renders one.
   `UpdateMeshVertices`, `ReadDepth`. Arguments are validated and copied at once, so each call returns
   what it would have, and `CurrentRenderTarget`, `GetTextureInfo` and `GetLogicalMapping` answer as
   inside a frame. Creating a texture, mesh or render target happens at once (the handle is needed);
-  `DestroyTexture` and `DestroyMesh` make the handle dead to every call but the list's own replays
-  and destroy the resource when the list is released. `InFrame()` is true while recording. Outside
+  `DestroyTexture` and `DestroyMesh` keep the handle usable within the recording and by the list's
+  replays, dead to every call outside it, and destroy the resource when the list is released; a
+  second destroy of the handle is a no-op. `InFrame()` is true while recording. Outside
   a recording everything runs immediately, as before (`BeginFrame` / `EndFrame`, tests, the loading
   screen).
 - **Canonical render** (`options.canonical`): every entry runs, in order, into the next of the two
