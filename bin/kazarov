@@ -216,6 +216,10 @@ kz_do_work() {
         fi
     fi
 
+    if declare -F kz_before_build >/dev/null; then
+        (cd "$KZ_PROJECT_ROOT" && kz_before_build) || exit 1
+    fi
+
     kz_configure_check
     if [ "$configure_mode" != none ]; then
         kz_configure "$configure_mode"

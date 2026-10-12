@@ -53,6 +53,7 @@ It also defines `kz_config NAME`, which returns 1 for an unknown name and otherw
 
 Optional hooks, run with the project root as the working directory:
 
+- `kz_before_build` runs where the build runs (inside the container, or on the host for host configurations), before the configure step. A failure stops the build.
 - `kz_after_build` runs inside the container, after the default targets only.
 - `kz_after_run_build` runs inside, after the run targets. A failure here is reported and does not stop the run.
 - `kz_before_launch` runs on the host, in the project root, before an executable starts. It may set `KZ_LAUNCH_PREFIX`, an array of command words (for example a lock wrapper) put in front of the executable: the launch is `exec "${KZ_LAUNCH_PREFIX[@]}" <exe> "$@"`. It is empty unless the hook sets it.
@@ -204,7 +205,7 @@ Kazarov ships no FFmpeg code. `image/kz-ffmpeg` (launcher `bin/kz-ffmpeg`) build
 Per platform:
 
 - Linux: built into the image at `/opt/kazarov/ffmpeg`. The image sets `KZ_FFMPEG_DIR` to it.
-- macOS: run on the host, for example from a `kazarov.conf` before-build hook: `tools/kazarov/bin/kz-ffmpeg --out .kazarov/ffmpeg/darwin-arm64`. It skips itself when the stamp is current.
+- macOS: run on the host, for example from a `kz_before_build` hook in `kazarov.conf`: `tools/kazarov/bin/kz-ffmpeg --out .kazarov/ffmpeg/darwin-arm64`. It skips itself when the stamp is current.
 - Windows: there is no POSIX configure. `tools/windows/acquire.ps1` downloads BtbN's `win64-lgpl-shared` build of the 7.1 release from a dated `autobuild-*` tag, checked against a pinned SHA-256, and the project passes `-DKZ_FFMPEG_DIR`. `avcodec-61.dll`, `avutil-59.dll` and `swresample-5.dll` (which BtbN's `avcodec-61.dll` imports) ship beside the executable. Dynamic linking keeps LGPL relinking trivial; the static links on Linux and macOS are relinkable from the public sources.
 
 CMake, from the project's `CMakeLists.txt`:
