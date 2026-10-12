@@ -232,9 +232,22 @@ bool Matches(const char *pattern, const char *name) {
         return *name == '\0';
     }
     if (*pattern == '*') {
-        return Matches(pattern + 1, name) || (*name != '\0' && Matches(pattern, name + 1));
+        // IOP libmc treats a wildcard run beginning with '*' as a single star.
+        do {
+            ++pattern;
+        } while (*pattern == '*' || *pattern == '?');
+        if (*pattern == '\0') return true;
+        for (; *name != '\0'; ++name) {
+            if (Matches(pattern, name)) return true;
+        }
+        return false;
     }
-    return *name != '\0' && (*pattern == '?' || *pattern == *name) && Matches(pattern + 1, name + 1);
+    // A question consumes one byte, or accepts immediately at the end of a name,
+    // including when the pattern still has a suffix. It cannot skip a present byte.
+    if (*pattern == '?') {
+        return *name == '\0' || Matches(pattern + 1, name + 1);
+    }
+    return *name != '\0' && *pattern == *name && Matches(pattern + 1, name + 1);
 }
 
 McDateTime DateTime(const fs::path &path) {
