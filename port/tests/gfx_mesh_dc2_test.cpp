@@ -54,10 +54,15 @@ void SetFog(float (&fog)[4], float near_w, float far_w, float near_value, float 
     fog[3] = -far_w * near_w * range / (far_w - near_w);
 }
 
-gfx::MeshConstants Prog0(uint32_t flags, uint32_t face = 0) {
-    gfx::MeshConstants c{};
-    c.flags = gfx::kMeshProg0;
-    Identity(c.mvp);
+// A kMeshProg0 draw: the mesh constants and the Vu_prog0 block the game uploads with them.
+struct Prog0Draw {
+    gfx::MeshConstants  mesh;
+    gfx::Prog0Constants prog0;
+};
+
+Prog0Draw Prog0(uint32_t flags, uint32_t face = 0) {
+    Prog0Draw c{};
+    Identity(c.mesh.mvp);
     Identity(c.prog0.model_world);
     Set(c.prog0.diffuse, {1, 1, 1, 1});
     // Offset 255 with near value 255 and scale 0: no fog.
@@ -156,11 +161,21 @@ void SetBone(gfx::Prog0Constants &p, uint32_t slot, const std::array<float, 12> 
     }
 }
 
-gfx::MeshConstants Unlit(uint32_t flags, uint32_t face = 0) {
-    gfx::MeshConstants c = Prog0(flags, face);
+Prog0Draw Unlit(uint32_t flags, uint32_t face = 0) {
+    Prog0Draw c = Prog0(flags, face);
     Set(c.prog0.object_color, {128, 64, 32, 128});
     Set(c.prog0.diffuse, {0.5f, 0.5f, 0.5f, 1});
     SetDirectional(c.prog0, 0, {0, 0, 1}, {255, 255, 255, 0});
+    return c;
+}
+
+Prog0Draw FourLights() {
+    Prog0Draw c = Prog0(0);
+    Set(c.prog0.ambient, {10, 20, 30, 128});
+    SetDirectional(c.prog0, 0, {0, 0, 1}, {40, 0, 0, 0});
+    SetDirectional(c.prog0, 1, {0, 0.6f, 0.8f}, {0, 50, 0, 0});
+    SetDirectional(c.prog0, 2, {0, 0, -1}, {0, 0, 200, 0});
+    SetDirectional(c.prog0, 3, {1, 0, 0}, {0, 0, 90, 0});
     return c;
 }
 
@@ -184,11 +199,22 @@ void Render(GfxFixture &fixture, const std::vector<gfx::Vertex3D> &vertices, con
     fixture.Frame(kClear, [&] { gfx::DrawMeshImmediate(vertices, indices, constants, texture, state); });
 }
 
+void Render(GfxFixture &fixture, const std::vector<gfx::Vertex3D> &vertices, const std::vector<uint32_t> &indices,
+            const Prog0Draw &draw, const gfx::TextureBinding &texture = {}, const gfx::DrawState &state = {}) {
+    fixture.Frame(kClear, [&] {
+        gfx::DrawMeshImmediateProg0(vertices, indices, draw.mesh, draw.prog0, texture, state);
+    });
+}
+
 bool Centre(const GfxFixture &fixture, int r, int g, int b, int tolerance = 1) {
     return fixture.PixelNear(fixture.width / 2, fixture.height / 2, r, g, b, tolerance);
 }
 
 } // namespace
+
+TEST(GfxMeshDc2, MeshConstantsKeepChroniclesSize) {
+    EXPECT_EQ(sizeof(gfx::MeshConstants), 400u);
+}
 
 TEST(GfxMeshDc2, PipelinesOnlyWhenAsked) {
     uint32_t plain = 0;
@@ -213,21 +239,61 @@ TEST(GfxMeshDc2, PlainMeshesIgnoreTheProg0Pipelines) {
     EXPECT_EQ(fixture.Pixel(fixture.width / 2, fixture.height / 2), plain);
 }
 
+TEST(GfxMeshDc2, PlainDrawWithProg0FlagDrawsPlain) {
+    GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+    gfx::MeshConstants plain = ChronicleLit();
+    Render(fixture, ScreenVertices({0, 0, 1}), kTriangle, plain);
+    const std::array<uint8_t, 4> expected = fixture.Pixel(fixture.width / 2, fixture.height / 2);
+    gfx::MeshConstants flagged = plain;
+    flagged.flags |= gfx::kMeshProg0;
+    Render(fixture, ScreenVertices({0, 0, 1}), kTriangle, flagged);
+    EXPECT_EQ(fixture.Pixel(fixture.width / 2, fixture.height / 2), expected);
+}
+
 TEST(GfxMeshDc2, FourDirectionalLights) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(0);
-    Set(c.prog0.ambient, {10, 20, 30, 128});
-    SetDirectional(c.prog0, 0, {0, 0, 1}, {40, 0, 0, 0});
-    SetDirectional(c.prog0, 1, {0, 0.6f, 0.8f}, {0, 50, 0, 0});
-    SetDirectional(c.prog0, 2, {0, 0, -1}, {0, 0, 200, 0});
-    SetDirectional(c.prog0, 3, {1, 0, 0}, {0, 0, 90, 0});
-    Render(fixture, ScreenVertices({0, 0, 1}), kTriangle, c);
+    Render(fixture, ScreenVertices({0, 0, 1}), kTriangle, FourLights());
+    EXPECT_TRUE(Centre(fixture, 50, 60, 30));
+}
+
+TEST(GfxMeshDc2, IndexedProg0MeshMatchesImmediate) {
+    GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+    const Prog0Draw c = FourLights();
+    const std::vector<gfx::Vertex3D> vertices = ScreenVertices({0, 0, 1});
+    Render(fixture, vertices, kTriangle, c);
+    const std::array<uint8_t, 4> immediate = fixture.Pixel(fixture.width / 2, fixture.height / 2);
+
+    gfx::MeshHandle mesh = gfx::CreateMesh(vertices, kTriangle);
+    ASSERT_NE(mesh, gfx::kNullMesh);
+    fixture.Frame(kClear, [&] { gfx::DrawMeshProg0(mesh, 0, 3, c.mesh, c.prog0, {}, {}); });
+    EXPECT_EQ(fixture.Pixel(fixture.width / 2, fixture.height / 2), immediate);
+    EXPECT_TRUE(Centre(fixture, 50, 60, 30));
+    gfx::DestroyMesh(mesh);
+}
+
+TEST(GfxMeshDc2, RecordedProg0DrawReplaysThroughRenderList) {
+    GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+    const Prog0Draw c = FourLights();
+    const std::vector<gfx::Vertex3D> vertices = ScreenVertices({0, 0, 1});
+    Render(fixture, vertices, kTriangle, c);
+    const std::array<uint8_t, 4> direct = fixture.Pixel(fixture.width / 2, fixture.height / 2);
+
+    gfx::BeginRecording();
+    gfx::Clear(true, kClear.data(), true, 0.0f);
+    gfx::DrawMeshImmediateProg0(vertices, kTriangle, c.mesh, c.prog0, {}, {});
+    gfx::DisplayListRef list = gfx::EndRecording();
+    ASSERT_TRUE(list != nullptr);
+    gfx::RenderOptions options;
+    options.canonical = true;
+    ASSERT_TRUE(gfx::RenderList(*list, 1.0f, options));
+    ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+    EXPECT_EQ(fixture.Pixel(fixture.width / 2, fixture.height / 2), direct);
     EXPECT_TRUE(Centre(fixture, 50, 60, 30));
 }
 
 TEST(GfxMeshDc2, FourDirectionalLightsSaturate) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(0);
+    Prog0Draw c = Prog0(0);
     Set(c.prog0.ambient, {200, 200, 200, 128});
     SetDirectional(c.prog0, 0, {0, 0, 1}, {100, 100, 100, 0});
     Render(fixture, ScreenVertices({0, 0, 1}), kTriangle, c);
@@ -236,7 +302,7 @@ TEST(GfxMeshDc2, FourDirectionalLightsSaturate) {
 
 TEST(GfxMeshDc2, LightsTurnIntoModelSpace) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(0);
+    Prog0Draw c = Prog0(0);
     Set(c.prog0.model_world, {0, 2, 0, 0, -2, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1});
     SetDirectional(c.prog0, 0, {1, 0, 0}, {100, 0, 0, 0});
     Render(fixture, ScreenVertices({0, -1, 0}), kTriangle, c);
@@ -255,8 +321,8 @@ TEST(GfxMeshDc2, Unlit) {
 
 TEST(GfxMeshDc2, PointLights) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(gfx::kProg0PointLights);
-    UseTinyMvp(c.mvp);
+    Prog0Draw c = Prog0(gfx::kProg0PointLights);
+    UseTinyMvp(c.mesh.mvp);
     Set(c.prog0.ambient, {10, 10, 10, 0});
     SetPoint(c.prog0, 0, {0, 0, 2, 1}, {128, 0, 0, 0});
     SetPoint(c.prog0, 1, {0, 0, 0.5f, 1}, {0, 64, 0, 0});
@@ -269,8 +335,8 @@ TEST(GfxMeshDc2, PointLights) {
 
 TEST(GfxMeshDc2, RealSpecular) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(gfx::kProg0Real);
-    UseTinyMvp(c.mvp);
+    Prog0Draw c = Prog0(gfx::kProg0Real);
+    UseTinyMvp(c.mesh.mvp);
     Set(c.prog0.diffuse, {0.25f, 0.25f, 0.25f, 1});
     Set(c.prog0.specular, {1, 1, 1, 1});
     // Five units along a unit direction 0.9 off the normal: the reflection term is 0.9 at the origin.
@@ -289,7 +355,7 @@ TEST(GfxMeshDc2, RealSpecular) {
 
 TEST(GfxMeshDc2, VertexColour) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(gfx::kProg0Unlit, gfx::kProg0FaceColor);
+    Prog0Draw c = Prog0(gfx::kProg0Unlit, gfx::kProg0FaceColor);
     Set(c.prog0.object_color, {100, 100, 100, 128});
     Render(fixture, ScreenVertices({0, 0, 1}, {64, 64, 64, 128}), kTriangle, c);
     EXPECT_TRUE(Centre(fixture, 50, 50, 50));
@@ -310,7 +376,7 @@ TEST(GfxMeshDc2, RefSphere) {
     ASSERT_NE(texture, gfx::kNullTexture);
     gfx::TextureBinding binding = NearestBinding(texture);
 
-    gfx::MeshConstants c = Prog0(gfx::kProg0Unlit | gfx::kProg0RefSphere);
+    Prog0Draw c = Prog0(gfx::kProg0Unlit | gfx::kProg0RefSphere);
     Set(c.prog0.object_color, {128, 128, 128, 128});
     Identity(c.prog0.clip_or_view);
     Render(fixture, ScreenVertices({0.5f, -0.5f, 0.70710678f}), kTriangle, c, binding);
@@ -326,7 +392,7 @@ TEST(GfxMeshDc2, RefSphereIgnoresSkinning) {
     ASSERT_NE(texture, gfx::kNullTexture);
     gfx::TextureBinding binding = NearestBinding(texture);
 
-    gfx::MeshConstants c = Prog0(gfx::kProg0Unlit | gfx::kProg0RefSphere | gfx::kProg0Skinned);
+    Prog0Draw c = Prog0(gfx::kProg0Unlit | gfx::kProg0RefSphere | gfx::kProg0Skinned);
     Set(c.prog0.object_color, {128, 128, 128, 128});
     Identity(c.prog0.clip_or_view);
     SetBone(c.prog0, 0, {0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0});
@@ -339,7 +405,7 @@ TEST(GfxMeshDc2, RefSphereIgnoresSkinning) {
 
 TEST(GfxMeshDc2, Skinning) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(gfx::kProg0Unlit | gfx::kProg0Skinned);
+    Prog0Draw c = Prog0(gfx::kProg0Unlit | gfx::kProg0Skinned);
     Set(c.prog0.object_color, {200, 200, 200, 128});
     SetBone(c.prog0, 0, kIdentityBone);
     SetBone(c.prog0, 1, {1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0});
@@ -350,7 +416,7 @@ TEST(GfxMeshDc2, Skinning) {
 
 TEST(GfxMeshDc2, SkinnedNormals) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(gfx::kProg0Skinned);
+    Prog0Draw c = Prog0(gfx::kProg0Skinned);
     SetBone(c.prog0, 0, kIdentityBone);
     SetDirectional(c.prog0, 0, {0, 0, 1}, {100, 100, 100, 0});
     Render(fixture, Skinned(ScreenVertices({0, 0, 1}), {1, 0, 0, 0}, {0, 0, 0, 0}), kTriangle, c);
@@ -359,7 +425,7 @@ TEST(GfxMeshDc2, SkinnedNormals) {
 
 TEST(GfxMeshDc2, SkinnedFourthInfluenceNormal) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(gfx::kProg0Skinned);
+    Prog0Draw c = Prog0(gfx::kProg0Skinned);
     SetBone(c.prog0, 3, kIdentityBone);
     const std::vector<gfx::Vertex3D> vertices = Skinned(ScreenVertices({0, 0, 1}), {0, 0, 0, 1}, {0, 0, 0, 3});
     // O-8: influence 3's z term reads column 1, so the retail normal is (0, 1, 0).
@@ -373,7 +439,7 @@ TEST(GfxMeshDc2, SkinnedFourthInfluenceNormal) {
 
 TEST(GfxMeshDc2, ScissorClipsToClipOrView) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(gfx::kProg0Unlit | gfx::kProg0Scissor);
+    Prog0Draw c = Prog0(gfx::kProg0Unlit | gfx::kProg0Scissor);
     Set(c.prog0.object_color, {200, 200, 200, 128});
     Set(c.prog0.clip_or_view, {2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
     Render(fixture, ScreenVertices({0, 0, 1}), kTriangle, c);
@@ -387,7 +453,7 @@ TEST(GfxMeshDc2, ScissorClipsToClipOrView) {
 TEST(GfxMeshDc2, Prog0CullModeFollowsFlagAndMirror) {
     EXPECT_EQ(gfx::Prog0CullMode(Prog0(0).prog0), gfx::CullMode::None);
     EXPECT_EQ(gfx::Prog0CullMode(Prog0(gfx::kProg0Cull).prog0), gfx::CullMode::Back);
-    gfx::MeshConstants mirrored = Prog0(gfx::kProg0Unlit | gfx::kProg0Cull);
+    Prog0Draw mirrored = Prog0(gfx::kProg0Unlit | gfx::kProg0Cull);
     Set(mirrored.prog0.model_world, {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1});
     EXPECT_EQ(gfx::Prog0CullMode(mirrored.prog0), gfx::CullMode::Front);
 
@@ -395,7 +461,7 @@ TEST(GfxMeshDc2, Prog0CullModeFollowsFlagAndMirror) {
     const std::vector<gfx::Vertex3D> triangle = {Vert({0.0f, 0.0f, 0.5f}, {0, 0, 1}),
                                                  Vert({0.5f, 0.0f, 0.5f}, {0, 0, 1}),
                                                  Vert({0.0f, 0.5f, 0.5f}, {0, 0, 1})};
-    gfx::MeshConstants c = Prog0(gfx::kProg0Unlit | gfx::kProg0Cull);
+    Prog0Draw c = Prog0(gfx::kProg0Unlit | gfx::kProg0Cull);
     Set(c.prog0.object_color, {200, 200, 200, 128});
     gfx::DrawState state;
     state.cull = gfx::Prog0CullMode(c.prog0);
@@ -405,7 +471,7 @@ TEST(GfxMeshDc2, Prog0CullModeFollowsFlagAndMirror) {
     Render(fixture, triangle, {0, 2, 1}, c, {}, state);
     EXPECT_TRUE(fixture.PixelNear(35, 26, 200, 200, 200));
 
-    gfx::MeshConstants draw_mirrored = c;
+    Prog0Draw draw_mirrored = c;
     Set(draw_mirrored.prog0.model_world, {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1});
     gfx::DrawState mirrored_state;
     mirrored_state.cull = gfx::Prog0CullMode(draw_mirrored.prog0);
@@ -415,13 +481,13 @@ TEST(GfxMeshDc2, Prog0CullModeFollowsFlagAndMirror) {
 
 TEST(GfxMeshDc2, Fog) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(gfx::kProg0Unlit);
+    Prog0Draw c = Prog0(gfx::kProg0Unlit);
     Set(c.prog0.object_color, {255, 255, 255, 128});
     SetFog(c.prog0.fog, 10, 1000, 255, 0);
     gfx::DrawState state;
     state.fog = true;
     auto render_at = [&](float w) {
-        SetWMvp(c.mvp, w);
+        SetWMvp(c.mesh.mvp, w);
         Render(fixture, ScreenVertices({0, 0, 1}), kTriangle, c, {}, state);
     };
     render_at(10);
@@ -434,10 +500,10 @@ TEST(GfxMeshDc2, Fog) {
 
 TEST(GfxMeshDc2, EditorFogSaturatesAtFarValue) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    gfx::MeshConstants c = Prog0(gfx::kProg0Unlit);
+    Prog0Draw c = Prog0(gfx::kProg0Unlit);
     Set(c.prog0.object_color, {255, 255, 255, 128});
     SetFog(c.prog0.fog, 10, 1000, 0, 255);
-    SetWMvp(c.mvp, 100);
+    SetWMvp(c.mesh.mvp, 100);
     gfx::DrawState state;
     state.fog = true;
     // The shader clamps with min against the near value, then max against the far value, so the

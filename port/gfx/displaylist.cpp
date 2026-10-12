@@ -799,15 +799,25 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                     if (overrides != nullptr && overrides->index[e.record] >= 0) {
                         constants = &overrides->constants[overrides->index[e.record]];
                     }
+                    const Prog0Constants *prog0 =
+                        e.prog0 >= 0 ? &list.prog0_blocks[static_cast<size_t>(e.prog0)] : nullptr;
                     TextureBinding binding = GrabbedBinding(e.binding, canonical);
                     if (e.mesh != kNullMesh) {
-                        DrawMesh(e.mesh, e.first_index, e.index_count, *constants, binding, e.state);
+                        if (prog0 != nullptr) {
+                            DrawMeshProg0(e.mesh, e.first_index, e.index_count, *constants, *prog0, binding, e.state);
+                        } else {
+                            DrawMesh(e.mesh, e.first_index, e.index_count, *constants, binding, e.state);
+                        }
                     } else {
                         const std::vector<Vertex3D> *vertices = &e.vertices;
                         if (overrides != nullptr && overrides->vertex_index[e.record] >= 0) {
                             vertices = &overrides->vertices[overrides->vertex_index[e.record]];
                         }
-                        DrawMeshImmediate(*vertices, e.indices, *constants, binding, e.state);
+                        if (prog0 != nullptr) {
+                            DrawMeshImmediateProg0(*vertices, e.indices, *constants, *prog0, binding, e.state);
+                        } else {
+                            DrawMeshImmediate(*vertices, e.indices, *constants, binding, e.state);
+                        }
                     }
                 } else if constexpr (std::is_same_v<T, ClearEntry>) {
                     if (e.stencil) {
@@ -918,7 +928,7 @@ void RecordEntry(Entry &&entry) {
     list.entries.push_back(std::move(entry));
 }
 
-void RecordMesh(MeshEntry &&entry, const MeshTransform *transform) {
+void RecordMesh(MeshEntry &&entry, const MeshTransform *transform, const Prog0Constants *prog0) {
     DisplayList &list = *g.list;
     NoteMainDraw(list);
     MeshRecord record;
@@ -937,6 +947,10 @@ void RecordMesh(MeshEntry &&entry, const MeshTransform *transform) {
         record.local = ToMat4(transform->local);
         record.camera = CameraIndex(list, transform->view);
         NoteScene(list, record);
+    }
+    if (prog0 != nullptr) {
+        entry.prog0 = static_cast<int32_t>(list.prog0_blocks.size());
+        list.prog0_blocks.push_back(*prog0);
     }
     entry.record = static_cast<uint32_t>(list.records.size());
     record.entry = static_cast<uint32_t>(list.entries.size());

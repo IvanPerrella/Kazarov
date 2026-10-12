@@ -51,6 +51,7 @@ struct MeshEntry {
     TextureBinding        binding;
     DrawState             state;
     uint32_t              record = 0;
+    int32_t               prog0 = -1; // index into DisplayList::prog0_blocks, or -1 for a plain draw
 };
 
 struct ClearEntry {
@@ -130,6 +131,7 @@ struct DisplayList {
     std::vector<detail::MeshRecord> records;
     std::vector<detail::Mat4>       cameras;
     std::vector<detail::SpriteScene> scenes;
+    std::vector<Prog0Constants>      prog0_blocks;
     // While recording: the scene of the last mesh drawn on the current target, or -1, and on each
     // target drawn into so far (the fire's texture is blended between the map and its sprites).
     int32_t                                    scene = -1;
@@ -160,7 +162,7 @@ void Draw2DSided(Primitive primitive, std::span<const Vertex2D> vertices, const 
 
 // displaylist.cpp
 void RecordEntry(Entry &&entry);
-void RecordMesh(MeshEntry &&entry, const MeshTransform *transform);
+void RecordMesh(MeshEntry &&entry, const MeshTransform *transform, const Prog0Constants *prog0);
 void RecordClear(const ClearEntry &entry);
 void RecordDoomedTexture(TextureHandle handle);
 void RecordDoomedMesh(MeshHandle handle);

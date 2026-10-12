@@ -207,6 +207,28 @@ void DestroyBuffer(Buffer &buffer) {
     buffer = {};
 }
 
+// One uniform block of a chunk, dynamic so that each draw picks its own offset into the chunk.
+VkDescriptorSet AllocateBlockSet(VkDescriptorPool pool, VkDescriptorSetLayout layout, VkBuffer buffer,
+                                 VkDeviceSize range) {
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkDescriptorSetAllocateInfo allocate = {};
+    allocate.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocate.descriptorPool = pool;
+    allocate.descriptorSetCount = 1;
+    allocate.pSetLayouts = &layout;
+    Check(vkAllocateDescriptorSets(g.device, &allocate, &set), "vkAllocateDescriptorSets");
+
+    VkDescriptorBufferInfo buffer_info = {buffer, 0, range};
+    VkWriteDescriptorSet   write = {};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = set;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    write.pBufferInfo = &buffer_info;
+    vkUpdateDescriptorSets(g.device, 1, &write, 0, nullptr);
+    return set;
+}
+
 TransientSpan AllocateTransient(VkDeviceSize size, VkDeviceSize alignment) {
     Frame       &frame = CurrentFrame();
     VkDeviceSize align = std::max<VkDeviceSize>(alignment, 16);
@@ -217,7 +239,7 @@ TransientSpan AllocateTransient(VkDeviceSize size, VkDeviceSize alignment) {
         if (offset + size <= chunk.buffer.size) {
             chunk.used = offset + size;
             return TransientSpan{chunk.buffer.buffer, offset, chunk.buffer.memory.mapped + offset,
-                                 chunk.constants_set};
+                                 chunk.constants_set, chunk.prog0_set};
         }
     }
 
@@ -227,27 +249,17 @@ TransientSpan AllocateTransient(VkDeviceSize size, VkDeviceSize alignment) {
                                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                 true);
-
-    VkDescriptorSetAllocateInfo allocate = {};
-    allocate.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocate.descriptorPool = g.constants_pool;
-    allocate.descriptorSetCount = 1;
-    allocate.pSetLayouts = &g.constants_set_layout;
-    Check(vkAllocateDescriptorSets(g.device, &allocate, &chunk.constants_set), "vkAllocateDescriptorSets");
-
-    VkDescriptorBufferInfo buffer_info = {chunk.buffer.buffer, 0, sizeof(MeshConstants)};
-    VkWriteDescriptorSet   write = {};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = chunk.constants_set;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    write.pBufferInfo = &buffer_info;
-    vkUpdateDescriptorSets(g.device, 1, &write, 0, nullptr);
+    chunk.constants_set = AllocateBlockSet(g.constants_pool, g.constants_set_layout, chunk.buffer.buffer,
+                                           sizeof(MeshConstants));
+    if (g.config.prog0_meshes) {
+        chunk.prog0_set = AllocateBlockSet(g.prog0_descriptor_pool, g.prog0_set_layout, chunk.buffer.buffer,
+                                           sizeof(Prog0Constants));
+    }
 
     chunk.used = size;
     frame.chunks.push_back(chunk);
     frame.chunk = static_cast<uint32_t>(frame.chunks.size() - 1);
-    return TransientSpan{chunk.buffer.buffer, 0, chunk.buffer.memory.mapped, chunk.constants_set};
+    return TransientSpan{chunk.buffer.buffer, 0, chunk.buffer.memory.mapped, chunk.constants_set, chunk.prog0_set};
 }
 
 void ResetTransients(Frame &frame) {
@@ -255,6 +267,9 @@ void ResetTransients(Frame &frame) {
     for (size_t i = frame.chunks.size(); i-- > 0;) {
         if (frame.chunks[i].buffer.size > kTransientChunkSize || i >= 8) {
             vkFreeDescriptorSets(g.device, g.constants_pool, 1, &frame.chunks[i].constants_set);
+            if (frame.chunks[i].prog0_set != VK_NULL_HANDLE) {
+                vkFreeDescriptorSets(g.device, g.prog0_descriptor_pool, 1, &frame.chunks[i].prog0_set);
+            }
             DestroyBuffer(frame.chunks[i].buffer);
             frame.chunks.erase(frame.chunks.begin() + static_cast<std::ptrdiff_t>(i));
         }

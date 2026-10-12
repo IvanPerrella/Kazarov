@@ -342,6 +342,39 @@ void CreatePipelineLayout() {
     info.pushConstantRangeCount = 1;
     info.pPushConstantRanges = &push;
     Check(vkCreatePipelineLayout(g.device, &info, nullptr, &g.pipeline_layout), "vkCreatePipelineLayout");
+
+    if (!g.config.prog0_meshes) {
+        return;
+    }
+
+    VkDescriptorSetLayoutBinding prog0_binding = {};
+    prog0_binding.binding = 0;
+    prog0_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    prog0_binding.descriptorCount = 1;
+    prog0_binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    VkDescriptorSetLayoutCreateInfo prog0_layout = {};
+    prog0_layout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    prog0_layout.bindingCount = 1;
+    prog0_layout.pBindings = &prog0_binding;
+    Check(vkCreateDescriptorSetLayout(g.device, &prog0_layout, nullptr, &g.prog0_set_layout),
+          "vkCreateDescriptorSetLayout");
+
+    VkDescriptorPoolSize       prog0_size = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kConstantSets};
+    VkDescriptorPoolCreateInfo prog0_pool = {};
+    prog0_pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    prog0_pool.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    prog0_pool.maxSets = kConstantSets;
+    prog0_pool.poolSizeCount = 1;
+    prog0_pool.pPoolSizes = &prog0_size;
+    Check(vkCreateDescriptorPool(g.device, &prog0_pool, nullptr, &g.prog0_descriptor_pool),
+          "vkCreateDescriptorPool");
+
+    // Same push constant range as the plain layout, so pushes made through either stay valid for both.
+    VkDescriptorSetLayout prog0_layouts[3] = {g.texture_set_layout, g.constants_set_layout, g.prog0_set_layout};
+    info.setLayoutCount = 3;
+    info.pSetLayouts = prog0_layouts;
+    Check(vkCreatePipelineLayout(g.device, &info, nullptr, &g.prog0_pipeline_layout),
+          "vkCreatePipelineLayout");
 }
 
 uint32_t PipelineIndex(PipelineFamily family, uint32_t blend_slot, TextureMode mode, bool alpha_test) {
@@ -354,19 +387,23 @@ uint32_t NoColorPipelineIndex(PipelineFamily family, TextureMode mode, bool alph
     return families * g.blend_slot_count * modes * 2 + (family * modes + mode) * 2 + (alpha_test ? 1 : 0);
 }
 
-PipelineFamily MeshFamily(const MeshConstants &constants) {
-    if ((constants.flags & kMeshProg0) == 0) {
+PipelineFamily MeshFamily(const Prog0Constants *prog0) {
+    if (prog0 == nullptr) {
         return kFamilyMesh;
     }
     if (!g.config.prog0_meshes) {
         static bool reported = false;
         if (!reported) {
             reported = true;
-            Error("a kMeshProg0 draw on a renderer without prog0_meshes draws as a plain mesh");
+            Error("a Vu_prog0 mesh draw on a renderer without prog0_meshes draws as a plain mesh");
         }
         return kFamilyMesh;
     }
-    return (constants.prog0.flags & kProg0Skinned) != 0 ? kFamilyMeshProg0Skinned : kFamilyMeshProg0;
+    return (prog0->flags & kProg0Skinned) != 0 ? kFamilyMeshProg0Skinned : kFamilyMeshProg0;
+}
+
+VkPipelineLayout PipelineLayoutOf(PipelineFamily family) {
+    return family > kFamilyMesh ? g.prog0_pipeline_layout : g.pipeline_layout;
 }
 
 BlendMapping MapBlend(const GsBlend &blend, bool enable) {
@@ -607,7 +644,7 @@ void CreatePipelines() {
                     info.pDepthStencilState = &depth;
                     info.pColorBlendState = writes_color ? &blends[blend] : &no_color;
                     info.pDynamicState = &dynamic;
-                    info.layout = g.pipeline_layout;
+                    info.layout = PipelineLayoutOf(static_cast<PipelineFamily>(family));
                 }
             }
         }

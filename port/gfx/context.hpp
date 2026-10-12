@@ -118,6 +118,8 @@ struct TransientChunk {
     Buffer          buffer;
     VkDeviceSize    used = 0;
     VkDescriptorSet constants_set = VK_NULL_HANDLE;
+    // The chunk's Prog0Constants at set 2; only with RendererConfig::prog0_meshes.
+    VkDescriptorSet prog0_set = VK_NULL_HANDLE;
 };
 
 struct TransientSpan {
@@ -125,6 +127,7 @@ struct TransientSpan {
     VkDeviceSize    offset;
     uint8_t        *data;
     VkDescriptorSet constants_set;
+    VkDescriptorSet prog0_set;
 };
 
 struct DepthQuery {
@@ -283,10 +286,13 @@ struct Context {
     VkSampler                    samplers[kSamplerCount] = {};
     VkDescriptorSetLayout        texture_set_layout = VK_NULL_HANDLE;
     VkDescriptorSetLayout        constants_set_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout        prog0_set_layout = VK_NULL_HANDLE;
     VkDescriptorPool             texture_pool = VK_NULL_HANDLE;
     VkDescriptorPool             constants_pool = VK_NULL_HANDLE;
+    VkDescriptorPool             prog0_descriptor_pool = VK_NULL_HANDLE;
     VkDescriptorSet              texture_set = VK_NULL_HANDLE;
     VkPipelineLayout             pipeline_layout = VK_NULL_HANDLE;
+    VkPipelineLayout             prog0_pipeline_layout = VK_NULL_HANDLE;
     VkPipelineCache              pipeline_cache = VK_NULL_HANDLE;
     std::vector<VkPipeline>      pipelines;
     uint32_t                     blend_slot_count = 0;
@@ -393,8 +399,10 @@ uint32_t PipelineIndex(PipelineFamily family, uint32_t blend_slot, TextureMode m
 // Without a dynamic colour write mask: the pipelines that write no colour, after the others.
 uint32_t     NoColorPipelineIndex(PipelineFamily family, TextureMode mode, bool alpha_test);
 BlendMapping MapBlend(const GsBlend &blend, bool enable);
-// kFamilyMesh, or a prog0 family for a kMeshProg0 draw when the renderer has them.
-PipelineFamily MeshFamily(const MeshConstants &constants);
+// kFamilyMesh for a plain draw (nullptr), else a prog0 family when the renderer has them.
+PipelineFamily MeshFamily(const Prog0Constants *prog0);
+// Sets 0 and 1 are the same in both layouts, so the sets bound for one carry to the other.
+VkPipelineLayout PipelineLayoutOf(PipelineFamily family);
 
 // displaylist.cpp
 // The public resource calls that record instead of executing while a list is recorded.

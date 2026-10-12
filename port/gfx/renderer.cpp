@@ -839,8 +839,11 @@ void RendererShutdown() {
     }
     vkDestroyDescriptorPool(g.device, g.texture_pool, nullptr);
     vkDestroyDescriptorPool(g.device, g.constants_pool, nullptr);
+    vkDestroyDescriptorPool(g.device, g.prog0_descriptor_pool, nullptr);
     vkDestroyDescriptorSetLayout(g.device, g.texture_set_layout, nullptr);
     vkDestroyDescriptorSetLayout(g.device, g.constants_set_layout, nullptr);
+    vkDestroyDescriptorSetLayout(g.device, g.prog0_set_layout, nullptr);
+    vkDestroyPipelineLayout(g.device, g.prog0_pipeline_layout, nullptr);
     vkDestroyPipelineLayout(g.device, g.pipeline_layout, nullptr);
     for (VkSampler sampler : g.samplers) {
         vkDestroySampler(g.device, sampler, nullptr);

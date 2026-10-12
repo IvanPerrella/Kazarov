@@ -1,6 +1,6 @@
 #version 460
 
-// Dark Chronicle's Vu_prog0, for kMeshProg0 draws. Spec: docs/vu1/prog0.md and progmain.md in the
+// Dark Chronicle's Vu_prog0, for DrawMeshProg0 draws. Spec: docs/vu1/prog0.md and progmain.md in the
 // game's port; the O-n notes below are that spec's open items, kept as retail does them.
 
 layout(constant_id = 0) const bool kSkinned = false;
@@ -24,7 +24,7 @@ layout(push_constant, std430) uniform Push {
 }
 pc;
 
-// gfx::MeshConstants: mesh.vert's block, then Prog0Constants in the VU's units (128 is 1.0).
+// gfx::MeshConstants, identical to mesh.vert's block.
 layout(set = 1, binding = 0, std140) uniform MeshConstants {
     mat4 mvp;
     mat3 normal_matrix;
@@ -39,26 +39,30 @@ layout(set = 1, binding = 0, std140) uniform MeshConstants {
     vec4 world_uv[2];
     uint flags;
     uint light_count;
-
-    mat4 p0_model_world;
-    vec4 p0_light_direction[3];
-    vec4 p0_light_color[4];
-    vec4 p0_ambient;
-    vec4 p0_object_color;
-    vec4 p0_eye;
-    mat4 p0_clip_or_view;
-    vec4 p0_diffuse;
-    vec4 p0_specular;
-    vec4 p0_point_light[4];
-    vec4 p0_point_color[4];
-    vec4 p0_fog;
-    uint p0_flags;
-    uint p0_face;
-    uint p0_specular_power;
-    uint p0_pad;
-    vec4 p0_bones[96];
 }
 mc;
+
+// gfx::Prog0Constants in the VU's units (128 is 1.0), the draw's own block at set 2.
+layout(set = 2, binding = 0, std140) uniform Prog0Block {
+    mat4 model_world;
+    vec4 light_direction[3];
+    vec4 light_color[4];
+    vec4 ambient;
+    vec4 object_color;
+    vec4 eye;
+    mat4 clip_or_view;
+    vec4 diffuse;
+    vec4 specular;
+    vec4 point_light[4];
+    vec4 point_color[4];
+    vec4 fog;
+    uint flags;
+    uint face;
+    uint specular_power;
+    uint pad;
+    vec4 bones[96];
+}
+p0;
 
 const uint kScissor      = 0x002u;
 const uint kReal         = 0x008u;
@@ -96,9 +100,9 @@ void blend(inout vec3 position, inout vec3 normal) {
     for (int i = 0; i < 4; i++) {
         float w = a_skin_weight[i];
         uint b = min(a_skin_bone[i], 31u) * 3u;
-        vec4 r0 = mc.p0_bones[b];
-        vec4 r1 = mc.p0_bones[b + 1u];
-        vec4 r2 = mc.p0_bones[b + 2u];
+        vec4 r0 = p0.bones[b];
+        vec4 r1 = p0.bones[b + 1u];
+        vec4 r2 = p0.bones[b + 2u];
 
         vec4 pw = vec4(position * w, w);
         P += vec3(dot(r0, pw), dot(r1, pw), dot(r2, pw));
@@ -115,8 +119,8 @@ void blend(inout vec3 position, inout vec3 normal) {
 }
 
 void main() {
-    uint F = mc.p0_flags;
-    uint T = mc.p0_face;
+    uint F = p0.flags;
+    uint T = p0.face;
 
     vec3 position = a_position;
     vec3 normal = a_normal;
@@ -124,7 +128,7 @@ void main() {
 
     if ((F & kRefSphere) != 0u) {
         // O-9: env UV is taken from the unblended normal, before VERTEX_BLEND, as retail.
-        vec3 nh = vu_unit(mat3(mc.p0_clip_or_view) * a_normal);
+        vec3 nh = vu_unit(mat3(p0.clip_or_view) * a_normal);
         uv = (nh.xy + 1.0) * 0.5;
     }
 
@@ -132,25 +136,25 @@ void main() {
         blend(position, normal);
     }
 
-    mat3 W = mat3(mc.p0_model_world);
+    mat3 W = mat3(p0.model_world);
     vec3 L[4];
     // progmain's MSCAL 0 setup: world directions into model space, each normalised.
     for (int c = 0; c < 4; c++) {
-        vec3 lw = vec3(mc.p0_light_direction[0][c], mc.p0_light_direction[1][c],
-                       mc.p0_light_direction[2][c]);
+        vec3 lw = vec3(p0.light_direction[0][c], p0.light_direction[1][c],
+                       p0.light_direction[2][c]);
         L[c] = vu_unit(vec3(dot(lw, W[0]), dot(lw, W[1]), dot(lw, W[2])));
     }
 
-    vec4 D = mc.p0_diffuse;
+    vec4 D = p0.diffuse;
     vec4 color;
     if ((F & kUnlit) != 0u || (T & kFaceNoNormal) != 0u) {
-        color = min(mc.p0_object_color * D, vec4(255.0));
+        color = min(p0.object_color * D, vec4(255.0));
     } else {
-        color = mc.p0_ambient * D;
+        color = p0.ambient * D;
         float s[4];
         for (int c = 0; c < 4; c++) {
             s[c] = max(0.0, dot(L[c], normal));
-            color += mc.p0_light_color[c] * D * s[c];
+            color += p0.light_color[c] * D * s[c];
         }
 
         if ((F & kPointLights) != 0u) {
@@ -158,20 +162,20 @@ void main() {
             vec3 nw = W * normal;
             float inv_n = vu_rsqrt(dot(nw, nw));
             for (int k = 0; k < 4; k++) {
-                vec3 d = mc.p0_point_light[k].xyz - pw;
+                vec3 d = p0.point_light[k].xyz - pw;
                 float inv_d = vu_rsqrt(dot(d, d));
                 float cosine = max(0.0, dot(d, nw)) * inv_d * inv_n;
-                float a = mc.p0_point_light[k].w * inv_d;
+                float a = p0.point_light[k].w * inv_d;
                 // O-4: power enters squared, so a negative power acts as its magnitude.
                 float att = min(1.0, a * a);
-                color += mc.p0_point_color[k] * D * (cosine * att);
+                color += p0.point_color[k] * D * (cosine * att);
             }
         } else if ((F & kReal) != 0u) {
-            vec3 V = mc.p0_eye.xyz - position;
+            vec3 V = p0.eye.xyz - position;
             float inv_v = vu_rsqrt(dot(V, V));
             float vn = dot(V, normal);
             // Power 0 is the VU's 65536-pass loop; 32 passes reach the same saturated result.
-            uint n = mc.p0_specular_power == 0u ? 32u : min(mc.p0_specular_power, 32u);
+            uint n = p0.specular_power == 0u ? 32u : min(p0.specular_power, 32u);
             for (int c = 0; c < 4; c++) {
                 float lit = min(1.0, 1.0e4 * s[c]);
                 float r = max(0.0, 2.0 * vn * dot(L[c], normal) - dot(L[c], V)) * inv_v;
@@ -180,7 +184,7 @@ void main() {
                     // Saturates at the VU's largest float; keeps lit * x finite.
                     x = min(x * x, kVuMax);
                 }
-                color += mc.p0_light_color[c] * mc.p0_specular * (lit * x);
+                color += p0.light_color[c] * p0.specular * (lit * x);
             }
         }
         color = min(color, vec4(255.0));
@@ -198,17 +202,10 @@ void main() {
     }
 
     vec4 clip = mc.mvp * vec4(position, 1.0);
-    // The GS rasterises vertices at 1/16-pixel precision. Separate ground cells can reach the
-    // same screen edge through different transforms, whose last floating-point bits may differ.
-    // Quantise in logical-pixel units before viewport conversion so both edges use one location.
-    vec2 logical_pixel_ndc = pc.xform.xy;
-    vec2 ndc = clip.xy / clip.w;
-    ndc = round(ndc / (logical_pixel_ndc / 16.0)) * (logical_pixel_ndc / 16.0);
-    clip.xy = ndc * clip.w;
     gl_Position = clip;
 
     if ((F & kScissor) != 0u) {
-        vec4 c = mc.p0_clip_or_view * vec4(position, 1.0);
+        vec4 c = p0.clip_or_view * vec4(position, 1.0);
         gl_ClipDistance[0] = c.w - c.x;
         gl_ClipDistance[1] = c.w + c.x;
         gl_ClipDistance[2] = c.w - c.y;
@@ -226,6 +223,6 @@ void main() {
     v_uv = uv;
     // The VU clamps against the near value first and the far value last, so a far value above the
     // near value fogs nothing; GLSL clamp leaves that order undefined.
-    float f = mc.p0_fog.x + mc.p0_fog.w / clip.w;
-    v_fog = floor(max(max(min(f, mc.p0_fog.y), mc.p0_fog.z), 0.0)) / 255.0;
+    float f = p0.fog.x + p0.fog.w / clip.w;
+    v_fog = floor(max(max(min(f, p0.fog.y), p0.fog.z), 0.0)) / 255.0;
 }

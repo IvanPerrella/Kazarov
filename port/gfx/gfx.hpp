@@ -89,7 +89,7 @@ struct RendererConfig {
     // False sets one stencil reference and compare and write masks for both faces, as on a
     // portability-subset device without separateStencilMaskRef.
     bool separate_stencil_masks = true;
-    // Also precompiles the Vu_prog0 pipelines kMeshProg0 draws need (Dark Chronicle).
+    // Also precompiles the Vu_prog0 pipelines, and the set 2 layout, that DrawMeshProg0 needs (Dark Chronicle).
     bool prog0_meshes = false;
 };
 
@@ -413,11 +413,11 @@ enum MeshFlags : uint32_t {
     // normalised units. A display render's interpolated camera moves the sample with the vertex.
     kMeshScreenUv = 1u << 6,
     kMeshWorldUv = 1u << 7,
-    // Vu_prog0's paths, from MeshConstants::prog0 and mvp alone; needs RendererConfig::prog0_meshes.
+    // Implied by DrawMeshProg0 and DrawMeshImmediateProg0; a plain draw that sets it draws plain.
     kMeshProg0 = 1u << 8,
 };
 
-// Vu_prog0's flags word (VU1 QW 0x26.x), as mgCVisualMDT::CreateRenderInfoPacket sets it.
+// Vu_prog0's flags word, as mgCVisualMDT::CreateRenderInfoPacket sets it.
 enum Prog0Flags : uint32_t {
     kProg0Clip = 0x001,
     kProg0Scissor = 0x002, // six-plane clip against Prog0Constants::clip_or_view
@@ -430,7 +430,7 @@ enum Prog0Flags : uint32_t {
     kProg0RefSphere = 0x100,
 };
 
-// The batch header's face type bits (dw3) Vu_prog0 reads.
+// Per-face type bits Vu_prog0 reads.
 enum Prog0Face : uint32_t {
     kProg0FaceNoTexture = 0x010,
     kProg0FaceColor = 0x100,
@@ -439,28 +439,28 @@ enum Prog0Face : uint32_t {
 
 inline constexpr uint32_t kProg0Bones = 32;
 
-// A kMeshProg0 draw's inputs in Vu_prog0's own terms: the VU1 quadwords the game writes, as
-// floats. Colours are on the VU's scale (128 is 1.0), the material on 1.0.
+// A DrawMeshProg0 draw's inputs as floats. Colours are scaled so 128 is 1.0; the material is on 1.0.
 struct Prog0Constants {
-    float    model_world[16];       // QW 0x08-0x0B, columns
-    float    light_direction[3][4]; // QW 0x0C-0x0E: x, y, z of four world directions toward the lights
-    float    light_color[4][4];     // QW 0x0F-0x12
-    float    ambient[4];            // QW 0x13, w already times the object's alpha
-    float    object_color[4];       // QW 0x14
-    float    eye[4];                // QW 0x18, object space
-    // QW 0x19-0x1C: world_clip * model, overwritten by view * model under kProg0RefSphere as the
-    // game overlaps the two blocks, so a draw with both clips against the view.
+    float    model_world[16];       // model to world, columns
+    float    light_direction[3][4]; // x, y, z rows: world directions toward the four lights
+    float    light_color[4][4];     // per-light colour
+    float    ambient[4];            // w already multiplied by the object's alpha
+    float    object_color[4];
+    float    eye[4];                // object space
+    // World clip * model, or view * model under kProg0RefSphere: the game overlaps the two blocks, so a
+    // draw with both clips against the view.
     float    clip_or_view[16];
-    float    diffuse[4];         // QW 0x28
-    float    specular[4];        // QW 0x29
-    float    point_light[4][4];  // QW 0x2D-0x30: position less the object's origin (world), w power
-    float    point_color[4][4];  // QW 0x31-0x34
-    float    fog[4];             // QW 0x3B: offset, near value, far value, scale
-    uint32_t flags = 0;          // Prog0Flags
-    uint32_t face = 0;           // Prog0Face
-    uint32_t specular_power = 0; // QW 0x2B.x
+    float    diffuse[4];            // material
+    float    specular[4];           // material
+    float    point_light[4][4];     // positions relative to the object origin, world space; w is the power
+    float    point_color[4][4];     // per-light colour
+    float    fog[4];                // offset, near value, far value, scale
+    uint32_t flags = 0;             // Prog0Flags
+    uint32_t face = 0;              // Prog0Face
+    uint32_t specular_power = 0;    // specular exponent
     uint32_t pad = 0;
-    // QW 0x3C on: rows 0-2 of each slot's matrix. Row 3 only reaches w, which prog0 drops.
+    // The draw's palette: kProg0Bones model-space (object-space) affine matrices, rows 0-2 each, not
+    // multiplied with view or projection, so a display frame can interpolate them per bone.
     float bones[kProg0Bones][3][4];
 };
 
@@ -472,8 +472,7 @@ struct Prog0Skin {
 };
 static_assert(sizeof(Prog0Skin) == sizeof(Vertex3D));
 
-// Vu_prog0 culls only under kProg0Cull; a mirroring model_world (progmain's QW 0x1E word) swaps
-// the faces it keeps.
+// Vu_prog0 culls only under kProg0Cull; a mirroring model_world swaps the faces it keeps.
 inline CullMode Prog0CullMode(const Prog0Constants &constants) {
     if ((constants.flags & kProg0Cull) == 0) {
         return CullMode::None;
@@ -484,7 +483,8 @@ inline CullMode Prog0CullMode(const Prog0Constants &constants) {
     return det < 0.0f ? CullMode::Front : CullMode::Back;
 }
 
-// Matches the std140 blocks in shaders/mesh.vert, which stops before prog0, and shaders/mesh_prog0.vert.
+// Matches the std140 block of set 1 in shaders/mesh.vert and shaders/mesh_prog0.vert. A prog0 draw's
+// Prog0Constants is its own block at set 2, so Chronicle's draws stay at this size.
 // Colours outside prog0 are modulations with 1.0 as GS 0x80.
 struct MeshConstants {
     float    mvp[16];           // column-major, object to Vulkan clip space (y down, reverse-Z)
@@ -501,9 +501,8 @@ struct MeshConstants {
     uint32_t flags = 0;
     uint32_t light_count = 0;
     uint32_t pad[2] = {};
-    Prog0Constants prog0; // kMeshProg0 only; after the rest so shaders/mesh.vert's block is unchanged
 };
-static_assert(offsetof(MeshConstants, prog0) == 400);
+static_assert(sizeof(MeshConstants) == 400);
 static_assert(offsetof(Prog0Constants, flags) == 464 && offsetof(Prog0Constants, bones) == 480);
 static_assert(sizeof(Prog0Constants) == 2016);
 
@@ -533,6 +532,15 @@ void DrawMesh(MeshHandle mesh, uint32_t first_index, uint32_t index_count, const
 void DrawMeshImmediate(std::span<const Vertex3D> vertices, std::span<const uint32_t> indices,
                        const MeshConstants &constants, const TextureBinding &texture, const DrawState &state,
                        const MeshTransform *transform = nullptr);
+// The same draws through Vu_prog0's pipelines, with the game's Prog0Constants for the draw. They need
+// RendererConfig::prog0_meshes; without it they report once and draw as a plain mesh.
+void DrawMeshProg0(MeshHandle mesh, uint32_t first_index, uint32_t index_count, const MeshConstants &constants,
+                   const Prog0Constants &prog0, const TextureBinding &texture, const DrawState &state,
+                   const MeshTransform *transform = nullptr);
+void DrawMeshImmediateProg0(std::span<const Vertex3D> vertices, std::span<const uint32_t> indices,
+                            const MeshConstants &constants, const Prog0Constants &prog0,
+                            const TextureBinding &texture, const DrawState &state,
+                            const MeshTransform *transform = nullptr);
 
 // ---- Targets, copies, blits ------------------------------------------------------------------
 
@@ -608,7 +616,7 @@ bool WritePng(const std::filesystem::path &path, const uint8_t *rgba, uint32_t w
 // ---- Display lists ---------------------------------------------------------------------------
 
 // What one logic tick drew. Between BeginRecording and EndRecording the drawing calls (Draw2D,
-// DrawMesh, DrawMeshImmediate, Clear, ClearStencil, SetRenderTarget) and the stateful ones
+// DrawMesh, DrawMeshImmediate, the Prog0 variants of both, Clear, ClearStencil, SetRenderTarget) and the stateful ones
 // (CopyTexture, BlitTexture, SnapshotFrame, UpdateTexture, UpdatePalette, UpdateMeshVertices,
 // ReadDepth) are appended to the list instead of executed; their arguments are validated and
 // copied, so the calls return what they would have. Creating textures, meshes and render targets

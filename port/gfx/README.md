@@ -237,15 +237,16 @@ file and a rename.
 
 ## Dark Chronicle's Vu_prog0 meshes
 
-A draw with `kMeshProg0` uses `shaders/mesh_prog0.vert` and reads only `mvp` and
-`MeshConstants::prog0`. `Prog0Constants` is the VU1 memory the game writes: `model_world`, the four
+`DrawMeshProg0` and `DrawMeshImmediateProg0` draw through `shaders/mesh_prog0.vert`, taking the
+game's `Prog0Constants` beside the `MeshConstants` (which reads only `mvp` of them). The block is a
+separate per-draw uniform at set 2, so Chronicle's `MeshConstants` stay 400 bytes and its pipeline
+layout is unchanged. `Prog0Constants` is the VU1 memory the game writes: `model_world`, the four
 world light directions as x/y/z rows, the light colours, ambient times object alpha, object colour,
 the eye in object space, the clip-or-view block, material diffuse and specular with the exponent,
 four point lights relative to the object origin with their power, the fog quadword (0x3B) and the
 32 bone slots. It is in the VU's units: colours on 128 = 1.0, the material on 1.0. The game copies
-what its render-info packet would upload instead of converting units. `prog0` sits after the older
-fields, so `mesh.vert`'s block and its SPIR-V are unchanged; the cost is that every mesh draw's
-constants are 2416 bytes rather than 400.
+what its render-info packet would upload instead of converting units. A display list records the
+block with its draw, and replays it as recorded.
 
 Dispatch follows the program. The matcap (`kProg0RefSphere`, 0x100) takes its UV from the unblended
 normal. Skinning (0x040) blends the vertices through the bone slots. Then, unless the face is

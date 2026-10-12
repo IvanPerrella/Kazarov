@@ -324,7 +324,7 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
     push.alpha = state.alpha_ref | (static_cast<uint32_t>(state.alpha_func) & 7) << 8 |
                  static_cast<uint32_t>(state.alpha.fix) << 16 | static_cast<uint32_t>(state.texa_ta0) << 24;
     push.fog_color = state.fog_color[0] | state.fog_color[1] << 8 | state.fog_color[2] << 16;
-    vkCmdPushConstants(cmd, g.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+    vkCmdPushConstants(cmd, PipelineLayoutOf(family), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                        sizeof(push), &push);
 
     int cull = static_cast<int>(state.cull);
@@ -404,13 +404,21 @@ void BindVertices(VkBuffer buffer, VkDeviceSize offset) {
     }
 }
 
-void BindConstants(const MeshConstants &constants) {
-    TransientSpan span =
-        AllocateTransient(sizeof(MeshConstants), g.properties.limits.minUniformBufferOffsetAlignment);
+// prog0 is the draw's Vu_prog0 block at set 2, or nullptr for a plain draw.
+void BindConstants(VkPipelineLayout layout, const MeshConstants &constants, const Prog0Constants *prog0) {
+    VkDeviceSize alignment = g.properties.limits.minUniformBufferOffsetAlignment;
+    TransientSpan span = AllocateTransient(sizeof(MeshConstants), alignment);
     std::memcpy(span.data, &constants, sizeof(MeshConstants));
     uint32_t offset = static_cast<uint32_t>(span.offset);
-    vkCmdBindDescriptorSets(DrawCommands(), VK_PIPELINE_BIND_POINT_GRAPHICS, g.pipeline_layout, 1, 1,
-                            &span.constants_set, 1, &offset);
+    VkCommandBuffer cmd = DrawCommands();
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1, 1, &span.constants_set, 1, &offset);
+    if (prog0 == nullptr) {
+        return;
+    }
+    TransientSpan block = AllocateTransient(sizeof(Prog0Constants), alignment);
+    std::memcpy(block.data, prog0, sizeof(Prog0Constants));
+    uint32_t block_offset = static_cast<uint32_t>(block.offset);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 2, 1, &block.prog0_set, 1, &block_offset);
 }
 
 // Pixel rectangle of a logical one on an image, for copies and blits; along the axes in extend it
@@ -1058,8 +1066,22 @@ void DrawPrepared(Primitive primitive, std::span<const Vertex2D> vertices, const
 } // namespace
 } // namespace detail
 
-void DrawMesh(MeshHandle handle, uint32_t first_index, uint32_t index_count, const MeshConstants &constants,
-              const TextureBinding &binding, const DrawState &state, const MeshTransform *transform) {
+namespace {
+
+// A plain draw that sets kMeshProg0 is drawn plain; DrawMeshProg0 and DrawMeshImmediateProg0 are
+// the way to Vu_prog0.
+void ReportPlainProg0Flag(const MeshConstants &constants) {
+    static bool reported = false;
+    if ((constants.flags & kMeshProg0) != 0 && !reported) {
+        reported = true;
+        Error("a plain mesh draw sets kMeshProg0; it draws as a plain mesh");
+    }
+}
+
+// prog0 is the draw's Vu_prog0 block, or nullptr for a plain draw.
+void DrawIndexedMesh(MeshHandle handle, uint32_t first_index, uint32_t index_count, const MeshConstants &constants,
+                     const Prog0Constants *prog0, const TextureBinding &binding, const DrawState &state,
+                     const MeshTransform *transform) {
     Mesh *mesh = LookupMesh(handle);
     if (mesh == nullptr || first_index + index_count > mesh->index_count) {
         Error("DrawMesh: bad mesh %#x or index range", handle);
@@ -1068,40 +1090,58 @@ void DrawMesh(MeshHandle handle, uint32_t first_index, uint32_t index_count, con
     if (RecordingCalls()) {
         if (index_count != 0) {
             RecordMesh(MeshEntry{handle, first_index, index_count, {}, {}, constants, binding, state, 0},
-                       transform);
+                       transform, prog0);
         }
         return;
     }
-    PushConstants push;
-    if (index_count == 0 ||
-        !Prepare(MeshFamily(constants), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, binding, state, push)) {
+    PipelineFamily family = MeshFamily(prog0);
+    PushConstants  push;
+    if (index_count == 0 || !Prepare(family, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, binding, state, push)) {
         return;
     }
     mesh->last_draw_use = g.frame_serial;
     VkCommandBuffer cmd = DrawCommands();
-    BindConstants(constants);
+    BindConstants(PipelineLayoutOf(family), constants, family > kFamilyMesh ? prog0 : nullptr);
     BindVertices(mesh->buffer.buffer, 0);
     vkCmdBindIndexBuffer(cmd, mesh->buffer.buffer, mesh->vertex_count * sizeof(Vertex3D),
                          VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
 }
 
-void DrawMeshImmediate(std::span<const Vertex3D> vertices, std::span<const uint32_t> indices,
-                       const MeshConstants &constants, const TextureBinding &binding, const DrawState &state,
-                       const MeshTransform *transform) {
+} // namespace
+
+void DrawMesh(MeshHandle handle, uint32_t first_index, uint32_t index_count, const MeshConstants &constants,
+              const TextureBinding &binding, const DrawState &state, const MeshTransform *transform) {
+    ReportPlainProg0Flag(constants);
+    DrawIndexedMesh(handle, first_index, index_count, constants, nullptr, binding, state, transform);
+}
+
+void DrawMeshProg0(MeshHandle handle, uint32_t first_index, uint32_t index_count, const MeshConstants &constants,
+                   const Prog0Constants &prog0, const TextureBinding &binding, const DrawState &state,
+                   const MeshTransform *transform) {
+    DrawIndexedMesh(handle, first_index, index_count, constants, &prog0, binding, state, transform);
+}
+
+namespace {
+
+// prog0 is the draw's Vu_prog0 block, or nullptr for a plain draw.
+void DrawImmediateMesh(std::span<const Vertex3D> vertices, std::span<const uint32_t> indices,
+                       const MeshConstants &constants, const Prog0Constants *prog0,
+                       const TextureBinding &binding, const DrawState &state, const MeshTransform *transform) {
     if (RecordingCalls()) {
         if (!vertices.empty() && !indices.empty()) {
             MeshEntry entry{kNullMesh, 0, 0, {}, {}, constants, binding, state, 0};
             entry.index_count = static_cast<uint32_t>(indices.size());
             entry.vertices.assign(vertices.begin(), vertices.end());
             entry.indices.assign(indices.begin(), indices.end());
-            RecordMesh(std::move(entry), transform);
+            RecordMesh(std::move(entry), transform, prog0);
         }
         return;
     }
-    PushConstants push;
+    PipelineFamily family = MeshFamily(prog0);
+    PushConstants  push;
     if (vertices.empty() || indices.empty() ||
-        !Prepare(MeshFamily(constants), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, binding, state, push)) {
+        !Prepare(family, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, binding, state, push)) {
         return;
     }
     VkCommandBuffer cmd = DrawCommands();
@@ -1109,10 +1149,25 @@ void DrawMeshImmediate(std::span<const Vertex3D> vertices, std::span<const uint3
     std::memcpy(vertex_data.data, vertices.data(), vertices.size_bytes());
     TransientSpan index_data = AllocateTransient(indices.size_bytes(), sizeof(uint32_t));
     std::memcpy(index_data.data, indices.data(), indices.size_bytes());
-    BindConstants(constants);
+    BindConstants(PipelineLayoutOf(family), constants, family > kFamilyMesh ? prog0 : nullptr);
     BindVertices(vertex_data.buffer, vertex_data.offset);
     vkCmdBindIndexBuffer(cmd, index_data.buffer, index_data.offset, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(cmd, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+}
+
+} // namespace
+
+void DrawMeshImmediate(std::span<const Vertex3D> vertices, std::span<const uint32_t> indices,
+                       const MeshConstants &constants, const TextureBinding &binding, const DrawState &state,
+                       const MeshTransform *transform) {
+    ReportPlainProg0Flag(constants);
+    DrawImmediateMesh(vertices, indices, constants, nullptr, binding, state, transform);
+}
+
+void DrawMeshImmediateProg0(std::span<const Vertex3D> vertices, std::span<const uint32_t> indices,
+                            const MeshConstants &constants, const Prog0Constants &prog0,
+                            const TextureBinding &binding, const DrawState &state, const MeshTransform *transform) {
+    DrawImmediateMesh(vertices, indices, constants, &prog0, binding, state, transform);
 }
 
 void Clear(bool clear_color, const uint8_t color[4], bool clear_depth, float depth, const LogicalRect *rect) {
