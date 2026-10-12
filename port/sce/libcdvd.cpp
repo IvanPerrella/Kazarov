@@ -60,7 +60,8 @@ int sceCdSearchFile(sceCdlFILE *file, const char *name) {
     const auto size = std::filesystem::file_size(current, error);
     if (error || size > std::numeric_limits<decltype(file->size)>::max()) return 0;
     file->size = static_cast<decltype(file->size)>(size);
-    const auto basename = PathsDisplay(current.filename());
+    auto basename = PathsDisplay(current.filename());
+    for (auto &c : basename) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     std::strncpy(file->name, basename.c_str(), sizeof(file->name) - 1);
     // Directory-backed data has no sector address; search/seek are only advisory preload hints.
     file->lsn = 0;

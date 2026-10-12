@@ -20,7 +20,7 @@ TEST(PlatformCdvd, SearchResolvesIsoNamesAgainstExtractedData) {
     sceCdlFILE file{};
     EXPECT_EQ(sceCdSearchFile(&file, "\\FOLDER\\SAMPLE.BIN;1"), 1);
     EXPECT_EQ(file.size, 8u);
-    EXPECT_STREQ(file.name, "sample.bin");
+    EXPECT_STREQ(file.name, "SAMPLE.BIN");
     EXPECT_EQ(sceCdSeek(file.lsn), 1);
     EXPECT_EQ(sceCdSearchFile(&file, "folder/missing.bin"), 0);
     EXPECT_EQ(file.size, 0u);
