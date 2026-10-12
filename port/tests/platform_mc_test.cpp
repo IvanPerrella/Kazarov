@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <libmc.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -44,7 +45,81 @@ int Settle(int issued, int function) {
     return result;
 }
 
+std::vector<std::string> ListNames(const char *pattern, int mode = 0, int count = 64) {
+    alignas(16) unsigned char table[64][0x40] = {};
+    const int result = Settle(sceMcGetDir(0, 0, const_cast<char *>(pattern), mode, count,
+        reinterpret_cast<SdkParams<decltype(sceMcGetDir)>::At<5>>(table)), 0x0D);
+    EXPECT_GE(result, 0);
+    std::vector<std::string> names;
+    for (int i = 0; i < result; ++i) names.emplace_back(reinterpret_cast<char *>(table[i] + 0x20));
+    return names;
+}
+
+void MakeNames(std::initializer_list<const char *> names) {
+    const auto root = UseTempSaveRoot();
+    sceMcInit();
+    ASSERT_EQ(Settle(sceMcFormat(0, 0), 0x10), 0);
+    ASSERT_EQ(Settle(sceMcChdir(0, 0, (char *) "/", nullptr), 0x0C), 0);
+    for (const char *name : names) fs::create_directory(root / "mc0" / name);
+}
+
 } // namespace
+
+TEST(PlatformMc, DirectoryExactNamesRemainCaseSensitive) {
+    MakeNames({"save", "save0", "save01", "SaveUpper"});
+    EXPECT_EQ(ListNames("/save"), (std::vector<std::string>{"save"}));
+    EXPECT_EQ(ListNames("/SaveUpper"), (std::vector<std::string>{"SaveUpper"}));
+    EXPECT_TRUE(ListNames("/SAVE").empty());
+    EXPECT_TRUE(ListNames("/sav").empty());
+}
+
+TEST(PlatformMc, DirectoryTrailingQuestionsAcceptShortNames) {
+    MakeNames({"save", "save0", "save01", "save012", "sav"});
+    EXPECT_EQ(ListNames("/save?"), (std::vector<std::string>{"save", "save0"}));
+    EXPECT_EQ(ListNames("/save??"), (std::vector<std::string>{"save", "save0", "save01"}));
+}
+
+TEST(PlatformMc, DirectoryMiddleQuestionConsumesACharacterOrAcceptsNameEnd) {
+    MakeNames({"a", "ab", "acb", "accb", "axb", "ax"});
+    EXPECT_EQ(ListNames("/a?b"), (std::vector<std::string>{"a", "acb", "axb"}));
+    EXPECT_EQ(ListNames("/a??b"), (std::vector<std::string>{"a", "ab", "accb", "ax"}));
+    EXPECT_TRUE(ListNames("/z?b").empty());
+}
+
+TEST(PlatformMc, DirectoryStarsCollapseFollowingWildcardsAndRetrySuffixes) {
+    MakeNames({"a", "ab", "acb", "accb", "abxb", "ax"});
+    const std::vector<std::string> all = {"a", "ab", "abxb", "acb", "accb", "ax"};
+    const std::vector<std::string> ends_b = {"ab", "abxb", "acb", "accb"};
+    EXPECT_EQ(ListNames("/a*"), all);
+    EXPECT_EQ(ListNames("/a*??*"), all);
+    EXPECT_EQ(ListNames("/a*b"), ends_b);
+    EXPECT_EQ(ListNames("/a*?b"), ends_b);
+    EXPECT_EQ(ListNames("/a**??*b"), ends_b);
+    EXPECT_TRUE(ListNames("/a*z").empty());
+}
+
+TEST(PlatformMc, DirectoryRetailSavePatternFindsAllSixteenSlotsAndPages) {
+    MakeNames({"BESCES-51190dkcl", "BESCES-51190dkcl100", "other"});
+    std::vector<std::string> expected = {"BESCES-51190dkcl"};
+    for (int i = 0; i < 16; ++i) {
+        const std::string name = "BESCES-51190dkcl" + std::to_string(i);
+        ASSERT_EQ(Settle(sceMcMkdir(0, 0, const_cast<char *>(name.c_str())), 0x0B), 0);
+        expected.push_back(name);
+    }
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(ListNames("/BESCES-51190dkcl??"), expected);
+    EXPECT_EQ(ListNames("/BESCES-51190dkcl??", 0, 5),
+        (std::vector<std::string>(expected.begin(), expected.begin() + 5)));
+    EXPECT_EQ(ListNames("/BESCES-51190dkcl??", 1, 64),
+        (std::vector<std::string>(expected.begin() + 5, expected.end())));
+    EXPECT_TRUE(ListNames("/BESCES-51190dkcl??", 1).empty());
+}
+
+TEST(PlatformMc, DirectoryChronicleSavePrefixStarKeepsItsResults) {
+    MakeNames({"darkcloud", "darkcloud0", "darkcloud01", "darkcloud012", "darkclou", "other"});
+    EXPECT_EQ(ListNames("/darkcloud*"),
+        (std::vector<std::string>{"darkcloud", "darkcloud0", "darkcloud01", "darkcloud012"}));
+}
 
 TEST(PlatformMc, SyncReportsCommandCodes) {
     UseTempSaveRoot();
