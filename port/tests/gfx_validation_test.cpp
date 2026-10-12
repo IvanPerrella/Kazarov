@@ -13,8 +13,10 @@ using namespace dc::test;
 namespace {
 
 constexpr const char *kLayerName = "VK_LAYER_KHRONOS_validation";
+#ifdef __linux__
 constexpr const char *kLayerMissing =
     "the image must install vulkan-validationlayers: VK_LAYER_KHRONOS_validation is missing";
+#endif
 
 bool LayerInstalled() {
     uint32_t count = 0;
