@@ -91,7 +91,10 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
      bare. Fades, however tiled, full-frame fills and bands, the previous-frame feedback and frame
      grabs drawn back therefore reach the window's edges; HUD pieces (textured from ordinary
      textures, and never covering the whole frame) and anything wholly outside the frame do not
-     grow. Nothing of a host list is carried:
+     grow. A `Lines` draw lying wholly within the frame (edges included) is clipped to the frame's pixels
+     on each axis the target shows past: a line on the frame's edge falls on a pixel boundary and would
+     otherwise rasterise into the bar beside it. A line reaching past the frame is not clipped.
+     Nothing of a host list is carried:
     a display render's `options.overlay`, and the list itself with `options.host` (the FPS counter,
     whose glyph runs would otherwise streak to the window's edge wherever one lies across the
     frame's).

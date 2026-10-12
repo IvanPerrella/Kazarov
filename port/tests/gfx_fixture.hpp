@@ -30,14 +30,20 @@ struct GfxOptions {
     bool triangle_fans = true;
     bool separate_stencil_masks = true;
     bool prog0_meshes = false;
+    float logical_width = 640.0f;
+    float logical_height = 480.0f;
     std::filesystem::path pipeline_cache = std::filesystem::temp_directory_path() / "dc_gfx_test" / "pipeline_cache.bin";
 };
 
 // A headless window and renderer with validation on. Any validation message fails the test.
 struct GfxFixture {
     explicit GfxFixture(int width = 640, int height = 480, float render_scale = 1.0f,
-                        bool dynamic_color_write_mask = true)
-        : GfxFixture(width, height, render_scale, GfxOptions{.dynamic_color_write_mask = dynamic_color_write_mask}) {}
+                        bool dynamic_color_write_mask = true, float logical_width = 640.0f,
+                        float logical_height = 480.0f)
+        : GfxFixture(width, height, render_scale,
+                     GfxOptions{.dynamic_color_write_mask = dynamic_color_write_mask,
+                                .logical_width = logical_width,
+                                .logical_height = logical_height}) {}
 
     GfxFixture(int width, int height, float render_scale, const GfxOptions &options) {
         // Synchronization validation too, unless the environment already chose layer features.
@@ -47,8 +53,8 @@ struct GfxFixture {
         WindowInit(window);
         gfx::RendererConfig config;
         config.app_name = "Kazarov tests";
-        config.logical_width = 640.0f;
-        config.logical_height = 480.0f;
+        config.logical_width = options.logical_width;
+        config.logical_height = options.logical_height;
         config.display_aspect = 4.0f / 3.0f;
         config.validation = true;
         config.render_scale = render_scale;

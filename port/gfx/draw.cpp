@@ -137,6 +137,34 @@ bool ClipsToFrame(TextureHandle target) { return target == kMainTarget && !Fills
 
 VkRect2D FramePixels(const LogicalMapping &mapping) { return PixelRect(mapping, LogicalFrame(kMainTarget)); }
 
+// A line on the frame's edge sits on a pixel boundary and rasterises into the bar beside it, so a line
+// set wholly inside the frame is clipped to the frame's pixels on each axis the target shows past.
+VkRect2D FrameLineClip(VkPrimitiveTopology topology, std::span<const Vertex2D> vertices,
+                       const LogicalMapping &mapping) {
+    VkRect2D area = {{0, 0}, {mapping.pixel_width, mapping.pixel_height}};
+    if (!FillsWindow() || g.host_draws ||
+        (topology != VK_PRIMITIVE_TOPOLOGY_LINE_LIST && topology != VK_PRIMITIVE_TOPOLOGY_LINE_STRIP)) {
+        return area;
+    }
+    LogicalRect frame = LogicalFrame(g.target);
+    for (const Vertex2D &vertex : vertices) {
+        if (vertex.x < frame.x || vertex.x > frame.x + frame.w || vertex.y < frame.y ||
+            vertex.y > frame.y + frame.h) {
+            return area;
+        }
+    }
+    VkRect2D pixels = PixelRect(mapping, frame);
+    if (pixels.extent.width != area.extent.width) {
+        area.offset.x = pixels.offset.x;
+        area.extent.width = pixels.extent.width;
+    }
+    if (pixels.extent.height != area.extent.height) {
+        area.offset.y = pixels.offset.y;
+        area.extent.height = pixels.extent.height;
+    }
+    return area;
+}
+
 VkStencilOp StencilOpOf(StencilOp op) { return static_cast<VkStencilOp>(op); }
 
 int PackStencilOps(const StencilFace &face) {
@@ -240,7 +268,8 @@ void UiSideShift(UiSide side, const LogicalMapping &logical, const LogicalMappin
 // state. ui places the draw by the target's UI mapping, moved to the edges side names; the scissor
 // stays where the frame has it unless the side follows it. False when the draw must be dropped.
 bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureBinding &binding,
-             const DrawState &state, PushConstants &push, bool ui = false, UiSide side = {}) {
+             const DrawState &state, PushConstants &push, bool ui = false, UiSide side = {},
+             std::span<const Vertex2D> vertices = {}) {
     if (!g.in_frame) {
         return false;
     }
@@ -421,6 +450,9 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
     };
     if (ClipsToFrame(g.target)) {
         scissor = Intersect(scissor, FramePixels(target.mapping));
+    }
+    if (side.x == 0 && side.y == 0) {
+        scissor = Intersect(scissor, FrameLineClip(topology, vertices, mapping));
     }
     if (!SameRect(g.bound.scissor, scissor)) {
         g.bound.scissor = scissor;
@@ -1051,7 +1083,7 @@ void DrawPrepared(Primitive primitive, std::span<const Vertex2D> vertices, const
             break;
     }
     PushConstants push;
-    if (!Prepare(lines ? kFamily2DLines : kFamily2DTriangles, topology, binding, state, push, ui, side)) {
+    if (!Prepare(lines ? kFamily2DLines : kFamily2DTriangles, topology, binding, state, push, ui, side, vertices)) {
         return;
     }
     VkCommandBuffer cmd = DrawCommands();
