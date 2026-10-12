@@ -448,6 +448,11 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
                                            {0,                   0                   },
                                            {mapping.pixel_width, mapping.pixel_height}
     };
+    // An anchored HUD can slide outside its logical frame to hide. Its shifted frame, not the
+    // wider window, bounds that animation; otherwise Fill reveals the hidden piece at the far edge.
+    if (ui && g.target == kMainTarget && (side.x != 0 || side.y != 0) && !g.host_draws) {
+        scissor = Intersect(scissor, PixelRect(mapping, LogicalFrame(g.target), dx, dy));
+    }
     if (ClipsToFrame(g.target)) {
         scissor = Intersect(scissor, FramePixels(target.mapping));
     }

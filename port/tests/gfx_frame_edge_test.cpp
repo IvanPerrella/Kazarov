@@ -117,3 +117,35 @@ TEST(GfxMeshDc2, FillOutlineFourByThreeKeepsItsRightEdge) {
     ASSERT_EQ(frame.w, 1024);
     EXPECT_TRUE(AnyBlack(fixture, frame.x + frame.w - 3, frame.x + frame.w, true, 384));
 }
+
+TEST(GfxMeshDc2, AnchoredHudOutsideLogicalFrameStaysHiddenInFill) {
+    GfxFixture fixture(1280, 720, 1.0f, true, kLogicalWidth, kLogicalHeight);
+    gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
+    fixture.Frame(kBlue, [&] {
+        gfx::UiAnchorScope anchor(gfx::UiAnchor::Side(-1, -1, true));
+        gfx::DrawState state;
+        state.depth_test = gfx::DepthTest::Always;
+        state.depth_write = false;
+        // A secondary-weapon HUD slides past the retail screen during an event.
+        gfx::Draw2D(gfx::Primitive::Quads, Quad(638, 17, 148, 50, kRed), {}, state);
+        gfx::Draw2D(gfx::Primitive::Quads, Quad(24, 17, 24, 50, kRed), {}, state);
+    });
+    EXPECT_TRUE(fixture.PixelNear(60, 60, 255, 0, 0));
+    EXPECT_TRUE(fixture.PixelNear(1220, 60, 0, 0, 255));
+}
+
+TEST(GfxMeshDc2, RightAnchoredHudClipsItsAnimationAtTheShiftedFrame) {
+    GfxFixture fixture(1280, 720, 1.0f, true, kLogicalWidth, kLogicalHeight);
+    gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
+    fixture.Frame(kBlue, [&] {
+        gfx::UiAnchorScope anchor(gfx::UiAnchor::Side(1, -1, true));
+        gfx::DrawState state;
+        state.depth_test = gfx::DepthTest::Always;
+        state.depth_write = false;
+        gfx::Draw2D(gfx::Primitive::Quads, Quad(-100, 17, 120, 50, kRed), {}, state);
+        gfx::Draw2D(gfx::Primitive::Quads, Quad(480, 17, 20, 50, kRed), {}, state);
+    });
+    EXPECT_TRUE(fixture.PixelNear(220, 60, 0, 0, 255));
+    EXPECT_TRUE(fixture.PixelNear(340, 60, 255, 0, 0));
+    EXPECT_TRUE(fixture.PixelNear(1240, 60, 255, 0, 0));
+}
