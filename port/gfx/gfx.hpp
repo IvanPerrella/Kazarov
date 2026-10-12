@@ -93,6 +93,9 @@ struct RendererConfig {
     bool separate_stencil_masks = true;
     // Also precompiles the Vu_prog0 pipelines, and the set 2 layout, that DrawMeshProg0 needs (Dark Chronicle).
     bool prog0_meshes = false;
+    // Lowers the texture and mesh tables for tests; 0 is the build maximum, larger values are clamped to it.
+    uint32_t texture_slots = 0;
+    uint32_t mesh_slots = 0;
 };
 
 // What RendererInit settled on, from the config and the device.

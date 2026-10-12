@@ -794,6 +794,8 @@ void RendererInit(SDL_Window *window, const RendererConfig &config) {
     g.renderer_instance = ++instances;
     g.window = window;
     g.config = config;
+    g.texture_slot_limit = config.texture_slots == 0 ? kMaxTextures : std::min(config.texture_slots, kMaxTextures);
+    g.mesh_slot_limit = config.mesh_slots == 0 ? kMaxMeshes : std::min(config.mesh_slots, kMaxMeshes);
     g.offscreen = config.offscreen;
     g.layout = config.layout;
     CreateInstance();

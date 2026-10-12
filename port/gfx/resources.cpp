@@ -61,7 +61,7 @@ void ClearDepth(VkCommandBuffer cmd, Image &image) {
 }
 
 uint32_t AllocateTextureSlot() {
-    if (g.free_texture_slots.empty() && g.textures.size() >= kMaxTextures && !g.in_frame && !RecordingCalls()) {
+    if (g.free_texture_slots.empty() && g.textures.size() >= g.texture_slot_limit && !g.in_frame && !RecordingCalls()) {
         RetireDeletions();
     }
     if (!g.free_texture_slots.empty()) {
@@ -69,7 +69,7 @@ uint32_t AllocateTextureSlot() {
         g.free_texture_slots.pop_back();
         return slot;
     }
-    if (g.textures.size() >= kMaxTextures) {
+    if (g.textures.size() >= g.texture_slot_limit) {
         return 0;
     }
     g.textures.emplace_back();
@@ -527,7 +527,7 @@ TextureHandle CreateTexture(const TextureDesc &desc) {
     }
     uint32_t slot = AllocateTextureSlot();
     if (slot == 0) {
-        Error("out of texture slots (%u)", kMaxTextures);
+        Error("out of texture slots (%u)", g.texture_slot_limit);
         return kNullTexture;
     }
     Texture &texture = g.textures[slot];
@@ -572,7 +572,7 @@ TextureHandle CreateRenderTarget(uint32_t logical_width, uint32_t logical_height
     }
     uint32_t slot = AllocateTextureSlot();
     if (slot == 0) {
-        Error("out of texture slots (%u)", kMaxTextures);
+        Error("out of texture slots (%u)", g.texture_slot_limit);
         return kNullTexture;
     }
     Texture &texture = g.textures[slot];
@@ -751,18 +751,18 @@ MeshHandle CreateMesh(std::span<const Vertex3D> vertices, std::span<const uint32
         Error("CreateMesh: empty mesh");
         return kNullMesh;
     }
-    if (g.free_mesh_slots.empty() && g.meshes.size() >= kMaxMeshes && !g.in_frame && !RecordingCalls()) {
+    if (g.free_mesh_slots.empty() && g.meshes.size() >= g.mesh_slot_limit && !g.in_frame && !RecordingCalls()) {
         RetireDeletions();
     }
     uint32_t slot;
     if (!g.free_mesh_slots.empty()) {
         slot = g.free_mesh_slots.back();
         g.free_mesh_slots.pop_back();
-    } else if (g.meshes.size() < kMaxMeshes) {
+    } else if (g.meshes.size() < g.mesh_slot_limit) {
         g.meshes.emplace_back();
         slot = static_cast<uint32_t>(g.meshes.size() - 1);
     } else {
-        Error("out of mesh slots (%u)", kMaxMeshes);
+        Error("out of mesh slots (%u)", g.mesh_slot_limit);
         return kNullMesh;
     }
     Mesh        &mesh = g.meshes[slot];

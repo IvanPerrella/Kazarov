@@ -247,6 +247,8 @@ enum TextureMode : uint32_t {
 struct Context {
     SDL_Window                      *window = nullptr;
     RendererConfig                   config;
+    uint32_t                         texture_slot_limit = kMaxTextures;
+    uint32_t                         mesh_slot_limit = kMaxMeshes;
     VkInstance                       instance = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT         messenger = VK_NULL_HANDLE;
     VkSurfaceKHR                     surface = VK_NULL_HANDLE;

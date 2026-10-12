@@ -30,6 +30,8 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
   inside or outside a frame. Destruction is deferred until the GPU is done with them; a handle is
   dead as soon as it is destroyed outside a recording (handles carry a generation). When the texture
   or mesh table is full, a create outside a frame or recording first runs the pending destructions.
+  The table sizes are the build maximums, which `RendererConfig::texture_slots` and `mesh_slots`
+  can lower (for tests).
 
 ## Spaces
 
