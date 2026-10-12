@@ -353,16 +353,17 @@ def check_compiled(code, found, defined):
                             "the port may not compile")
 
 
-def overridden(text, overrides, renames=None, defined=(), long_is_64=False, private_variables=False):
+def overridden(text, overrides, renames=None, defined=(), long_is_64=False, private_variables=False,
+               private_functions=False):
     """The (start, definition) of each definition at file scope of a name in overrides, given the
     macros the port defines."""
-    found = list(definitions(text, overrides, renames, long_is_64, private_variables))
+    found = list(definitions(text, overrides, renames, long_is_64, private_variables, private_functions))
     if found:
         check_compiled(mask(text), found, set(defined))
     return found
 
 
-def definitions(text, overrides, renames=None, long_is_64=False, private_variables=False):
+def definitions(text, overrides, renames=None, long_is_64=False, private_variables=False, private_functions=False):
     """Yields (start, definition) for each definition at file scope of a name in overrides."""
     # A spliced line could join a name the scan below would not see.
     for number, (line, directive) in enumerate(directive_lines(text), 1):
@@ -414,7 +415,7 @@ def definitions(text, overrides, renames=None, long_is_64=False, private_variabl
         keys = set() if definition is None else {canonical(definition.name, long_is_64),
                                                  canonical(definition.spelled, long_is_64)}
         if (definition is None or not keys & overrides or
-                (definition.static and not (private_variables and definition.variable))):
+                (definition.static and not (private_variables if definition.variable else private_functions))):
             # The link fails on a definition left in by mistake, unless it is inline.
             head = "".join(line for line, _ in head)
             if INLINE.search(head) and not re.search(r"\bstatic\b", head):
@@ -431,10 +432,12 @@ def definitions(text, overrides, renames=None, long_is_64=False, private_variabl
         yield start, definition
 
 
-def strip(text, overrides, renames=None, defined=(), long_is_64=False, private_variables=False):
+def strip(text, overrides, renames=None, defined=(), long_is_64=False, private_variables=False,
+          private_functions=False):
     """Returns text without its definitions of the names in overrides."""
     out, last = [], 0
-    for start, definition in overridden(text, overrides, renames, defined, long_is_64, private_variables):
+    for start, definition in overridden(text, overrides, renames, defined, long_is_64, private_variables,
+                                        private_functions):
         end = start + definition.length
         newlines = text.count("\n", start, end) - definition.replacement.count("\n")
         out.append(text[last:start] + definition.replacement + "\n" * newlines)
@@ -474,21 +477,21 @@ def override_entries(text):
     return list(dict.fromkeys(entry for entry in text.split("\n") if entry))
 
 
-def strip_unit(source, overrides, renames_, defined, long_is_64, private_variables=False):
+def strip_unit(source, overrides, renames_, defined, long_is_64, private_variables=False, private_functions=False):
     """The text strip writes for a ps2/src unit: a #line marker, then the unit without the overridden definitions."""
     try:
-        stripped = strip(read(source), overrides, renames_, defined, long_is_64, private_variables)
+        stripped = strip(read(source), overrides, renames_, defined, long_is_64, private_variables, private_functions)
     except Error as error:
         raise Error(f"{source}:{error}") from None
     return f'#line 1 "{source.resolve().as_posix()}"\n{stripped}'
 
 
-def analyse(text, overrides, renames_, defined, long_is_64, private_variables=False):
+def analyse(text, overrides, renames_, defined, long_is_64, private_variables=False, private_functions=False):
     """check's result for one unit: the names its matched definitions link under, and the overrides
     entries that select them. strip selects a definition by the same canonical names, so an entry
     selecting none of them can be left out of the unit's split file."""
     try:
-        found = overridden(text, overrides, renames_, defined, long_is_64, private_variables)
+        found = overridden(text, overrides, renames_, defined, long_is_64, private_variables, private_functions)
     except Error as error:
         return {"error": str(error), "names": [], "spelled": [], "split": []}
     names = sorted({canonical(definition.name, long_is_64) for _, definition in found})
@@ -553,10 +556,16 @@ def main():
     checker.add_argument("-o", "--output", type=pathlib.Path, required=True, help="written when the check passes")
     checker.add_argument("--split", type=pathlib.Path, help="DIR/<unit>.txt: each unit's own overrides entries")
     checker.add_argument("--cache", type=pathlib.Path, help="JSON file of per-unit results, reused while unchanged")
+    checker.add_argument("--private-function-unit", action="append", default=[], metavar="UNIT",
+                         help="limit --private-functions to this relative ps2/src unit (repeatable)")
     for command in (stripper, checker):
         command.add_argument("--private-variables", action="store_true",
                              help="allow explicit overrides to share a unit's private variable storage")
+        command.add_argument("--private-functions", action="store_true",
+                             help="allow explicit overrides of a unit's private function definitions")
     options = parser.parse_args()
+    if options.command == "check" and options.private_function_unit and not options.private_functions:
+        parser.error("--private-function-unit requires --private-functions")
     try:
         if options.command == "list":
             names = set()
@@ -575,7 +584,8 @@ def main():
         if options.command == "strip":
             # Left alone when unchanged, so that only the units a change reaches are recompiled.
             write(options.output, strip_unit(options.source, overrides, renames(options.stubs), options.define,
-                                             options.long_is_64, options.private_variables), if_changed=True)
+                                             options.long_is_64, options.private_variables, options.private_functions),
+                  if_changed=True)
             return 0
         units = {}
         for source in sorted(options.ps2.rglob("*.cpp")):
@@ -588,6 +598,8 @@ def main():
         script = pathlib.Path(__file__).read_bytes() if options.cache else b""
         results, failure = {}, None
         for unit, source in units.items():
+            private_functions = options.private_functions and (
+                not options.private_function_unit or unit in options.private_function_unit)
             stubs = options.stubs / source.relative_to(options.ps2).with_suffix(".hpp")
             data = source.read_bytes()
             stub_data = stubs.read_bytes() if stubs.exists() else b""
@@ -595,11 +607,15 @@ def main():
             if options.cache:
                 key = unit_key([data, stub_data, overrides_bytes, repr(sorted(options.define)).encode(),
                                 b"1" if options.long_is_64 else b"0",
-                                b"1" if options.private_variables else b"0", script])
+                                b"1" if options.private_variables else b"0",
+                                b"1" if private_functions else b"0", script])
             result = cached_result(old, unit, key) if options.cache else None
             if result is None:
                 args = (decode(data), overrides, rename_map(decode(stub_data)), options.define, options.long_is_64)
-                result = analyse(*args, True) if options.private_variables else analyse(*args)
+                if private_functions:
+                    result = analyse(*args, options.private_variables, True)
+                else:
+                    result = analyse(*args, True) if options.private_variables else analyse(*args)
             results[unit] = {"key": key, "result": result}
             if result["error"] is not None:
                 failure = Error(f"{source}:{result['error']}")

@@ -28,12 +28,87 @@ def test_private_variable_override_is_opt_in(tmp_path):
     assert 'static' not in copied
 
 
-def test_private_function_is_never_exported(tmp_path):
+def test_private_function_is_not_exported_by_variable_mode(tmp_path):
     overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
     write(overrides, 'F(int)\n')
     write(ps2 / 'a.cpp', 'static void F(int x) { }\n')
     assert check(tmp_path, overrides, ps2, stubs, '--private-variables').returncode != 0
     assert 'static void F' in strip(tmp_path, overrides, ps2, '--private-variables')
+
+
+def test_private_function_override_is_opt_in_and_keeps_callback_binding(tmp_path):
+    overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
+    write(overrides, 'F(int)\n')
+    source = 'static int F(int x) { return x + 7; }\nstatic int (*table[])(int) = {F};\n'
+    write(ps2 / 'a.cpp', source)
+    assert check(tmp_path, overrides, ps2, stubs).returncode != 0
+    assert source in strip(tmp_path, overrides, ps2)
+    assert check(tmp_path, overrides, ps2, stubs, '--private-functions').returncode == 0
+    copied = strip(tmp_path, overrides, ps2, '--private-functions')
+    assert 'int F(int x);' in copied
+    assert 'static int F' not in copied
+    assert 'return x + 7' not in copied
+    assert 'static int (*table[])(int) = {F};' in copied
+    assert (ps2 / 'a.cpp').read_text() == source
+
+
+def test_private_function_mode_leaves_private_variables_and_unlisted_functions(tmp_path):
+    overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
+    write(overrides, 'F(int)\nstate\n')
+    write(ps2 / 'a.cpp', 'static int state = 7;\nstatic void F(int x) { }\nstatic void G() { }\n')
+    assert check(tmp_path, overrides, ps2, stubs, '--private-functions').returncode != 0
+    copied = strip(tmp_path, overrides, ps2, '--private-functions')
+    assert 'static int state = 7;' in copied
+    assert 'static void G() { }' in copied
+    assert 'void F(int x);' in copied
+    assert check(tmp_path, overrides, ps2, stubs, '--private-functions', '--private-variables').returncode == 0
+
+
+def test_private_function_mode_updates_cache_and_split_entries(tmp_path):
+    overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
+    write(overrides, 'F(int)\n')
+    write(ps2 / 'a.cpp', 'static void F(int x) { }\n')
+    flags = ['--cache', tmp_path / 'cache.json', '--split', tmp_path / 'split']
+    assert check(tmp_path, overrides, ps2, stubs, *flags).returncode != 0
+    assert check(tmp_path, overrides, ps2, stubs, *flags, '--private-functions').returncode == 0
+    assert (tmp_path / 'split/a.cpp.txt').read_text() == 'F(int)\n'
+    assert check(tmp_path, overrides, ps2, stubs, *flags).returncode != 0
+
+
+def test_private_function_replacement_still_needs_external_linkage(tmp_path):
+    port = tmp_path / 'port'
+    write(port / 'a.cpp', 'PORT_OVERRIDE static void F(int x) { }\n')
+    result = run('list', port, '-o', tmp_path / 'overrides.txt')
+    assert result.returncode != 0
+    assert 'a static definition replaces nothing' in result.stderr
+
+
+def test_private_function_units_preserve_unrelated_same_name_callbacks_and_cache(tmp_path):
+    overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
+    write(overrides, 'F(int)\nCallback(int)\n')
+    write(ps2 / 'a.cpp', 'int F(int x) { return x; }\n')
+    private = 'static int F(int);\nstatic int F(int x) { return x + 7; }\n'
+    write(ps2 / 'b.cpp', private)
+    write(ps2 / 'c.cpp', 'static int Callback(int x) { return x; }\n')
+    flags = ['--cache', tmp_path / 'cache.json', '--split', tmp_path / 'split', '--private-functions']
+    assert check(tmp_path, overrides, ps2, stubs, *flags).returncode == 0
+    assert (tmp_path / 'split/b.cpp.txt').read_text() == 'F(int)\n'
+    assert check(tmp_path, overrides, ps2, stubs, *flags, '--private-function-unit', 'c.cpp').returncode == 0
+    assert (tmp_path / 'split/b.cpp.txt').read_text() == ''
+    assert (tmp_path / 'split/c.cpp.txt').read_text() == 'Callback(int)\n'
+    out = tmp_path / 'b-copy.cpp'
+    result = run('strip', '--overrides', tmp_path / 'split/b.cpp.txt', ps2 / 'b.cpp', out)
+    assert result.returncode == 0
+    assert private in out.read_text()
+    assert check(tmp_path, overrides, ps2, stubs, *flags).returncode == 0
+    assert (tmp_path / 'split/b.cpp.txt').read_text() == 'F(int)\n'
+
+
+def test_private_function_unit_filter_cannot_enable_mode_implicitly(tmp_path):
+    overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
+    result = check(tmp_path, overrides, ps2, stubs, '--private-function-unit', 'a.cpp')
+    assert result.returncode != 0
+    assert 'requires --private-functions' in result.stderr
 
 
 def test_private_pointer_and_array_keep_declarations(tmp_path):
