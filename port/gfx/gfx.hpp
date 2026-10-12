@@ -43,11 +43,13 @@ struct UiAnchor {
     float right_from = INFINITY;
     float top_until = -INFINITY;
     float bottom_from = INFINITY;
+    // A piece that clips to its own rectangle must scissor where it is drawn, or the shift clips it away.
+    bool scissor = false;
 
     // Every draw to one side: x -1 left, 1 right, y -1 top, 1 bottom, 0 the frame's own place.
-    static constexpr UiAnchor Side(int x, int y) {
+    static constexpr UiAnchor Side(int x, int y, bool follow_scissor = false) {
         return {x < 0 ? INFINITY : -INFINITY, x > 0 ? -INFINITY : INFINITY, y < 0 ? INFINITY : -INFINITY,
-                y > 0 ? -INFINITY : INFINITY};
+                y > 0 ? -INFINITY : INFINITY, follow_scissor};
     }
 };
 

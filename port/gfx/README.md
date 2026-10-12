@@ -39,7 +39,8 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
 - On the **main target** (window pixel size) the logical frame is the largest rect of aspect
   `RendererConfig::display_aspect` (e.g. 4:3) that fits the window, centred with whole-pixel
   offsets. Logical space is scaled to it per axis. Coordinates outside the frame reach past it;
-  nothing clips to the displayed area unless a scissor says so. `GetLogicalMapping(target)` returns
+  nothing clips to the displayed area unless a scissor says so (or the layout is Letterbox).
+  `GetLogicalMapping(target)` returns
   `pixel = logical * scale + offset`. What the window shows past the frame depends on the frame
   layout ("Aspect").
 - A **render target** is `logical_width x logical_height` scaled by the render scale (pixels per
@@ -83,8 +84,9 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
     reaches the frame's edge from inside (its span crosses or ends on the edge, starting inside).
      The rectangle itself is drawn as given; flanking quads cover the rest, with texture coordinates
      continued (so an image of the frame shows its own sides) and colour, fog and depth held at the
-     edge. A rectangle that instead covers the whole frame with an ordinary texture (a cutscene
-     still, a full-screen backdrop) is a cover: it is stretched to the target's edge on each axis the
+     edge; flanks always sample with clamped wrap, whatever the binding's wrap. A rectangle that
+     instead covers the whole frame with an ordinary texture (a cutscene still, a full-screen
+     backdrop) is a cover: it is stretched to the target's edge on each axis the
      target shows past its frame, so a 4:3 still fills a wider window rather than leaving its sides
      bare. Fades, however tiled, full-frame fills and bands, the previous-frame feedback and frame
      grabs drawn back therefore reach the window's edges; HUD pieces (textured from ordinary
@@ -108,10 +110,12 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
   split a panel whose pieces belong to different corners. The side is chosen when the draw is
   made and travels with it in a display list; the shift is taken at render time, so it follows
   the window and `ui_scale` (a HUD scaled past the window is pulled back to its edges). An
-  anchored draw is never flanked by the full-frame rule and its scissor stays the frame's. With
+  anchored draw is never flanked by the full-frame rule and its scissor stays the frame's unless
+  the anchor's `scissor` flag (`Side(x, y, true)`) moves it with the draw. With
   `AspectMode::Letterbox` at `ui_scale` 1 the shift is zero.
-- **`AspectMode::Letterbox`** (`aspect = 4:3`). Nothing is carried past the frame and frame targets
-  are ordinary render targets: the letterboxed output, byte for byte.
+- **`AspectMode::Letterbox`** (`aspect = 4:3`). Nothing is carried past the frame: draws and clears on
+  the main target stop at the frame's pixels, so the bars keep what they held, and frame targets are
+  ordinary render targets.
 - **`ui_scale`** (default 1) scales 2D that tests no depth, writes none and samples no image of the
   frame about the main target's centre (`GetUiMapping`); 2D with depth (3D sprites) and images of
   the frame stay on the logical mapping, among the meshes. It does not know which 2D the game
@@ -269,8 +273,8 @@ Skinned meshes (`kProg0Skinned`) are pairs of `Vertex3D`: each vertex, then its 
 weights and four bone slots, in the bytes of a second `Vertex3D`), so `CreateMesh`,
 `DrawMeshImmediate` and the index buffer work unchanged. The skinned family reads them with a doubled
 stride. Weights are not normalised (the game normalises only sums below 1). Such meshes are posed on
-the GPU, so the display list's pose interpolation (the vertex rewrites of the Display lists section)
-does not apply to them; their bones are the tick's.
+the GPU from the bone palette, so the vertex-rewrite interpolation of the Display lists section does
+not apply to them; their palette is blended per bone there instead.
 
 Retail quirks kept on purpose, with the spec's names: O-4 (a negative point power acts as its
 magnitude), O-8 (influence 3's normal takes column 1 for its z term), O-9 (the matcap ignores
@@ -357,6 +361,14 @@ renders one.
   vertices are the same grid points in world space, under an identity model, every tick. The shadow
   volumes must not: they are rebuilt in each tick's eye space, so a vertex of one tick is not the
   same point as that vertex of the next.
+  A matched Prog0 draw (`DrawMeshProg0`, `DrawMeshImmediateProg0`) has its 32-bone model-space
+  palette (`Prog0Constants::bones`) blended per bone: translation lerped, rotation slerped from the
+  Gram-Schmidt rotation, scale and shear lerped in that rotation's frame. A bone that moved further
+  than the draw's teleport distance keeps the newest pose. `no_interpolation` and `CutInterpolation()`
+  apply as for other draws. The rest of the block follows the interpolated model and camera:
+  `model_world` is the interpolated model, `clip_or_view` and the object-space eye are re-based
+  through the tick's and the interpolated object-to-eye transforms, and point lights shift with the
+  object's origin.
 - **Instanced keys.** A key drawn with more than one model in a tick is one object placed several
   times (a town's parts and tiles share their frames), and culling changes which places are drawn,
   so occurrences do not line up from tick to tick. Such a key, from the tick it is first seen so

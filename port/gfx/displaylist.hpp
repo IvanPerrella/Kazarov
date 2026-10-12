@@ -19,6 +19,7 @@ using Mat4 = std::array<float, 16>;
 struct UiSide {
     int8_t x = 0;
     int8_t y = 0;
+    bool   scissor = false;
 };
 
 struct Draw2DEntry {
@@ -173,6 +174,9 @@ bool InvertAffine(const Mat4 &m, Mat4 &out);
 // a at alpha 0, b at 1: translation lerped, rotation slerped, the rest of the 3x3 (scale, shear)
 // lerped in the rotation's frame. False (out = b) when either is not an invertible affine.
 bool InterpolateAffine(const Mat4 &a, const Mat4 &b, float alpha, Mat4 &out);
+// A bone that moved past teleport_distance is a cut, not motion, so it keeps after's pose.
+void BlendProg0Bones(const Prog0Constants &before, const Prog0Constants &after, float alpha, float teleport_distance,
+                     Prog0Constants &out);
 
 } // namespace detail
 

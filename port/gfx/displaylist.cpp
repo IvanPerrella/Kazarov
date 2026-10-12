@@ -434,6 +434,8 @@ struct Overrides {
     // The vertex rewrites of meshes a matched draw uses (skinning), between the previous tick's
     // rewrite and this one's.
     std::unordered_map<const UpdateMeshEntry *, std::vector<Vertex3D>> poses;
+    std::vector<int32_t>                                           prog0_index; // per record, into prog0, or -1
+    std::vector<Prog0Constants>                                    prog0;
 };
 
 bool Invert(const Mat4 &m, Mat4 &out) {
@@ -593,6 +595,64 @@ void PosesBetween(const DisplayList &list, const DisplayList &previous, float al
     }
 }
 
+Mat4 BoneMatrix(const float (&rows)[3][4]) {
+    Mat4 m = {};
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 4; c++) {
+            m[c * 4 + r] = rows[r][c];
+        }
+    }
+    m[15] = 1.0f;
+    return m;
+}
+
+void SetBoneRows(const Mat4 &m, float (&rows)[3][4]) {
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 4; c++) {
+            rows[r][c] = m[c * 4 + r];
+        }
+    }
+}
+
+// Re-bases a block recorded at view_b and model_b onto view_i and model_i. The clip goes through
+// inverse(eye_b) so the game's left factor (fit * world clip, or the view) is kept whichever of the two
+// clip_or_view holds. False, block untouched, when either eye transform is singular.
+bool MoveProg0(const MeshRecord &record, const Mat4 &view_b, const Mat4 &view_i, const Mat4 &model_i,
+               Prog0Constants &block) {
+    Mat4 eye_b = Multiply(Multiply(view_b, record.middle), record.model);
+    Mat4 eye_i = Multiply(Multiply(view_i, record.middle), model_i);
+    Mat4 back_b = {};
+    Mat4 back_i = {};
+    if (!Invert(eye_b, back_b) || !Invert(eye_i, back_i)) {
+        return false;
+    }
+    Mat4 clip = Multiply(Multiply(ToMat4(block.clip_or_view), back_b), eye_i);
+    std::memcpy(block.clip_or_view, clip.data(), sizeof block.clip_or_view);
+
+    // The camera is an object-space point: it goes to eye space under the tick's transform and back
+    // under the interpolated one. A projective middle leaves w != 1, so the point is homogenised.
+    Mat4        to_object = Multiply(back_i, eye_b);
+    const float camera[4] = {block.eye[0], block.eye[1], block.eye[2], 1.0f};
+    float       h[4];
+    for (int r = 0; r < 4; r++) {
+        h[r] = to_object[0 * 4 + r] * camera[0] + to_object[1 * 4 + r] * camera[1] +
+               to_object[2 * 4 + r] * camera[2] + to_object[3 * 4 + r] * camera[3];
+    }
+    for (int k = 0; k < 3; k++) {
+        block.eye[k] = std::fabs(h[3]) > 1e-12f ? h[k] / h[3] : h[k];
+    }
+
+    std::memcpy(block.model_world, model_i.data(), sizeof block.model_world);
+    // Point lights are relative to the object's origin, so they follow the origin.
+    for (int k = 0; k < 3; k++) {
+        float shift = record.model[12 + k] - model_i[12 + k];
+        for (int i = 0; i < 4; i++) {
+            block.point_light[i][k] += shift;
+        }
+    }
+    return true;
+}
+
 void Interpolated(const DisplayList &list, const DisplayList &previous, float alpha, Overrides &out) {
     if (list.cache.previous_serial != previous.serial) {
         BuildMatches(list, previous);
@@ -615,6 +675,8 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
     out.constants.clear();
     out.vertex_index.assign(list.records.size(), -1);
     out.vertices.clear();
+    out.prog0_index.assign(list.records.size(), -1);
+    out.prog0.clear();
     const Mat4 *last_before = nullptr;
     const Mat4 *last_after = nullptr;
     Mat4        last_model;
@@ -648,6 +710,22 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
         }
         bool        turned = match >= 0 && previous.records[match].model != record.model && last_turned;
         const Mat3 &delta = last_delta;
+        if (match >= 0 && mesh->prog0 >= 0) {
+            const MeshEntry &earlier = std::get<MeshEntry>(previous.entries[previous.records[match].entry]);
+            if (earlier.prog0 >= 0) {
+                const Prog0Constants &newest = list.prog0_blocks[static_cast<size_t>(mesh->prog0)];
+                Prog0Constants        block;
+                BlendProg0Bones(previous.prog0_blocks[static_cast<size_t>(earlier.prog0)], newest, alpha,
+                                record.teleport_distance, block);
+                bool bones = std::memcmp(block.bones, newest.bones, sizeof block.bones) != 0;
+                bool placed = (model != record.model || moved[record.camera]) &&
+                              MoveProg0(record, list.cameras[record.camera], views[record.camera], model, block);
+                if (bones || placed) {
+                    out.prog0_index[mesh->record] = static_cast<int32_t>(out.prog0.size());
+                    out.prog0.push_back(block);
+                }
+            }
+        }
         if (!turned && !moved[record.camera]) {
             continue;
         }
@@ -801,6 +879,9 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                     }
                     const Prog0Constants *prog0 =
                         e.prog0 >= 0 ? &list.prog0_blocks[static_cast<size_t>(e.prog0)] : nullptr;
+                    if (prog0 != nullptr && overrides != nullptr && overrides->prog0_index[e.record] >= 0) {
+                        prog0 = &overrides->prog0[static_cast<size_t>(overrides->prog0_index[e.record])];
+                    }
                     TextureBinding binding = GrabbedBinding(e.binding, canonical);
                     if (e.mesh != kNullMesh) {
                         if (prog0 != nullptr) {
@@ -910,6 +991,30 @@ bool InvertAffine(const Mat4 &m, Mat4 &out) {
 
 bool InterpolateAffine(const Mat4 &a, const Mat4 &b, float alpha, Mat4 &out) {
     return Interpolate(a, b, alpha, out, nullptr);
+}
+
+void BlendProg0Bones(const Prog0Constants &before, const Prog0Constants &after, float alpha, float teleport_distance,
+                     Prog0Constants &out) {
+    out = after;
+    if ((before.flags & kProg0Skinned) == 0 || (after.flags & kProg0Skinned) == 0) {
+        return;
+    }
+    for (uint32_t slot = 0; slot < kProg0Bones; slot++) {
+        if (std::memcmp(before.bones[slot], after.bones[slot], sizeof after.bones[slot]) == 0) {
+            continue;
+        }
+        Mat4 a = BoneMatrix(before.bones[slot]);
+        Mat4 b = BoneMatrix(after.bones[slot]);
+        float dx = b[12] - a[12];
+        float dy = b[13] - a[13];
+        float dz = b[14] - a[14];
+        if (std::sqrt(dx * dx + dy * dy + dz * dz) > teleport_distance) {
+            continue;
+        }
+        Mat4 blended = {};
+        Interpolate(a, b, alpha, blended, nullptr);
+        SetBoneRows(blended, out.bones[slot]);
+    }
 }
 
 bool RecordingCalls() { return g.list != nullptr; }

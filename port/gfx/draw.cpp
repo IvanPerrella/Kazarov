@@ -98,14 +98,15 @@ void EnsureRendering(Target &target) {
     };
 }
 
-VkRect2D PixelRect(const LogicalMapping &mapping, const LogicalRect &rect) {
-    float x0 = std::clamp(std::floor(rect.x * mapping.scale_x + mapping.offset_x), 0.0f,
+// dx and dy move the rect in pixels before the clamp, so an overhang past the target is shifted too.
+VkRect2D PixelRect(const LogicalMapping &mapping, const LogicalRect &rect, float dx = 0.0f, float dy = 0.0f) {
+    float x0 = std::clamp(std::floor(rect.x * mapping.scale_x + mapping.offset_x + dx), 0.0f,
                           static_cast<float>(mapping.pixel_width));
-    float y0 = std::clamp(std::floor(rect.y * mapping.scale_y + mapping.offset_y), 0.0f,
+    float y0 = std::clamp(std::floor(rect.y * mapping.scale_y + mapping.offset_y + dy), 0.0f,
                           static_cast<float>(mapping.pixel_height));
-    float x1 = std::clamp(std::ceil((rect.x + rect.w) * mapping.scale_x + mapping.offset_x), x0,
+    float x1 = std::clamp(std::ceil((rect.x + rect.w) * mapping.scale_x + mapping.offset_x + dx), x0,
                           static_cast<float>(mapping.pixel_width));
-    float y1 = std::clamp(std::ceil((rect.y + rect.h) * mapping.scale_y + mapping.offset_y), y0,
+    float y1 = std::clamp(std::ceil((rect.y + rect.h) * mapping.scale_y + mapping.offset_y + dy), y0,
                           static_cast<float>(mapping.pixel_height));
     return VkRect2D{
         {static_cast<int32_t>(x0),       static_cast<int32_t>(y0)      },
@@ -117,6 +118,24 @@ bool SameRect(const VkRect2D &a, const VkRect2D &b) {
     return a.offset.x == b.offset.x && a.offset.y == b.offset.y && a.extent.width == b.extent.width &&
            a.extent.height == b.extent.height;
 }
+
+VkRect2D Intersect(const VkRect2D &a, const VkRect2D &b) {
+    int32_t x0 = std::max(a.offset.x, b.offset.x);
+    int32_t y0 = std::max(a.offset.y, b.offset.y);
+    int32_t x1 = std::min(a.offset.x + static_cast<int32_t>(a.extent.width),
+                          b.offset.x + static_cast<int32_t>(b.extent.width));
+    int32_t y1 = std::min(a.offset.y + static_cast<int32_t>(a.extent.height),
+                          b.offset.y + static_cast<int32_t>(b.extent.height));
+    return VkRect2D{
+        {x0, y0},
+        {static_cast<uint32_t>(std::max(x1 - x0, 0)), static_cast<uint32_t>(std::max(y1 - y0, 0))}
+    };
+}
+
+// Letterboxed, the bars keep what they hold: nothing drawn or cleared on the main target reaches past the frame.
+bool ClipsToFrame(TextureHandle target) { return target == kMainTarget && !FillsWindow(); }
+
+VkRect2D FramePixels(const LogicalMapping &mapping) { return PixelRect(mapping, LogicalFrame(kMainTarget)); }
 
 VkStencilOp StencilOpOf(StencilOp op) { return static_cast<VkStencilOp>(op); }
 
@@ -185,6 +204,16 @@ LogicalRect ScissorRect(LogicalRect rect) {
     return rect;
 }
 
+// The pixels a clear reaches on the current target: its rect, or the whole target.
+VkRect2D ClearArea(const LogicalRect *rect, const Target &target) {
+    VkRect2D area = rect ? PixelRect(target.mapping, ExtendClearRect(*rect, target.mapping))
+                         : VkRect2D{
+                               {0,                          0                          },
+                               {target.mapping.pixel_width, target.mapping.pixel_height}
+    };
+    return ClipsToFrame(g.target) ? Intersect(area, FramePixels(target.mapping)) : area;
+}
+
 // The pixels an anchored UI draw moves by: on each anchored axis, from the UI frame's edge to the
 // edge of what the main target shows.
 void UiSideShift(UiSide side, const LogicalMapping &logical, const LogicalMapping &ui, float &dx, float &dy) {
@@ -209,7 +238,7 @@ void UiSideShift(UiSide side, const LogicalMapping &logical, const LogicalMappin
 
 // Resolves the binding and the state into push constants and binds the pipeline and dynamic
 // state. ui places the draw by the target's UI mapping, moved to the edges side names; the scissor
-// stays where the frame has it. False when the draw must be dropped.
+// stays where the frame has it unless the side follows it. False when the draw must be dropped.
 bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureBinding &binding,
              const DrawState &state, PushConstants &push, bool ui = false, UiSide side = {}) {
     if (!g.in_frame) {
@@ -292,9 +321,9 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
     push.xform[1] = 2.0f * mapping.scale_y / static_cast<float>(mapping.pixel_height);
     push.xform[2] = 2.0f * mapping.offset_x / static_cast<float>(mapping.pixel_width) - 1.0f;
     push.xform[3] = 2.0f * mapping.offset_y / static_cast<float>(mapping.pixel_height) - 1.0f;
+    float dx = 0.0f;
+    float dy = 0.0f;
     if (ui && g.target == kMainTarget && (side.x != 0 || side.y != 0)) {
-        float dx;
-        float dy;
         UiSideShift(side, target.mapping, mapping, dx, dy);
         push.xform[2] += 2.0f * dx / static_cast<float>(mapping.pixel_width);
         push.xform[3] += 2.0f * dy / static_cast<float>(mapping.pixel_height);
@@ -384,11 +413,15 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
         g.bound.topology = static_cast<int>(topology);
         vkCmdSetPrimitiveTopology(cmd, topology);
     }
-    VkRect2D scissor = state.scissor ? PixelRect(mapping, ExtendClearRect(ScissorRect(state.scissor_rect), mapping))
+    VkRect2D scissor = state.scissor ? PixelRect(mapping, ExtendClearRect(ScissorRect(state.scissor_rect), mapping),
+                                                 side.scissor ? dx : 0.0f, side.scissor ? dy : 0.0f)
                                      : VkRect2D{
                                            {0,                   0                   },
                                            {mapping.pixel_width, mapping.pixel_height}
     };
+    if (ClipsToFrame(g.target)) {
+        scissor = Intersect(scissor, FramePixels(target.mapping));
+    }
     if (!SameRect(g.bound.scissor, scissor)) {
         g.bound.scissor = scissor;
         vkCmdSetScissor(cmd, 0, 1, &scissor);
@@ -676,6 +709,7 @@ UiSide AnchoredSide(std::span<const Vertex2D> vertices) {
     UiSide side;
     side.x = x < anchor.left_until ? -1 : x >= anchor.right_from ? 1 : 0;
     side.y = y < anchor.top_until ? -1 : y >= anchor.bottom_from ? 1 : 0;
+    side.scissor = (side.x != 0 || side.y != 0) && anchor.scissor;
     return side;
 }
 
@@ -983,7 +1017,11 @@ void Draw2DSided(Primitive primitive, std::span<const Vertex2D> vertices, const 
     if (uint32_t axes = extend & TextureAxes(binding); axes != 0 && g.in_frame && !g.host_draws) {
         std::vector<Vertex2D> flanks = FrameFlanks(primitive, vertices, axes, frame, mapping);
         if (!flanks.empty()) {
-            DrawPrepared(Primitive::Quads, flanks, binding, state, ui);
+            // Flanks sample past the frame's edge, where a repeating texture would wrap in its far side.
+            TextureBinding clamped = binding;
+            clamped.wrap_u = Wrap::Clamp;
+            clamped.wrap_v = Wrap::Clamp;
+            DrawPrepared(Primitive::Quads, flanks, clamped, state, ui);
         }
     }
 }
@@ -1190,11 +1228,7 @@ void Clear(bool clear_color, const uint8_t color[4], bool clear_depth, float dep
     Target target;
     EnsureRendering(target);
     VkClearRect clear = {};
-    clear.rect = rect ? PixelRect(target.mapping, ExtendClearRect(*rect, target.mapping))
-                      : VkRect2D{
-                            {0,                          0                          },
-                            {target.mapping.pixel_width, target.mapping.pixel_height}
-    };
+    clear.rect = ClearArea(rect, target);
     clear.layerCount = 1;
     if (clear.rect.extent.width == 0 || clear.rect.extent.height == 0) {
         return;
@@ -1233,11 +1267,7 @@ void ClearStencil(uint8_t value, const LogicalRect *rect) {
     Target target;
     EnsureRendering(target);
     VkClearRect clear = {};
-    clear.rect = rect ? PixelRect(target.mapping, ExtendClearRect(*rect, target.mapping))
-                      : VkRect2D{
-                            {0,                          0                          },
-                            {target.mapping.pixel_width, target.mapping.pixel_height}
-    };
+    clear.rect = ClearArea(rect, target);
     clear.layerCount = 1;
     if (clear.rect.extent.width == 0 || clear.rect.extent.height == 0) {
         return;
