@@ -187,6 +187,39 @@ Built locally from `image/` only, with `docker build --platform linux/amd64 --bu
 - Environment: `PATH` includes `/opt/venv/bin`, LLVM 23 and binutils. `M2C`, `MWCCPS2_DEBUGGER_DIR`, `KZ_MWCC_DEBUG_DIR` and `LLDB_DEBUGSERVER_PATH` are set.
 
 
+## FFmpeg
+
+Kazarov ships no FFmpeg code. `image/kz-ffmpeg` (launcher `bin/kz-ffmpeg`) builds FFmpeg 7.1.1 from the pinned ffmpeg.org tarball, checked against its SHA-256, with only the `mpeg2video` decoder and the `mpegvideo` parser:
+
+```
+--disable-everything --disable-programs --disable-doc --disable-network --disable-autodetect
+--disable-avformat --disable-avfilter --disable-swscale --disable-swresample --disable-avdevice
+--enable-decoder=mpeg2video --enable-parser=mpegvideo --enable-pic --disable-shared --enable-static
+```
+
+`--disable-x86asm` is added when `nasm` is absent. The build is LGPL: no `--enable-gpl`, `--enable-nonfree` or `--enable-version3`. It refuses to continue unless configure reports `License: LGPL version 2.1 or later`.
+
+`kz-ffmpeg --out DIR [--jobs N]` installs `DIR/include/{libavcodec,libavutil}`, `DIR/lib/libavcodec.a`, `DIR/lib/libavutil.a`, `DIR/configure.log` and the stamp `DIR/kz-ffmpeg.json`. `--check` tests the stamp; an up-to-date `DIR` is skipped.
+
+Per platform:
+
+- Linux: built into the image at `/opt/kazarov/ffmpeg`. The image sets `KZ_FFMPEG_DIR` to it.
+- macOS: run on the host, for example from a `kazarov.conf` before-build hook: `tools/kazarov/bin/kz-ffmpeg --out .kazarov/ffmpeg/darwin-arm64`. It skips itself when the stamp is current.
+- Windows: there is no POSIX configure. `tools/windows/acquire.ps1` downloads BtbN's `win64-lgpl-shared` build of the 7.1 release from a dated `autobuild-*` tag, checked against a pinned SHA-256, and the project passes `-DKZ_FFMPEG_DIR`. `avcodec-61.dll`, `avutil-59.dll` and `swresample-5.dll` (which BtbN's `avcodec-61.dll` imports) ship beside the executable. Dynamic linking keeps LGPL relinking trivial; the static links on Linux and macOS are relinkable from the public sources.
+
+CMake, from the project's `CMakeLists.txt`:
+
+```cmake
+include(${KZ_ROOT}/cmake/KazarovFfmpeg.cmake)
+kz_ffmpeg(<target> [PUBLIC|PRIVATE|INTERFACE])     # default PUBLIC
+```
+
+- `KZ_FFMPEG_DIR` (cache, PATH): `$ENV{KZ_FFMPEG_DIR}` when set, otherwise `.kazarov/ffmpeg/<os>-<arch>` under `CMAKE_SOURCE_DIR`, with `<os>` `linux`, `darwin` or `windows` and `<arch>` `x64` or `arm64`. Configure fails when `include/libavcodec/avcodec.h` is absent.
+- Targets: `kz::ffmpeg` (interface), `kz::avcodec` and `kz::avutil` (static on Linux and macOS, shared on Windows).
+- `KZ_FFMPEG_RUNTIME_DLLS` (global property): on Windows, the DLL paths, for the consumer to copy beside its executable.
+
+`KazarovFfmpeg.cmake` is not included by `Kazarov.cmake`. A game that does not call `kz_ffmpeg` links nothing of FFmpeg.
+
 ## port.h
 
 `include/kazarov/port.h` lets one source tree serve the PS2 build and the port. The port defines `PORT`.

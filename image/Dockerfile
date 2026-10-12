@@ -88,6 +88,7 @@ RUN apt-get update \
         libsdl3-dev \
         libvulkan-dev \
         mesa-vulkan-drivers \
+        vulkan-validationlayers \
         nlohmann-json3-dev \
         glslang-tools \
         libgtest-dev \
@@ -153,6 +154,15 @@ RUN mkdir -p /opt/kazarov/m2c /opt/kazarov/mwccps2-debugger \
 # MWCC 2.3.3 capture tools: capture.py, gdb_capture.py, replay.py and the profile.
 COPY mwcc-debug /opt/kazarov/mwcc-debug
 RUN chmod -R a+rX /opt/kazarov
+
+# Minimal LGPL FFmpeg (MPEG-2 video decoder only) for the PC port's movies, linked statically.
+COPY kz-ffmpeg /opt/kazarov/bin/kz-ffmpeg
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nasm \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 /opt/kazarov/bin/kz-ffmpeg --out /opt/kazarov/ffmpeg --jobs "$(nproc)" \
+    && chmod -R a+rX /opt/kazarov/ffmpeg
+ENV KZ_FFMPEG_DIR=/opt/kazarov/ffmpeg
 
 # Last layer, so a new KZ_IMAGE_ID rebuilds nothing else.
 ARG KZ_IMAGE_ID
