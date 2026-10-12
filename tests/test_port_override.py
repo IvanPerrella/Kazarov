@@ -15,6 +15,37 @@ SCRIPT = Path(__file__).resolve().parent.parent / 'scripts' / 'port_override.py'
 MARKER = 'g_retail_marker'
 
 
+def test_private_variable_override_is_opt_in(tmp_path):
+    overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
+    write(overrides, 'state\n')
+    write(ps2 / 'a.cpp', 'static int state = 7;\nint Read() { return state; }\n')
+    assert check(tmp_path, overrides, ps2, stubs).returncode != 0
+    assert 'static int state = 7;' in strip(tmp_path, overrides, ps2)
+    assert check(tmp_path, overrides, ps2, stubs, '--private-variables').returncode == 0
+    copied = strip(tmp_path, overrides, ps2, '--private-variables')
+    assert 'extern int state;' in copied
+    assert 'return state;' in copied
+    assert 'static' not in copied
+
+
+def test_private_function_is_never_exported(tmp_path):
+    overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
+    write(overrides, 'F(int)\n')
+    write(ps2 / 'a.cpp', 'static void F(int x) { }\n')
+    assert check(tmp_path, overrides, ps2, stubs, '--private-variables').returncode != 0
+    assert 'static void F' in strip(tmp_path, overrides, ps2, '--private-variables')
+
+
+def test_private_pointer_and_array_keep_declarations(tmp_path):
+    overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
+    write(overrides, 'ptr\nslots\n')
+    write(ps2 / 'a.cpp', 'static Thing *ptr;\nstatic int slots[6] = {1, 2};\n')
+    assert check(tmp_path, overrides, ps2, stubs, '--private-variables').returncode == 0
+    copied = strip(tmp_path, overrides, ps2, '--private-variables')
+    assert 'extern Thing *ptr;' in copied
+    assert 'extern int slots[6];' in copied
+
+
 def run(*args):
     return subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], capture_output=True, text=True)
 

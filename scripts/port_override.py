@@ -265,6 +265,7 @@ class Definition:
         if re.search(r"^[ \t]*#", text[:end], re.MULTILINE):
             raise ConditionalError(CONDITIONAL)
         self.static = re.search(r"\bstatic\b", head) is not None
+        self.variable = flat[i] == ";"
         c_linkage = any(C_LINKAGE.match(text, word.start()) for word in re.finditer(r"\bextern\b", head))
         declaration = text[: len(flat[:end].rstrip())].lstrip(" \t")
         opening = head.find("(")
@@ -352,16 +353,16 @@ def check_compiled(code, found, defined):
                             "the port may not compile")
 
 
-def overridden(text, overrides, renames=None, defined=(), long_is_64=False):
+def overridden(text, overrides, renames=None, defined=(), long_is_64=False, private_variables=False):
     """The (start, definition) of each definition at file scope of a name in overrides, given the
     macros the port defines."""
-    found = list(definitions(text, overrides, renames, long_is_64))
+    found = list(definitions(text, overrides, renames, long_is_64, private_variables))
     if found:
         check_compiled(mask(text), found, set(defined))
     return found
 
 
-def definitions(text, overrides, renames=None, long_is_64=False):
+def definitions(text, overrides, renames=None, long_is_64=False, private_variables=False):
     """Yields (start, definition) for each definition at file scope of a name in overrides."""
     # A spliced line could join a name the scan below would not see.
     for number, (line, directive) in enumerate(directive_lines(text), 1):
@@ -412,7 +413,8 @@ def definitions(text, overrides, renames=None, long_is_64=False):
         # definition spells; its header declares the linkage.
         keys = set() if definition is None else {canonical(definition.name, long_is_64),
                                                  canonical(definition.spelled, long_is_64)}
-        if definition is None or definition.static or not keys & overrides:
+        if (definition is None or not keys & overrides or
+                (definition.static and not (private_variables and definition.variable))):
             # The link fails on a definition left in by mistake, unless it is inline.
             head = "".join(line for line, _ in head)
             if INLINE.search(head) and not re.search(r"\bstatic\b", head):
@@ -420,6 +422,8 @@ def definitions(text, overrides, renames=None, long_is_64=False):
                             "can read")
             continue
         last = start + definition.length
+        if definition.static:
+            definition.replacement = re.sub(r"\bstatic\s+", "", definition.replacement, count=1)
         try:
             check_conditionals(code[start:last])
         except Error as error:
@@ -427,10 +431,10 @@ def definitions(text, overrides, renames=None, long_is_64=False):
         yield start, definition
 
 
-def strip(text, overrides, renames=None, defined=(), long_is_64=False):
+def strip(text, overrides, renames=None, defined=(), long_is_64=False, private_variables=False):
     """Returns text without its definitions of the names in overrides."""
     out, last = [], 0
-    for start, definition in overridden(text, overrides, renames, defined, long_is_64):
+    for start, definition in overridden(text, overrides, renames, defined, long_is_64, private_variables):
         end = start + definition.length
         newlines = text.count("\n", start, end) - definition.replacement.count("\n")
         out.append(text[last:start] + definition.replacement + "\n" * newlines)
@@ -470,21 +474,21 @@ def override_entries(text):
     return list(dict.fromkeys(entry for entry in text.split("\n") if entry))
 
 
-def strip_unit(source, overrides, renames_, defined, long_is_64):
+def strip_unit(source, overrides, renames_, defined, long_is_64, private_variables=False):
     """The text strip writes for a ps2/src unit: a #line marker, then the unit without the overridden definitions."""
     try:
-        stripped = strip(read(source), overrides, renames_, defined, long_is_64)
+        stripped = strip(read(source), overrides, renames_, defined, long_is_64, private_variables)
     except Error as error:
         raise Error(f"{source}:{error}") from None
     return f'#line 1 "{source.resolve().as_posix()}"\n{stripped}'
 
 
-def analyse(text, overrides, renames_, defined, long_is_64):
+def analyse(text, overrides, renames_, defined, long_is_64, private_variables=False):
     """check's result for one unit: the names its matched definitions link under, and the overrides
     entries that select them. strip selects a definition by the same canonical names, so an entry
     selecting none of them can be left out of the unit's split file."""
     try:
-        found = overridden(text, overrides, renames_, defined, long_is_64)
+        found = overridden(text, overrides, renames_, defined, long_is_64, private_variables)
     except Error as error:
         return {"error": str(error), "names": [], "spelled": [], "split": []}
     names = sorted({canonical(definition.name, long_is_64) for _, definition in found})
@@ -549,6 +553,9 @@ def main():
     checker.add_argument("-o", "--output", type=pathlib.Path, required=True, help="written when the check passes")
     checker.add_argument("--split", type=pathlib.Path, help="DIR/<unit>.txt: each unit's own overrides entries")
     checker.add_argument("--cache", type=pathlib.Path, help="JSON file of per-unit results, reused while unchanged")
+    for command in (stripper, checker):
+        command.add_argument("--private-variables", action="store_true",
+                             help="allow explicit overrides to share a unit's private variable storage")
     options = parser.parse_args()
     try:
         if options.command == "list":
@@ -568,7 +575,7 @@ def main():
         if options.command == "strip":
             # Left alone when unchanged, so that only the units a change reaches are recompiled.
             write(options.output, strip_unit(options.source, overrides, renames(options.stubs), options.define,
-                                             options.long_is_64), if_changed=True)
+                                             options.long_is_64, options.private_variables), if_changed=True)
             return 0
         units = {}
         for source in sorted(options.ps2.rglob("*.cpp")):
@@ -587,11 +594,12 @@ def main():
             key = None
             if options.cache:
                 key = unit_key([data, stub_data, overrides_bytes, repr(sorted(options.define)).encode(),
-                                b"1" if options.long_is_64 else b"0", script])
+                                b"1" if options.long_is_64 else b"0",
+                                b"1" if options.private_variables else b"0", script])
             result = cached_result(old, unit, key) if options.cache else None
             if result is None:
-                result = analyse(decode(data), overrides, rename_map(decode(stub_data)), options.define,
-                                 options.long_is_64)
+                args = (decode(data), overrides, rename_map(decode(stub_data)), options.define, options.long_is_64)
+                result = analyse(*args, True) if options.private_variables else analyse(*args)
             results[unit] = {"key": key, "result": result}
             if result["error"] is not None:
                 failure = Error(f"{source}:{result['error']}")
