@@ -734,6 +734,7 @@ void InputShutdown() {
     MouseStop();
     g_menu_mouse = false;
     g_menu_navigation = false;
+    g_keyboard_stick_navigation = true;
     g_developer_menu = false;
     g_menu_dx = 0.0f;
     g_menu_dy = 0.0f;

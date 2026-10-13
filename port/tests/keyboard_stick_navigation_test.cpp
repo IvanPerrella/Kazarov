@@ -40,6 +40,12 @@ TEST(KeyboardStickNavigation, ReboundAndOpposingKeysUseEffectiveAxes) {
 
 TEST(KeyboardStickNavigation, NavigationPolicyPreservesExplicitDpadAndStickAxes) {
     InputResetBindings();
+    // Simulate an earlier stick reader, then advance a tick without a read.
+    InputNoteLeftStickRead();
+    InputLatchPad(0);
+    ASSERT_TRUE(InputLeftStickLive());
+    InputLatchPad(0);
+    ASSERT_FALSE(InputLeftStickLive());
     InputPadState base;
     base.connected = true;
     InputKeyboardMouse held;
@@ -55,6 +61,24 @@ TEST(KeyboardStickNavigation, NavigationPolicyPreservesExplicitDpadAndStickAxes)
     }
     // The policy is opt-in: other games retain their fallback navigation.
     InputSetKeyboardStickNavigation(true);
-    if (!InputLeftStickLive()) EXPECT_EQ(InputGetPad(0).buttons, kInputUp | kInputRight);
+    EXPECT_EQ(InputGetPad(0).buttons, kInputUp | kInputRight);
     InputSetOverride(0, nullptr);
+}
+
+TEST(KeyboardStickNavigation, ShutdownRestoresDefaultFallbackPolicy) {
+    InputResetBindings();
+    InputLatchPad(0);
+    InputLatchPad(0);
+    ASSERT_FALSE(InputLeftStickLive());
+    InputKeyboardMouse held;
+    held.keys = {SDL_SCANCODE_D, SDL_SCANCODE_UP};
+    const auto state = InputApplyKeyboardMouse({}, held);
+    InputSetOverride(0, &state);
+    InputSetKeyboardStickNavigation(false);
+    EXPECT_EQ(InputGetPad(0).buttons, kInputUp);
+    InputShutdown();
+    InputSetOverride(0, &state);
+    EXPECT_EQ(InputGetPad(0).buttons, kInputUp | kInputRight);
+    InputSetOverride(0, nullptr);
+    InputSetKeyboardStickNavigation(true);
 }
