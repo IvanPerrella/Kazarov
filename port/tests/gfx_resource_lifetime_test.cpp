@@ -12,10 +12,10 @@ using namespace dc::test;
 
 namespace {
 
-constexpr int kWidth = 64;
-constexpr int kHeight = 48;
+constexpr int                kWidth = 64;
+constexpr int                kHeight = 48;
 const std::array<uint8_t, 4> kClear = {0, 0, 0, 0x80};
-const std::vector<uint32_t> kTriangle = {0, 1, 2};
+const std::vector<uint32_t>  kTriangle = {0, 1, 2};
 // Small enough that filling it is cheap on a software rasterizer; the fixture's own textures take
 // the first kFirstUserSlot slots of the table.
 constexpr uint32_t kSmallTable = 16;
@@ -29,7 +29,12 @@ void Identity(float (&m)[16]) {
 
 std::vector<gfx::Vertex3D> RedTriangle() {
     auto vertex = [](float x, float y) {
-        return gfx::Vertex3D{{x, y, 0.5f}, {0, 0, 1}, {0.0f, 0.0f}, {255, 0, 0, 255}};
+        return gfx::Vertex3D{
+            {x, y, 0.5f},
+            {0, 0, 1},
+            {0.0f, 0.0f},
+            {255, 0, 0, 255}
+        };
     };
     return {vertex(-0.5f, -0.5f), vertex(0.5f, -0.5f), vertex(0.0f, 0.5f)};
 }
@@ -88,10 +93,10 @@ std::vector<gfx::MeshHandle> FillMeshSlots() {
 } // namespace
 
 TEST(GfxMeshDc2, DoomedMeshDrawIsRecorded) {
-    GfxFixture          fixture(kWidth, kHeight);
-    gfx::MeshHandle     mesh = gfx::CreateMesh(RedTriangle(), kTriangle);
+    GfxFixture      fixture(kWidth, kHeight);
+    gfx::MeshHandle mesh = gfx::CreateMesh(RedTriangle(), kTriangle);
     ASSERT_NE(mesh, gfx::kNullMesh);
-    gfx::MeshConstants  constants = PlainConstants();
+    gfx::MeshConstants constants = PlainConstants();
     fixture.Frame(kClear, [&] { gfx::DrawMesh(mesh, 0, 3, constants, {}, gfx::DrawState{}); });
     ASSERT_GT(RedPixels(fixture), 0) << "the undoomed draw does not paint red";
 
@@ -111,7 +116,7 @@ TEST(GfxMeshDc2, DoomedMeshDrawIsRecorded) {
 }
 
 TEST(GfxMeshDc2, DoomedTextureCopyIsRecorded) {
-    GfxFixture      fixture(kWidth, kHeight);
+    GfxFixture         fixture(kWidth, kHeight);
     gfx::TextureHandle a = gfx::CreateTexture(gfx::TextureDesc{4, 4});
     gfx::TextureHandle b = gfx::CreateTexture(gfx::TextureDesc{4, 4});
     ASSERT_NE(a, gfx::kNullTexture);
@@ -133,7 +138,7 @@ TEST(GfxMeshDc2, DoomedTextureCopyIsRecorded) {
 }
 
 TEST(GfxMeshDc2, DoomedTextureUpdateIsRecorded) {
-    GfxFixture      fixture(kWidth, kHeight);
+    GfxFixture         fixture(kWidth, kHeight);
     gfx::TextureHandle texture = gfx::CreateTexture(gfx::TextureDesc{2, 2});
     ASSERT_NE(texture, gfx::kNullTexture);
     const uint8_t texel[4] = {0, 255, 0, 255};
@@ -179,7 +184,7 @@ TEST(GfxMeshDc2, DoomedResourcesCannotEscapeTheirRecording) {
 }
 
 TEST(GfxMeshDc2, SecondDestroyOfDoomedHandleIsHarmless) {
-    GfxFixture      fixture(kWidth, kHeight);
+    GfxFixture         fixture(kWidth, kHeight);
     gfx::TextureHandle texture = gfx::CreateTexture(gfx::TextureDesc{4, 4});
     gfx::MeshHandle    mesh = gfx::CreateMesh(RedTriangle(), kTriangle);
     ASSERT_NE(texture, gfx::kNullTexture);
@@ -200,7 +205,7 @@ TEST(GfxMeshDc2, SecondDestroyOfDoomedHandleIsHarmless) {
 }
 
 TEST(GfxMeshDc2, CreateAtTheSlotLimitRetiresDestroyedSlots) {
-    GfxFixture fixture(kWidth, kHeight, 1.0f, SmallTables());
+    GfxFixture                      fixture(kWidth, kHeight, 1.0f, SmallTables());
     std::vector<gfx::TextureHandle> handles = FillTextureSlots();
     ASSERT_LT(handles.size(), kSafetyCap) << "the slot table never reported full";
     ASSERT_FALSE(handles.empty());
@@ -219,7 +224,7 @@ TEST(GfxMeshDc2, CreateAtTheSlotLimitRetiresDestroyedSlots) {
 }
 
 TEST(GfxMeshDc2, DestroyedSlotsReturnAfterTwoFrames) {
-    GfxFixture fixture(kWidth, kHeight, 1.0f, SmallTables());
+    GfxFixture                      fixture(kWidth, kHeight, 1.0f, SmallTables());
     std::vector<gfx::TextureHandle> handles = FillTextureSlots();
     ASSERT_LT(handles.size(), kSafetyCap) << "the slot table never reported full";
     ASSERT_FALSE(handles.empty());
@@ -240,7 +245,7 @@ TEST(GfxMeshDc2, DestroyedSlotsReturnAfterTwoFrames) {
 }
 
 TEST(GfxMeshDc2, CreateMeshAtTheSlotLimitRetiresDestroyedSlots) {
-    GfxFixture fixture(kWidth, kHeight, 1.0f, SmallTables());
+    GfxFixture                   fixture(kWidth, kHeight, 1.0f, SmallTables());
     std::vector<gfx::MeshHandle> handles = FillMeshSlots();
     ASSERT_LT(handles.size(), kSafetyCap) << "the mesh table never reported full";
     ASSERT_FALSE(handles.empty());

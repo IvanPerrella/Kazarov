@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 #include <libpad.h>
 
-#include "sce/sdk_params.hpp"
-#include "sce/libpad_extensions.hpp"
 #include "platform/input.hpp"
+#include "sce/libpad_extensions.hpp"
+#include "sce/sdk_params.hpp"
 
 TEST(PlatformPadLifecycle, ClosingAPortAndEndingTheLibraryReleaseOpenedPorts) {
     using Buffer = SdkParams<decltype(scePadPortOpen)>::At<2>;

@@ -410,14 +410,16 @@ void BuildMatches(const DisplayList &list, const DisplayList &previous) {
     cache.blend.assign(list.records.size(), false);
     cache.draws_2d.clear();
     if (!list.camera_cut && !list.tagged_2d.empty()) {
-        std::unordered_map<InterpKey, std::vector<uint32_t>> before_2d;
+        std::unordered_map<InterpKey, std::vector<uint32_t> > before_2d;
         for (uint32_t entry : previous.tagged_2d) {
             before_2d[std::get<Draw2DEntry>(previous.entries[entry]).interpolation.key].push_back(entry);
         }
         for (uint32_t entry : list.tagged_2d) {
             const auto &draw = std::get<Draw2DEntry>(list.entries[entry]);
-            auto found = before_2d.find(draw.interpolation.key);
-            if (found == before_2d.end()) continue;
+            auto        found = before_2d.find(draw.interpolation.key);
+            if (found == before_2d.end()) {
+                continue;
+            }
             for (uint32_t candidate : found->second) {
                 const auto &earlier = std::get<Draw2DEntry>(previous.entries[candidate]);
                 if (earlier.occurrence == draw.occurrence &&
@@ -726,8 +728,8 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
 
     MoveSprites(list, views, moved, out);
     for (const auto &pair : cache.draws_2d) {
-        const auto &draw = std::get<Draw2DEntry>(list.entries[pair[0]]);
-        const auto &before = std::get<Draw2DEntry>(previous.entries[pair[1]]);
+        const auto           &draw = std::get<Draw2DEntry>(list.entries[pair[0]]);
+        const auto           &before = std::get<Draw2DEntry>(previous.entries[pair[1]]);
         std::vector<Vertex2D> vertices;
         bool blended = false;
         // Camera pairing currently uses first-appearance order. Multi-view lists cannot prove
@@ -1191,7 +1193,9 @@ bool Interpolate2D(const Draw2DEntry &before, const Draw2DEntry &after, float al
         const auto &a = before.vertices[i];
         const auto &b = after.vertices[i];
         if (a.u != b.u || a.v != b.v || a.z != b.z || a.fog != b.fog ||
-            !std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(b.x) || !std::isfinite(b.y)) return false;
+            !std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(b.x) || !std::isfinite(b.y)) {
+            return false;
+        }
     }
     alpha = std::max(alpha, 0.0f);
     for (size_t i = 0; i < out.size(); i++) {
@@ -1399,6 +1403,7 @@ InterpKey CurrentInterpKey() { return g.interp_key; }
 bool CurrentNoInterpolation() { return g.interp_no_interpolation; }
 
 void SetInterp2D(Interp2D interpolation) { g.interp_2d = interpolation; }
+
 Interp2D CurrentInterp2D() { return g.interp_2d; }
 
 void BeginRecording() {

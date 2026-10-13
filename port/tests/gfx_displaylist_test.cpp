@@ -286,13 +286,15 @@ gfx::detail::Draw2DEntry PresentationQuad(float x, float y, uint8_t opacity) {
     gfx::detail::Draw2DEntry draw{};
     draw.primitive = gfx::Primitive::Quads;
     draw.interpolation = {17, 3};
-    draw.vertices = {{x, y, 0, 0, 0, {128, 32, 16, opacity}},
-                     {x + 8, y, 0, 8, 0, {128, 32, 16, opacity}},
-                     {x + 8, y + 8, 0, 8, 8, {128, 32, 16, opacity}},
-                     {x, y + 8, 0, 0, 8, {128, 32, 16, opacity}}};
+    draw.vertices = {
+        {x,     y,     0, 0, 0, {128, 32, 16, opacity}},
+        {x + 8, y,     0, 8, 0, {128, 32, 16, opacity}},
+        {x + 8, y + 8, 0, 8, 8, {128, 32, 16, opacity}},
+        {x,     y + 8, 0, 0, 8, {128, 32, 16, opacity}}
+    };
     return draw;
 }
-}
+} // namespace
 
 TEST(GfxDisplayList, Keyed2DInterpolatesOnlyScreenPositionAndOpacity) {
     auto before = PresentationQuad(8, 12, 32);
@@ -315,10 +317,10 @@ TEST(GfxDisplayList, Keyed2DInterpolatesOnlyScreenPositionAndOpacity) {
 }
 
 TEST(GfxDisplayList, Keyed2DRejectsReusedOrIncompatibleDraws) {
-    const auto before = PresentationQuad(8, 12, 32);
-    const auto after = PresentationQuad(24, 20, 96);
+    const auto                            before = PresentationQuad(8, 12, 32);
+    const auto                            after = PresentationQuad(24, 20, 96);
     std::vector<gfx::detail::Draw2DEntry> incompatible;
-    auto change = [&](auto mutate) { auto draw = after; mutate(draw); incompatible.push_back(draw); };
+    auto                                  change = [&](auto mutate) { auto draw = after; mutate(draw); incompatible.push_back(draw); };
     change([](auto &d) { d.interpolation.key = 0; });
     change([](auto &d) { ++d.interpolation.key; });
     change([](auto &d) { ++d.interpolation.generation; });
@@ -353,11 +355,15 @@ TEST(GfxDisplayList, Keyed2DRejectsReusedOrIncompatibleDraws) {
 
 TEST(GfxMisc, Keyed2DPresentationIsOptInAndCanonicalExact) {
     GfxFixture fixture(64, 48, 1.0f, true, 64, 48);
-    auto record = [&](float x, float y, uint8_t opacity, uint64_t generation, bool reverse, int cut) {
+    auto       record = [&](float x, float y, uint8_t opacity, uint64_t generation, bool reverse, int cut) {
         gfx::BeginRecording();
         gfx::Clear(true, kClear.data(), true, 0);
-        if (cut == 1) gfx::CutInterpolation();
-        if (cut == 2) gfx::CutCameraInterpolation();
+        if (cut == 1) {
+            gfx::CutInterpolation();
+        }
+        if (cut == 2) {
+            gfx::CutCameraInterpolation();
+        }
         auto hud = PresentationQuad(40, 28, 128);
         hud.vertices[0].color[1] = 128;
         auto damage = PresentationQuad(x, y, opacity);
@@ -366,7 +372,13 @@ TEST(GfxMisc, Keyed2DPresentationIsOptInAndCanonicalExact) {
             gfx::Draw2D(damage.primitive, damage.vertices, damage.binding, damage.state);
         };
         auto draw_hud = [&] { gfx::Draw2D(hud.primitive, hud.vertices, hud.binding, hud.state); };
-        if (reverse) { draw_hud(); draw_damage(); } else { draw_damage(); draw_hud(); }
+        if (reverse) {
+            draw_hud();
+            draw_damage();
+        } else {
+            draw_damage();
+            draw_hud();
+        }
         return gfx::EndRecording();
     };
     auto render = [&](const gfx::DisplayList &list, float alpha, gfx::RenderOptions options) {
@@ -376,7 +388,7 @@ TEST(GfxMisc, Keyed2DPresentationIsOptInAndCanonicalExact) {
     };
     auto before = record(8, 8, 32, 3, true, 0);
     render(*before, 1, {.canonical = true});
-    auto after = record(24, 12, 96, 3, false, 0);
+    auto       after = record(24, 12, 96, 3, false, 0);
     const auto newest = render(*after, 1, {.canonical = true});
     for (float alpha : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
         auto actual = render(*after, alpha, {.previous = before.get()});

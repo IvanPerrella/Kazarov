@@ -12,9 +12,9 @@
 #include <vector>
 
 #include "platform/paths.hpp"
-#include "sce/sdk_params.hpp"
-#include "sce/libmc_extensions.hpp"
 #include "platform_fixture.hpp"
+#include "sce/libmc_extensions.hpp"
+#include "sce/sdk_params.hpp"
 
 // libmc on a save root in a temporary directory.
 
@@ -47,11 +47,14 @@ int Settle(int issued, int function) {
 
 std::vector<std::string> ListNames(const char *pattern, int mode = 0, int count = 64) {
     alignas(16) unsigned char table[64][0x40] = {};
-    const int result = Settle(sceMcGetDir(0, 0, const_cast<char *>(pattern), mode, count,
-        reinterpret_cast<SdkParams<decltype(sceMcGetDir)>::At<5>>(table)), 0x0D);
+    const int                 result = Settle(sceMcGetDir(0, 0, const_cast<char *>(pattern), mode, count,
+                                                          reinterpret_cast<SdkParams<decltype(sceMcGetDir)>::At<5> >(table)),
+                                              0x0D);
     EXPECT_GE(result, 0);
     std::vector<std::string> names;
-    for (int i = 0; i < result; ++i) names.emplace_back(reinterpret_cast<char *>(table[i] + 0x20));
+    for (int i = 0; i < result; ++i) {
+        names.emplace_back(reinterpret_cast<char *>(table[i] + 0x20));
+    }
     return names;
 }
 
@@ -60,7 +63,9 @@ void MakeNames(std::initializer_list<const char *> names) {
     sceMcInit();
     ASSERT_EQ(Settle(sceMcFormat(0, 0), 0x10), 0);
     ASSERT_EQ(Settle(sceMcChdir(0, 0, (char *) "/", nullptr), 0x0C), 0);
-    for (const char *name : names) fs::create_directory(root / "mc0" / name);
+    for (const char *name : names) {
+        fs::create_directory(root / "mc0" / name);
+    }
 }
 
 } // namespace
@@ -109,16 +114,16 @@ TEST(PlatformMc, DirectoryRetailSavePatternFindsAllSixteenSlotsAndPages) {
     std::sort(expected.begin(), expected.end());
     EXPECT_EQ(ListNames("/BESCES-51190dkcl??"), expected);
     EXPECT_EQ(ListNames("/BESCES-51190dkcl??", 0, 5),
-        (std::vector<std::string>(expected.begin(), expected.begin() + 5)));
+              (std::vector<std::string>(expected.begin(), expected.begin() + 5)));
     EXPECT_EQ(ListNames("/BESCES-51190dkcl??", 1, 64),
-        (std::vector<std::string>(expected.begin() + 5, expected.end())));
+              (std::vector<std::string>(expected.begin() + 5, expected.end())));
     EXPECT_TRUE(ListNames("/BESCES-51190dkcl??", 1).empty());
 }
 
 TEST(PlatformMc, DirectoryChronicleSavePrefixStarKeepsItsResults) {
     MakeNames({"darkcloud", "darkcloud0", "darkcloud01", "darkcloud012", "darkclou", "other"});
     EXPECT_EQ(ListNames("/darkcloud*"),
-        (std::vector<std::string>{"darkcloud", "darkcloud0", "darkcloud01", "darkcloud012"}));
+              (std::vector<std::string>{"darkcloud", "darkcloud0", "darkcloud01", "darkcloud012"}));
 }
 
 TEST(PlatformMc, SyncReportsCommandCodes) {
@@ -214,7 +219,7 @@ TEST(PlatformMc, RenameStaysInTheSourceDirectoryAndDoesNotOverwrite) {
     std::ofstream(root / "mc0" / "dir" / "old") << "original";
     EXPECT_EQ(Settle(sceMcRename(0, 0, (char *) "/dir/old", (char *) "new"), 0x0E), 0);
     EXPECT_FALSE(fs::exists(root / "mc0" / "dir" / "old"));
-    EXPECT_EQ(ReadFile(root / "mc0" / "dir" / "new"), (std::vector<char>{'o','r','i','g','i','n','a','l'}));
+    EXPECT_EQ(ReadFile(root / "mc0" / "dir" / "new"), (std::vector<char>{'o', 'r', 'i', 'g', 'i', 'n', 'a', 'l'}));
     std::ofstream(root / "mc0" / "dir" / "old") << "second";
     EXPECT_LT(Settle(sceMcRename(0, 0, (char *) "/dir/old", (char *) "new"), 0x0E), 0);
     EXPECT_TRUE(fs::exists(root / "mc0" / "dir" / "old"));

@@ -11,9 +11,9 @@ TEST(GfxMeshDc2, SlotRetirementWaitsEverySubmittedFrameBeforeDeleting) {
     GfxOptions options;
     options.offscreen = true;
     options.texture_slots = gfx::detail::kFirstUserSlot + 1;
-    GfxFixture fixture(64, 48, 1.0f, options);
+    GfxFixture    fixture(64, 48, 1.0f, options);
     const uint8_t texel[] = {255, 0, 0, 255};
-    const auto texture = gfx::CreateTexture(gfx::TextureDesc{1, 1});
+    const auto    texture = gfx::CreateTexture(gfx::TextureDesc{1, 1});
     ASSERT_NE(texture, gfx::kNullTexture);
     ASSERT_TRUE(gfx::UpdateTexture(texture, 0, 0, 0, 1, 1, texel));
     gfx::detail::SubmitUploadsAndWait();

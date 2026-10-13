@@ -10,8 +10,8 @@ using namespace dc::test;
 
 namespace {
 
-constexpr float kLogicalWidth = 512.0f;
-constexpr float kLogicalHeight = 480.0f;
+constexpr float              kLogicalWidth = 512.0f;
+constexpr float              kLogicalHeight = 480.0f;
 const std::array<uint8_t, 4> kBlue = {0, 0, 255, 0x80};
 const std::array<uint8_t, 4> kRed = {255, 0, 0, 0x80};
 const std::array<uint8_t, 4> kBlack = {0, 0, 0, 0x80};
@@ -33,9 +33,14 @@ FramePixels FrameOf(int width, int height) {
 
 void DrawFrameWithOutline(GfxFixture &fixture) {
     const std::array<gfx::Vertex2D, 8> outline = {
-        Vertex(0, 0, 0, 0, kBlack),     Vertex(511, 0, 0, 0, kBlack),   Vertex(511, 0, 0, 0, kBlack),
-        Vertex(511, 479, 0, 0, kBlack), Vertex(511, 479, 0, 0, kBlack), Vertex(0, 479, 0, 0, kBlack),
-        Vertex(0, 479, 0, 0, kBlack),   Vertex(0, 0, 0, 0, kBlack),
+        Vertex(0, 0, 0, 0, kBlack),
+        Vertex(511, 0, 0, 0, kBlack),
+        Vertex(511, 0, 0, 0, kBlack),
+        Vertex(511, 479, 0, 0, kBlack),
+        Vertex(511, 479, 0, 0, kBlack),
+        Vertex(0, 479, 0, 0, kBlack),
+        Vertex(0, 479, 0, 0, kBlack),
+        Vertex(0, 0, 0, 0, kBlack),
     };
     fixture.Frame(kBlue, [&] {
         auto red = Quad(0, 0, 512, 480, kRed);
@@ -123,7 +128,7 @@ TEST(GfxMeshDc2, AnchoredHudOutsideLogicalFrameStaysHiddenInFill) {
     gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
     fixture.Frame(kBlue, [&] {
         gfx::UiAnchorScope anchor(gfx::UiAnchor::Side(-1, -1, true));
-        gfx::DrawState state;
+        gfx::DrawState     state;
         state.depth_test = gfx::DepthTest::Always;
         state.depth_write = false;
         // A secondary-weapon HUD slides past the retail screen during an event.
@@ -139,7 +144,7 @@ TEST(GfxMeshDc2, RightAnchoredHudClipsItsAnimationAtTheShiftedFrame) {
     gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
     fixture.Frame(kBlue, [&] {
         gfx::UiAnchorScope anchor(gfx::UiAnchor::Side(1, -1, true));
-        gfx::DrawState state;
+        gfx::DrawState     state;
         state.depth_test = gfx::DepthTest::Always;
         state.depth_write = false;
         gfx::Draw2D(gfx::Primitive::Quads, Quad(-100, 17, 120, 50, kRed), {}, state);
@@ -160,7 +165,7 @@ TEST(GfxMeshDc2, FillScissorCanKeepItsLogicalExtent) {
             fixture.Frame(kBlue, [&] {
                 // With a fixed scissor, anchored geometry still clips against the original frame.
                 gfx::UiAnchorScope anchor(anchored ? gfx::UiAnchor::Side(-1, -1) : gfx::UiAnchor{});
-                gfx::DrawState state;
+                gfx::DrawState     state;
                 state.depth_test = gfx::DepthTest::Always;
                 state.depth_write = false;
                 state.scissor = true;
@@ -171,7 +176,7 @@ TEST(GfxMeshDc2, FillScissorCanKeepItsLogicalExtent) {
             EXPECT_TRUE(fixture.PixelNear(60, 360, extend ? 255 : 0, 0, extend ? 0 : 255));
             EXPECT_TRUE(fixture.PixelNear(640, 360, 255, 0, 0));
             EXPECT_TRUE(fixture.PixelNear(1220, 360, extend && !anchored ? 255 : 0, 0,
-                                         extend && !anchored ? 0 : 255));
+                                          extend && !anchored ? 0 : 255));
         }
     }
 }

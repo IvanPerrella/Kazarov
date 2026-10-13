@@ -3,9 +3,9 @@
 #include <array>
 #include <cstring>
 
+#include "libpad_extensions.hpp"
 #include "platform/input.hpp"
 #include "sdk_params.hpp"
-#include "libpad_extensions.hpp"
 
 namespace {
 
@@ -98,14 +98,18 @@ int scePadSetActDirect(int port, int slot, unsigned char *values) {
 
 int scePadEnd(void) {
     for (int port = 0; port < kInputPadCount; ++port) {
-        if (g_open[port]) InputSetRumble(port, {});
+        if (g_open[port]) {
+            InputSetRumble(port, {});
+        }
     }
     g_open = {};
     return 1;
 }
 
 int scePadPortClose(int port, int slot) {
-    if (port < 0 || port >= kInputPadCount || slot != 0 || !g_open[port]) return 0;
+    if (port < 0 || port >= kInputPadCount || slot != 0 || !g_open[port]) {
+        return 0;
+    }
     InputSetRumble(port, {});
     g_open[port] = false;
     return 1;

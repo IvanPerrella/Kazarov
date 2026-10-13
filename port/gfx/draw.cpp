@@ -141,7 +141,10 @@ VkRect2D FramePixels(const LogicalMapping &mapping) { return PixelRect(mapping, 
 // set wholly inside the frame is clipped to the frame's pixels on each axis the target shows past.
 VkRect2D FrameLineClip(VkPrimitiveTopology topology, std::span<const Vertex2D> vertices,
                        const LogicalMapping &mapping) {
-    VkRect2D area = {{0, 0}, {mapping.pixel_width, mapping.pixel_height}};
+    VkRect2D area = {
+        {0,                   0                   },
+        {mapping.pixel_width, mapping.pixel_height}
+    };
     if (!FillsWindow() || g.host_draws ||
         (topology != VK_PRIMITIVE_TOPOLOGY_LINE_LIST && topology != VK_PRIMITIVE_TOPOLOGY_LINE_STRIP)) {
         return area;
@@ -443,8 +446,7 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
         g.bound.topology = static_cast<int>(topology);
         vkCmdSetPrimitiveTopology(cmd, topology);
     }
-    VkRect2D scissor = state.scissor ? PixelRect(mapping, (state.extend_scissor ? ExtendClearRect(ScissorRect(state.scissor_rect), mapping)
-                                                                        : ScissorRect(state.scissor_rect)),
+    VkRect2D scissor = state.scissor ? PixelRect(mapping, (state.extend_scissor ? ExtendClearRect(ScissorRect(state.scissor_rect), mapping) : ScissorRect(state.scissor_rect)),
                                                  side.scissor ? dx : 0.0f, side.scissor ? dy : 0.0f)
                                      : VkRect2D{
                                            {0,                   0                   },

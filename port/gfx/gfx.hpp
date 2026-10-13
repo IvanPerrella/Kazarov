@@ -252,7 +252,7 @@ enum class Wrap : uint8_t {
 };
 
 struct TextureBinding {
-    bool operator==(const TextureBinding &) const = default;
+    bool          operator==(const TextureBinding &) const = default;
     TextureHandle texture = kNullTexture;
     TextureHandle palette = kNullTexture; // required with an Index8 texture
     Filter        filter = Filter::Linear;
@@ -266,7 +266,7 @@ struct TextureBinding {
 // GS ALPHA: ((A - B) * C >> 7) + D. A, B, D: 0 source, 1 destination, 2 zero. C: 0 source
 // alpha, 1 destination alpha, 2 fix.
 struct GsBlend {
-    bool operator==(const GsBlend &) const = default;
+    bool    operator==(const GsBlend &) const = default;
     uint8_t a = 0;
     uint8_t b = 1;
     uint8_t c = 0;
@@ -326,7 +326,7 @@ enum class StencilOp : uint8_t {
 
 // The test passes when (reference & compare_mask) compare (stored & compare_mask).
 struct StencilFace {
-    bool operator==(const StencilFace &) const = default;
+    bool      operator==(const StencilFace &) const = default;
     CompareOp compare = CompareOp::Always;
     StencilOp fail = StencilOp::Keep;
     StencilOp pass = StencilOp::Keep;
@@ -345,7 +345,7 @@ enum ColorWriteBits : uint8_t {
 };
 
 struct LogicalRect {
-    bool operator==(const LogicalRect &) const = default;
+    bool  operator==(const LogicalRect &) const = default;
     float x;
     float y;
     float w;
@@ -358,7 +358,7 @@ float       LogicalHeight();
 LogicalRect LogicalFrame();
 
 struct DrawState {
-    bool operator==(const DrawState &) const = default;
+    bool      operator==(const DrawState &) const = default;
     bool      blend = false; // GS PRIM.ABE
     GsBlend   alpha;
     DepthTest depth_test = DepthTest::Always;
@@ -374,7 +374,7 @@ struct DrawState {
     uint8_t     texa_ta0 = 0x80;
     bool        scissor = false;
     // Frame-edge scissors normally follow Fill. Sliding UI can retain the logical frame.
-    bool        extend_scissor = true;
+    bool extend_scissor = true;
     // Infinite extents mean the whole frame, which is only known once RendererInit has run.
     LogicalRect scissor_rect = {0.0f, 0.0f, INFINITY, INFINITY};
     // Faces are told apart by winding, as for culling; lines are front faces.
@@ -666,14 +666,19 @@ struct Interp2D {
     bool world_corners = false;
     float teleport_distance = 200.0f;
 };
-void SetInterp2D(Interp2D interpolation);
+
+void     SetInterp2D(Interp2D interpolation);
 Interp2D CurrentInterp2D();
+
 class Interp2DScope {
 public:
     explicit Interp2DScope(Interp2D interpolation) : previous_(CurrentInterp2D()) { SetInterp2D(interpolation); }
+
     ~Interp2DScope() { SetInterp2D(previous_); }
+
     Interp2DScope(const Interp2DScope &) = delete;
     Interp2DScope &operator=(const Interp2DScope &) = delete;
+
 private:
     Interp2D previous_;
 };

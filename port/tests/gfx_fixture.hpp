@@ -30,10 +30,10 @@ struct GfxOptions {
     bool triangle_fans = true;
     bool separate_stencil_masks = true;
     bool prog0_meshes = false;
-    uint32_t texture_slots = 0;
-    uint32_t mesh_slots = 0;
-    float logical_width = 640.0f;
-    float logical_height = 480.0f;
+    uint32_t              texture_slots = 0;
+    uint32_t              mesh_slots = 0;
+    float                 logical_width = 640.0f;
+    float                 logical_height = 480.0f;
     std::filesystem::path pipeline_cache = std::filesystem::temp_directory_path() / "dc_gfx_test" / "pipeline_cache.bin";
 };
 

@@ -6,8 +6,8 @@
 #include <string>
 
 #include "platform/paths.hpp"
-#include "sce/libcdvd_extensions.hpp"
 #include "platform_fixture.hpp"
+#include "sce/libcdvd_extensions.hpp"
 
 TEST(PlatformCdvd, SearchResolvesIsoNamesAgainstExtractedData) {
     const auto root = std::filesystem::temp_directory_path() /

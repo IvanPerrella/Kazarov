@@ -17,7 +17,7 @@ using Mat4 = std::array<float, 16>;
 
 // The visible edges a UI draw keeps its distance to: -1 the low edge, 1 the high edge, 0 neither.
 struct UiSide {
-    bool operator==(const UiSide &) const = default;
+    bool   operator==(const UiSide &) const = default;
     int8_t x = 0;
     int8_t y = 0;
     bool   scissor = false;
@@ -31,8 +31,8 @@ struct Draw2DEntry {
     UiSide                side;
     // DisplayList::scenes: the scene a draw that tests depth (a 3D sprite) stands in, or -1.
     int32_t scene = -1;
-    Interp2D interpolation;
-    uint32_t occurrence = 0;
+    Interp2D      interpolation;
+    uint32_t      occurrence = 0;
     TextureHandle target = kMainTarget;
 };
 
@@ -121,7 +121,7 @@ struct MeshRecord {
 
 // What a display render of a list against one predecessor reuses from frame to frame.
 struct MatchCache {
-    std::vector<std::array<uint32_t, 2>> draws_2d; // matched entry indices, newest then previous
+    std::vector<std::array<uint32_t, 2> > draws_2d; // matched entry indices, newest then previous
     uint64_t             previous_serial = 0;
     std::vector<int32_t> match;   // per record, the previous list's record, or -1
     std::vector<bool>    blend;   // per record, whether its immediate vertices moved since the match's
@@ -152,7 +152,7 @@ struct DisplayList {
     bool                                    main_cleared = false;
     std::unordered_map<InterpKey, uint32_t> occurrences;
     std::unordered_map<InterpKey, uint32_t> occurrences_2d;
-    std::vector<uint32_t> tagged_2d;
+    std::vector<uint32_t>                   tagged_2d;
     mutable detail::MatchCache              cache;
 
     DisplayList() = default;

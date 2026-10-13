@@ -7,8 +7,8 @@
 #include <limits>
 #include <string>
 
-#include "platform/paths.hpp"
 #include "libcdvd_extensions.hpp"
+#include "platform/paths.hpp"
 
 // The game reads extracted files, not a drive: media selection succeeds and search/seek provide
 // advisory preload hints. Bulk reads belong to the consumer's native file loader.
@@ -22,23 +22,31 @@ int sceCdMmode(int media) {
 }
 
 int sceCdSearchFile(sceCdlFILE *file, const char *name) {
-    if (!file || !name) return 0;
+    if (!file || !name) {
+        return 0;
+    }
     *file = {};
     std::string path(name);
     std::replace(path.begin(), path.end(), '\\', '/');
-    if (path.ends_with(";1")) path.resize(path.size() - 2);
-    auto current = PathsDataRoot();
+    if (path.ends_with(";1")) {
+        path.resize(path.size() - 2);
+    }
+    auto            current = PathsDataRoot();
     std::error_code error;
-    std::size_t start = 0;
+    std::size_t     start = 0;
     while (start < path.size()) {
         const auto end = path.find('/', start);
         const auto component = path.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        if (component == ".." || component.find(':') != std::string::npos) return 0;
+        if (component == ".." || component.find(':') != std::string::npos) {
+            return 0;
+        }
         if (!component.empty() && component != ".") {
             auto selected = current / PathsFromUtf8(component);
             if (!std::filesystem::exists(selected, error)) {
                 auto lower = [](std::string value) {
-                    for (auto &c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    for (auto &c : value) {
+                        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    }
                     return value;
                 };
                 bool found = false;
@@ -49,19 +57,29 @@ int sceCdSearchFile(sceCdlFILE *file, const char *name) {
                         break;
                     }
                 }
-                if (!found || error) return 0;
+                if (!found || error) {
+                    return 0;
+                }
             }
             current = selected;
         }
-        if (end == std::string::npos) break;
+        if (end == std::string::npos) {
+            break;
+        }
         start = end + 1;
     }
-    if (!std::filesystem::is_regular_file(current, error)) return 0;
+    if (!std::filesystem::is_regular_file(current, error)) {
+        return 0;
+    }
     const auto size = std::filesystem::file_size(current, error);
-    if (error || size > std::numeric_limits<decltype(file->size)>::max()) return 0;
+    if (error || size > std::numeric_limits<decltype(file->size)>::max()) {
+        return 0;
+    }
     file->size = static_cast<decltype(file->size)>(size);
     auto basename = PathsDisplay(current.filename());
-    for (auto &c : basename) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    for (auto &c : basename) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
     std::strncpy(file->name, basename.c_str(), sizeof(file->name) - 1);
     // Directory-backed data has no sector address; search/seek are only advisory preload hints.
     file->lsn = 0;
