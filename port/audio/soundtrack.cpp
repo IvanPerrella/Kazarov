@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <fstream>
 #include <map>
-#include <mutex>
 #include <string>
 #include <system_error>
 
@@ -25,21 +24,19 @@ struct Entry {
     bool                            has_loop_start = false;
     double                          loop_start = 0.0;
     double                          loop_end = 0.0;
-    bool                            failed = false;
-    std::shared_ptr<const PcmTrack> loaded;
 };
 
-std::mutex                   g_mutex;
-bool                         g_read = false;
-std::filesystem::path        g_folder;
-std::map<std::string, Entry> g_entries;
+struct Mapping {
+    bool                         read = false;
+    std::filesystem::path        folder;
+    std::map<std::string, Entry> entries;
+};
 
-void ReadMapping() {
-    g_read = true;
-    g_entries.clear();
-    g_folder = PathsSaveRoot().parent_path() / "soundtrack";
-    std::ifstream file(g_folder / "soundtrack.json");
-    audio::Trace("soundtrack: reading %s (%s)", (g_folder / "soundtrack.json").string().c_str(), file ? "found" : "missing");
+void ReadMapping(Mapping &mapping) {
+    mapping.read = true;
+    mapping.entries.clear();
+    std::ifstream file(mapping.folder / "soundtrack.json");
+    audio::Trace("soundtrack: reading %s (%s)", (mapping.folder / "soundtrack.json").string().c_str(), file ? "found" : "missing");
     if (!file) {
         return;
     }
@@ -48,7 +45,7 @@ void ReadMapping() {
         !root["version"].is_number_integer() || root["version"] != 1 || !root.contains("overrides") ||
         !root["overrides"].is_object()) {
         std::fprintf(stderr, "soundtrack: %s needs version 1 and an overrides object\n",
-                     (g_folder / "soundtrack.json").string().c_str());
+                     (mapping.folder / "soundtrack.json").string().c_str());
         return;
     }
     for (const auto &[name, value] : root["overrides"].items()) {
@@ -67,14 +64,45 @@ void ReadMapping() {
             continue;
         }
         Entry entry;
-        entry.file = g_folder / PathsFromUtf8(value["file"].get<std::string>());
+        entry.file = mapping.folder / PathsFromUtf8(value["file"].get<std::string>());
         entry.gain = value.value("gain", 1.0f);
         entry.loop = value.value("loop", true);
         entry.has_loop_start = value.contains("loop_start");
         entry.loop_start = value.value("loop_start", 0.0);
         entry.loop_end = value.value("loop_end", 0.0);
-        g_entries[name] = std::move(entry);
+        mapping.entries[name] = std::move(entry);
     }
+}
+
+TrackCache::Loader MakeLoader() {
+    auto mapping = std::make_shared<Mapping>();
+    mapping->folder = PathsSaveRoot().parent_path() / "soundtrack";
+    return [mapping](const std::string &sequence) -> std::shared_ptr<const PcmTrack> {
+        if (!mapping->read) {
+            ReadMapping(*mapping);
+        }
+        const auto found = mapping->entries.find(sequence);
+        if (found == mapping->entries.end()) {
+            return nullptr;
+        }
+        const Entry &entry = found->second;
+        std::string  error;
+        auto         track = LoadPcmTrack(entry.file, error);
+        if (!track) {
+            std::fprintf(stderr, "soundtrack: %s: %s\n", entry.file.string().c_str(), error.c_str());
+            return nullptr;
+        }
+        track->gain = entry.gain;
+        track->loop = entry.loop;
+        track->loop_start = entry.has_loop_start ? static_cast<std::int64_t>(entry.loop_start * track->rate) : 0;
+        track->loop_end = static_cast<std::int64_t>(entry.loop_end * track->rate);
+        return track;
+    };
+}
+
+TrackCache &Cache() {
+    static TrackCache cache(MakeLoader());
+    return cache;
 }
 
 } // namespace
@@ -105,39 +133,20 @@ bool SoundtrackEnsure() {
     return true;
 }
 
-std::shared_ptr<const PcmTrack> SoundtrackFor(std::string_view sequence) {
+std::shared_ptr<const PendingTrack> SoundtrackRequestFor(std::string_view sequence) {
     if (!SettingsGet().soundtrack) {
         return nullptr;
     }
-    std::lock_guard lock(g_mutex);
-    if (!g_read) {
-        ReadMapping();
-    }
-    auto found = g_entries.find(std::string(sequence));
-    if (found == g_entries.end()) {
-        return nullptr;
-    }
-    Entry &entry = found->second;
-    if (entry.loaded == nullptr && !entry.failed) {
-        std::string error;
-        auto        track = LoadPcmTrack(entry.file, error);
-        if (track == nullptr) {
-            std::fprintf(stderr, "soundtrack: %s: %s\n", entry.file.string().c_str(), error.c_str());
-            entry.failed = true;
-            return nullptr;
-        }
-        track->gain = entry.gain;
-        track->loop = entry.loop;
-        track->loop_start = entry.has_loop_start ? static_cast<std::int64_t>(entry.loop_start * track->rate) : 0;
-        track->loop_end = static_cast<std::int64_t>(entry.loop_end * track->rate);
-        entry.loaded = std::move(track);
-    }
-    return entry.loaded;
+    return Cache().Request(std::string(sequence));
+}
+
+std::shared_ptr<const PcmTrack> SoundtrackFor(std::string_view sequence) {
+    const auto request = SoundtrackRequestFor(sequence);
+    return request ? request->Get() : nullptr;
 }
 
 void SoundtrackReload() {
-    std::lock_guard lock(g_mutex);
-    g_read = false;
+    Cache().Reset(MakeLoader());
 }
 
 } // namespace audio

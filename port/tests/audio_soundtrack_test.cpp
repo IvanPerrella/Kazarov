@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -7,13 +8,14 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "audio/mixer.hpp"
 #include "audio/pcm.hpp"
 #include "audio/soundtrack.hpp"
-#include "platform/settings.hpp"
 #include "platform/paths.hpp"
+#include "platform/settings.hpp"
 #include "platform_fixture.hpp"
 
 namespace {
@@ -121,7 +123,13 @@ TEST(AudioSoundtrack, ReadsVersionedOverridesBesideSave) {
         }
     })";
     audio::SoundtrackReload();
-    auto track = audio::SoundtrackFor("e01a_a.sq");
+    const auto request = audio::SoundtrackRequestFor("e01a_a.sq");
+    ASSERT_NE(request, nullptr);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!request->ready.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    auto track = request->Get();
     ASSERT_NE(track, nullptr);
     EXPECT_EQ(track->Frames(), 4);
     EXPECT_FLOAT_EQ(track->gain, 0.5f);
@@ -143,7 +151,14 @@ TEST(AudioSoundtrack, RejectsUnsupportedMappingVersion) {
     ASSERT_TRUE(SettingsChange(config));
     std::ofstream(base / "soundtrack/soundtrack.json") << R"({"version":2,"overrides":{"song.sq":{"file":"missing.wav"}}})";
     audio::SoundtrackReload();
-    EXPECT_EQ(audio::SoundtrackFor("song.sq"), nullptr);
+    const auto request = audio::SoundtrackRequestFor("song.sq");
+    ASSERT_NE(request, nullptr);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!request->ready.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(request->ready.load());
+    EXPECT_EQ(request->Get(), nullptr);
     std::filesystem::remove_all(base);
 }
 
@@ -209,4 +224,28 @@ TEST(AudioSoundtrack, ALoopingStreamRepeatsFromItsLoopStartAndAnotherEnds) {
     mixer.Play(1);
     mixer.Render(out.data(), 100);
     EXPECT_FALSE(mixer.IsPlaying(1));
+}
+
+TEST(AudioSoundtrack, DISABLED_DecodeRequestLatencyBenchmark) {
+    using namespace std::chrono;
+    const auto  path = WriteWav("dc_soundtrack_latency.wav", std::vector<int16_t>(48000 * 120, 8192), 48000);
+    std::string error;
+    const auto  before = steady_clock::now();
+    auto        direct = audio::LoadPcmTrack(path, error);
+    const auto  blocking = duration<double, std::milli>(steady_clock::now() - before).count();
+    ASSERT_NE(direct, nullptr);
+    const auto bytes = direct->samples.size() * sizeof(int16_t);
+    direct.reset();
+    audio::TrackCache cache([&](const std::string &) { return audio::LoadPcmTrack(path, error); });
+    const auto        start = steady_clock::now();
+    auto              request = cache.Request("song");
+    const auto        queued = duration<double, std::milli>(steady_clock::now() - start).count();
+    const auto        deadline = steady_clock::now() + seconds(30);
+    while (!request->ready.load() && steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(1));
+    }
+    ASSERT_NE(request->Get(), nullptr);
+    EXPECT_EQ(cache.CachedBytes(), bytes);
+    std::printf("SOUNDTRACK_LATENCY seconds=120 pcm_bytes=%zu synchronous_ms=%.3f request_ms=%.3f\n", bytes, blocking, queued);
+    std::filesystem::remove(path);
 }
