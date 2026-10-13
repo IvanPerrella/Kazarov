@@ -11,6 +11,85 @@
 
 using namespace dc::test;
 
+TEST(GfxMeshDc2, InterpolatedOutlineEscapesNewestPartCrop) {
+    GfxOptions options;
+    options.offscreen = true;
+    options.prog0_meshes = true;
+    options.logical_width = 64;
+    options.logical_height = 48;
+    GfxFixture fixture(64, 48, 1.0f, options);
+    const auto target = gfx::CreateRenderTarget(64, 48, true, true);
+    ASSERT_NE(target, gfx::kNullTexture);
+    const gfx::LogicalRect full{0, 0, 64, 48};
+    const uint8_t clear[4] = {0, 0, 0, 0};
+    const std::vector<gfx::Vertex3D> triangle = {
+        {{-0.2f, -0.2f, 0.5f}}, {{0.2f, -0.2f, 0.5f}}, {{0, 0.2f, 0.5f}}};
+    const std::vector<uint32_t> indices = {0, 1, 2};
+    auto record = [&](float camera, bool tagged) {
+        auto transform = gfx::IdentityMeshTransform();
+        transform.view[12] = camera;
+        gfx::MeshConstants constants{};
+        std::memcpy(constants.mvp, transform.view, sizeof constants.mvp);
+        gfx::Prog0Constants block{};
+        block.flags = gfx::kProg0Unlit;
+        for (int i = 0; i < 4; ++i) {
+            block.object_color[i] = i == 3 ? 128 : 200;
+            block.diffuse[i] = 1;
+        }
+        const float x = 32 + camera * 32;
+        const gfx::LogicalRect crop{x - 8, 18, 16, 12};
+        gfx::BeginRecording();
+        gfx::Clear(true, clear, true, 0);
+        gfx::SetRenderTarget(target);
+        gfx::Clear(true, clear, false, 0, &crop, tagged ? &full : nullptr);
+        gfx::SetInterpKey(17);
+        gfx::DrawMeshImmediateProg0(triangle, indices, constants, block, {}, {}, &transform);
+        gfx::SetRenderTarget(gfx::kMainTarget);
+        std::vector<gfx::Vertex2D> quad(4);
+        for (int i = 0; i < 4; ++i) {
+            auto &v = quad[i];
+            v.x = v.u = crop.x + ((i == 1 || i == 2) ? crop.w : 0);
+            v.y = v.v = crop.y + (i >= 2 ? crop.h : 0);
+            std::memset(v.color, 128, 4);
+        }
+        gfx::TextureBinding binding;
+        binding.texture = target;
+        gfx::DrawState state;
+        auto display_quad = quad;
+        for (int i = 0; i < 4; ++i) {
+            auto &v = display_quad[i];
+            v.x = v.u = (i == 1 || i == 2) ? full.w : 0;
+            v.y = v.v = i >= 2 ? full.h : 0;
+        }
+        const gfx::Presentation2D presentation{display_quad, state};
+        gfx::Draw2D(gfx::Primitive::Quads, quad, binding, state,
+                    tagged ? &presentation : nullptr);
+        return gfx::EndRecording();
+    };
+    auto render = [&](const gfx::DisplayList &list, float alpha, gfx::RenderOptions options) {
+        options.present = !options.canonical;
+        EXPECT_TRUE(gfx::RenderList(list, alpha, options));
+        EXPECT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+        return fixture.pixels;
+    };
+    auto before = record(-0.5f, true);
+    auto after = record(0.5f, true);
+    auto untagged = record(0.5f, false);
+    const auto newest = render(*untagged, 1, {.canonical = true});
+    EXPECT_EQ(render(*after, 1, {.canonical = true}), newest);
+    // Compare every display pixel against an independently recorded camera position.
+    // This exercises the Prog0 path used by outlined character parts.
+    for (int phase = 0; phase < 8; ++phase) {
+        const float alpha = phase / 8.0f;
+        auto expected = record(-0.5f + alpha, false);
+        auto reference = render(*expected, 1, {.canonical = true});
+        render(*after, 1, {.canonical = true});
+        EXPECT_EQ(render(*after, alpha, {.previous = before.get()}), reference) << alpha;
+        EXPECT_EQ(render(*after, alpha, {.canonical = true}), newest);
+    }
+    gfx::DestroyTexture(target);
+}
+
 namespace {
 
 constexpr int kWidth = 64;
