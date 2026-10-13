@@ -532,3 +532,32 @@ TEST(GfxMeshDc2, TextureChangeCutsPoseMatching) {
     gfx::DestroyTexture(texture_a);
     gfx::DestroyTexture(texture_b);
 }
+
+TEST(GfxMeshDc2, MirroredInstancesAtSameOriginKeepHandedness) {
+    GfxFixture fixture(kWidth, kHeight);
+    const std::vector<gfx::Vertex3D> vertices = {
+        Vert({-0.1f, -0.1f, 0.5f}, {0, 0, 1}), Vert({0.1f, -0.1f, 0.5f}, {0, 0, 1}),
+        Vert({0, 0.1f, 0.5f}, {0, 0, 1})};
+    auto mesh = gfx::CreateMesh(vertices, kTriangle);
+    auto record = [&](float x) {
+        gfx::BeginRecording();
+        gfx::Clear(true, kClear.data(), true, 0);
+        gfx::SetInterpKey(99);
+        for (float mirror : {1.0f, -1.0f}) {
+            auto transform = gfx::IdentityMeshTransform();
+            transform.model[5] = mirror;
+            transform.model[12] = x;
+            gfx::MeshConstants constants = {};
+            std::memcpy(constants.mvp, transform.model, sizeof constants.mvp);
+            constants.diffuse[0] = constants.diffuse[3] = 1;
+            gfx::DrawMesh(mesh, 0, 3, constants, {}, {}, &transform);
+        }
+        return gfx::EndRecording();
+    };
+    auto before = record(0), after = record(0.1f);
+    ASSERT_TRUE(gfx::RenderList(*after, 1, {.canonical = true}));
+    ASSERT_TRUE(gfx::RenderList(*after, 0.5f, {.previous = before.get(), .present = true}));
+    EXPECT_EQ(after->cache.match[0], 0);
+    EXPECT_EQ(after->cache.match[1], 1);
+    gfx::DestroyMesh(mesh);
+}

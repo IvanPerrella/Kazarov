@@ -352,7 +352,13 @@ bool SameSurface(const MeshEntry &a, const MeshEntry &b) {
 bool SameInstanceFace(const DisplayList &list, const DisplayList &previous, int32_t index, int32_t candidate) {
     const auto &a = std::get<MeshEntry>(list.entries[list.records[index].entry]);
     const auto &b = std::get<MeshEntry>(previous.entries[previous.records[candidate].entry]);
-    return SameSurface(a, b) && a.mesh == b.mesh &&
+    // Normal and mirrored sky passes share an origin and surface. An opposite reflection
+    // cannot interpolate; keep each pass with its own handedness before comparing distance.
+    const Mat4 &model_a = list.records[index].model;
+    const Mat4 &model_b = previous.records[candidate].model;
+    float handed_a = Dot(Column(model_a, 0), Cross(Column(model_a, 1), Column(model_a, 2)));
+    float handed_b = Dot(Column(model_b, 0), Cross(Column(model_b, 1), Column(model_b, 2)));
+    return (handed_a < 0.0f) == (handed_b < 0.0f) && SameSurface(a, b) && a.mesh == b.mesh &&
            (a.mesh != kNullMesh || (a.indices == b.indices && a.vertices.size() == b.vertices.size()));
 }
 

@@ -383,7 +383,9 @@ renders one.
   so occurrences do not line up from tick to tick. Such a key, from the tick it is first seen so
   until the next `CutInterpolation()`, matches by place instead: each draw with the previous draw
   whose model is identical, and what is left with the nearest unclaimed previous model, no further
-  than 25 units away. Each face also needs the same mesh, index range and texture binding; an
+  than 25 units away. Normal and mirrored placements match only predecessors with the same
+  handedness, even when their origin and surface coincide. Each face also needs the same mesh,
+  index range and texture binding; an
   immediate face needs the same index topology and vertex count. Each predecessor is claimed only
   once, so culling or sorting faces does not borrow another surface's pose. All keyed draws cut
   pose matching when their texture or palette binding changes. Materials and other draw state
