@@ -1010,6 +1010,15 @@ const InputPadState &InputGetPad(int pad) {
     return g_view[pad];
 }
 
+InputPadState InputGetLookPad(int pad) {
+    InputPadState state = InputGetPad(pad);
+    if (state.keyboard_left) {
+        state.left_x = state.look_left_x;
+        state.left_y = state.look_left_y;
+    }
+    return state;
+}
+
 void InputSetRumble(int pad, InputRumble rumble) {
     if (pad < 0 || pad >= kInputPadCount) {
         return;
@@ -1096,6 +1105,17 @@ InputPadState InputApplyKeyboardMouse(InputPadState base, const InputKeyboardMou
     }
     if (std::ranges::contains(held.keys, SDL_SCANCODE_ESCAPE)) {
         base.buttons |= g_menu_navigation ? kInputCircle : kInputTriangle;
+    }
+    // Recompose without keys before merging devices. Mouse buttons and whole-axis
+    // bindings retain their normal priority too. The recursive call has no keys.
+    base.keyboard_left = false;
+    if (!held.keys.empty()) {
+        InputKeyboardMouse without_keys = held;
+        without_keys.keys.clear();
+        const auto look = InputApplyKeyboardMouse(base, without_keys);
+        base.keyboard_left = true;
+        base.look_left_x = look.left_x;
+        base.look_left_y = look.left_y;
     }
     std::array<float, 4> deflection{};
     for (int x = kAxisLeftX; x <= kAxisRightX; x += 2) {

@@ -47,6 +47,10 @@ struct InputPadState {
     // D-pad bits the left-stick keys add only while the game is not reading the left stick: the
     // screens that read the d-pad alone (the developer menu, the dungeon loader).
     std::uint16_t stick_dpad = 0;
+    // Left stick before keyboard half-axis bindings, retained for first-person look.
+    bool         keyboard_left = false;
+    std::uint8_t look_left_x = kInputAxisCentre;
+    std::uint8_t look_left_y = kInputAxisCentre;
 };
 
 // What the keyboard and the mouse hold: SDL scancodes, mouse buttons (bit n-1 for Mouse n) and the
@@ -118,6 +122,10 @@ bool InputLeftStickLive();
 
 // The pad as the game reads it: the device state or the override, stick_dpad applied.
 const InputPadState &InputGetPad(int pad);
+
+// Same sample with keyboard movement removed from the left stick. Controller and
+// mouse-axis bindings retain their values, including simultaneous key/pad input.
+InputPadState InputGetLookPad(int pad);
 
 void InputSetLookOnLeftStick(bool left);
 
