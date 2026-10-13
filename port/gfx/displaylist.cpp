@@ -1091,7 +1091,7 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
 }
 
 void Replay(const DisplayList &list, bool canonical, const Overrides *overrides, bool host = false,
-            bool tint = false) {
+            bool tint = false, InterpKey suppressed_2d_key = 0) {
     g.replaying = true;
     g.quiet = !canonical;
     g.host_draws = host;
@@ -1104,6 +1104,8 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
             [&](const auto &e) {
                 using T = std::decay_t<decltype(e)>;
                 if constexpr (std::is_same_v<T, Draw2DEntry>) {
+                    if (!canonical && suppressed_2d_key != 0 && e.target == kMainTarget &&
+                        e.interpolation.key == suppressed_2d_key) return;
                     const std::vector<Vertex2D> *vertices = &e.vertices;
                     const DrawState *state = &e.state;
                     UiSide side = e.side;
@@ -1588,7 +1590,7 @@ bool RenderList(const DisplayList &list, float alpha, const RenderOptions &optio
     if (tint) {
         TraceInterpolation(list, options.previous, interpolate ? &overrides : nullptr, alpha);
     }
-    Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint);
+    Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint, options.suppressed_2d_key);
     if (options.overlay != nullptr && options.overlay->instance == g.renderer_instance) {
         SetRenderTarget(kMainTarget);
         Replay(*options.overlay, false, nullptr, true, tint);

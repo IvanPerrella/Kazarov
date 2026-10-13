@@ -721,6 +721,9 @@ struct RenderOptions {
     bool host = false;
     // Presentation-only interpolation diagnostic; also enabled by KZ_INTERPOLATION_TINT=1.
     bool interpolation_tint = false;
+    // Display only: replace a tagged 2D group with a host overlay. Canonical renders and grabs
+    // keep the original group, and the overlay itself is never suppressed.
+    InterpKey suppressed_2d_key = 0;
 };
 
 // False when nothing was rendered: the list belongs to another renderer, a frame is open, or a
