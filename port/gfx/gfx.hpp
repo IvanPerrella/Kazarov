@@ -656,10 +656,15 @@ bool      CurrentNoInterpolation();
 // generation must change whenever an object is reused for a new emission. Each draw matches
 // only the same key, generation and occurrence with identical target, topology, UVs and state.
 // Glyphs, RGB and depth stay current. Untagged, new, incompatible and cut draws stay current,
-// as do all canonical renders and alpha 1. Depth-tested sprites use their existing camera path.
+// as do all canonical renders and alpha 1. Depth-tested sprites may opt into world-corner motion;
+// multi-view lists retain newest own motion until camera identity can be established.
 struct Interp2D {
     InterpKey key = 0;
     uint64_t generation = 0;
+    // Depth-tested billboards: blend matched corners in world space, then project through
+    // the presentation camera. UV animation stays newest; texture, topology and state must match.
+    bool world_corners = false;
+    float teleport_distance = 200.0f;
 };
 void SetInterp2D(Interp2D interpolation);
 Interp2D CurrentInterp2D();

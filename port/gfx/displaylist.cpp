@@ -729,7 +729,21 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
         const auto &draw = std::get<Draw2DEntry>(list.entries[pair[0]]);
         const auto &before = std::get<Draw2DEntry>(previous.entries[pair[1]]);
         std::vector<Vertex2D> vertices;
-        if (Interpolate2D(before, draw, alpha, vertices)) {
+        bool blended = false;
+        // Camera pairing currently uses first-appearance order. Multi-view lists cannot prove
+        // that association after a reorder, so keep their own sprite motion newest.
+        if (draw.interpolation.world_corners && draw.scene >= 0 && before.scene >= 0 &&
+            list.cameras.size() == 1 && previous.cameras.size() == 1) {
+            const auto &scene = list.scenes[draw.scene];
+            const auto &earlier = previous.scenes[before.scene];
+            if (cache.cameras[scene.camera] == static_cast<int32_t>(earlier.camera)) {
+                blended = InterpolateSprite(before, earlier, previous.cameras[earlier.camera],
+                                             draw, scene, list.cameras[scene.camera], views[scene.camera], alpha, vertices);
+            }
+        } else {
+            blended = Interpolate2D(before, draw, alpha, vertices);
+        }
+        if (blended) {
             out.sprites[&draw] = std::move(vertices);
         }
     }
@@ -1169,6 +1183,7 @@ bool Interpolate2D(const Draw2DEntry &before, const Draw2DEntry &after, float al
         before.interpolation.generation != after.interpolation.generation || before.occurrence != after.occurrence ||
         before.primitive != after.primitive || before.target != after.target || before.binding != after.binding ||
         before.state != after.state || before.side != after.side || before.scene != -1 || after.scene != -1 ||
+        before.interpolation.world_corners || after.interpolation.world_corners ||
         after.state.depth_test != DepthTest::Always || after.state.depth_write || before.vertices.size() != out.size()) {
         return false;
     }
@@ -1186,6 +1201,66 @@ bool Interpolate2D(const Draw2DEntry &before, const Draw2DEntry &after, float al
         out[i].y = a.y + (b.y - a.y) * alpha;
         out[i].color[3] = static_cast<uint8_t>(std::lround(a.color[3] + (float(b.color[3]) - a.color[3]) * alpha));
     }
+    return true;
+}
+
+bool InterpolateSprite(const Draw2DEntry &before, const SpriteScene &before_scene, const Mat4 &before_view,
+                       const Draw2DEntry &after, const SpriteScene &after_scene, const Mat4 &after_view,
+                       const Mat4 &display_view, float alpha, std::vector<Vertex2D> &out) {
+    out = after.vertices;
+    if (!(alpha < 1.0f) || !before.interpolation.world_corners || !after.interpolation.world_corners ||
+        after.interpolation.key == 0 || before.interpolation.key != after.interpolation.key ||
+        before.interpolation.generation != after.interpolation.generation || before.occurrence != after.occurrence ||
+        before.scene < 0 || after.scene < 0 || before.primitive != after.primitive || before.target != after.target ||
+        before.binding != after.binding || before.state != after.state || before.side != after.side ||
+        after.state.depth_test == DepthTest::Always || before.vertices.size() != after.vertices.size() ||
+        before_scene.projection != after_scene.projection ||
+        std::memcmp(before_scene.to_clip, after_scene.to_clip, sizeof after_scene.to_clip) != 0) return false;
+
+    Mat4 old_inverse, new_inverse;
+    if (!Invert(Multiply(before_scene.projection, before_view), old_inverse) ||
+        !Invert(Multiply(after_scene.projection, after_view), new_inverse)) return false;
+    const Mat4 project = Multiply(after_scene.projection, display_view);
+    auto transform = [](const Mat4 &matrix, const std::array<float, 4> &point, std::array<float, 4> &result) {
+        for (int r = 0; r < 4; ++r) {
+            result[r] = 0;
+            for (int c = 0; c < 4; ++c) result[r] += matrix[c * 4 + r] * point[c];
+        }
+        if (!(result[3] > 1e-6f)) return false;
+        for (int r = 0; r < 3; ++r) {
+            result[r] /= result[3];
+            if (!std::isfinite(result[r])) return false;
+        }
+        result[3] = 1;
+        return true;
+    };
+    auto unproject = [&](const Vertex2D &vertex, const Mat4 &inverse, std::array<float, 4> &world) {
+        if (!(vertex.z >= 0 && vertex.z <= 1)) return false;
+        return transform(inverse, {vertex.x * after_scene.to_clip[0] + after_scene.to_clip[2],
+                                  vertex.y * after_scene.to_clip[1] + after_scene.to_clip[3], vertex.z, 1}, world);
+    };
+    if (after_scene.to_clip[0] == 0 || after_scene.to_clip[1] == 0) return false;
+    alpha = std::max(alpha, 0.0f);
+    auto blended = after.vertices;
+    for (size_t i = 0; i < blended.size(); ++i) {
+        std::array<float, 4> a, b, point, clip;
+        if (!unproject(before.vertices[i], old_inverse, a) || !unproject(after.vertices[i], new_inverse, b)) return false;
+        float distance_squared = 0;
+        for (int r = 0; r < 3; ++r) {
+            const float delta = b[r] - a[r];
+            distance_squared += delta * delta;
+            point[r] = a[r] + delta * alpha;
+        }
+        if (!(std::sqrt(distance_squared) <= after.interpolation.teleport_distance)) return false;
+        point[3] = 1;
+        if (!transform(project, point, clip) || !(clip[2] >= 0 && clip[2] <= 1)) return false;
+        blended[i].x = (clip[0] - after_scene.to_clip[2]) / after_scene.to_clip[0];
+        blended[i].y = (clip[1] - after_scene.to_clip[3]) / after_scene.to_clip[1];
+        blended[i].z = clip[2];
+        blended[i].color[3] = static_cast<uint8_t>(std::lround(before.vertices[i].color[3] +
+                                          (float(after.vertices[i].color[3]) - before.vertices[i].color[3]) * alpha));
+    }
+    out = std::move(blended);
     return true;
 }
 

@@ -354,7 +354,14 @@ renders one.
   is carried to the interpolated camera instead: each corner goes back through the projection and
   view of the last mesh drawn on its target to where it stood in the world, and is seen again from
   the interpolated view. Without that a torch's flame stands a tick ahead of its torch in every
-  display frame while the camera moves. The sprite's own movement is not interpolated.
+  display frame while the camera moves. Own motion is opt-in through `Interp2D::world_corners`:
+  matching key, emission generation and occurrence identify the corners, which are unprojected
+  from their respective tick cameras, blended in world space and projected with the display camera.
+  Opacity blends; UV animation, RGB and fog stay newest. Target, topology, texture binding, state
+  and projection must match. New emissions, teleports, singular/behind-camera/near-plane cases,
+  cuts and multi-view lists keep newest own motion. Multi-view camera association remains ordinal,
+  so this path conservatively requires one camera in each list. Canonical and alpha-1 renders
+  keep recorded vertices exactly.
   Vertex animation (skinning written with `UpdateMeshVertices`) is interpolated too: the rewrite a
   matched draw's mesh took this tick is blended with the one its match's mesh took in the previous
   tick (the game keeps a mesh per display buffer, so the two differ), positions lerped and normals

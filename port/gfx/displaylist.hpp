@@ -182,6 +182,9 @@ bool InvertAffine(const Mat4 &m, Mat4 &out);
 // lerped in the rotation's frame. False (out = b) when either is not an invertible affine.
 bool InterpolateAffine(const Mat4 &a, const Mat4 &b, float alpha, Mat4 &out);
 bool Interpolate2D(const Draw2DEntry &before, const Draw2DEntry &after, float alpha, std::vector<Vertex2D> &out);
+bool InterpolateSprite(const Draw2DEntry &before, const SpriteScene &before_scene, const Mat4 &before_view,
+                       const Draw2DEntry &after, const SpriteScene &after_scene, const Mat4 &after_view,
+                       const Mat4 &display_view, float alpha, std::vector<Vertex2D> &out);
 // A bone that moved past teleport_distance is a cut, not motion, so it keeps after's pose.
 void BlendProg0Bones(const Prog0Constants &before, const Prog0Constants &after, float alpha, float teleport_distance,
                      Prog0Constants &out);

@@ -650,3 +650,151 @@ TEST(GfxMeshDc2, InterpolationTintPreservesReusableTargetPixels) {
     EXPECT_EQ(changed, 0u);
     gfx::DestroyTexture(target);
 }
+
+TEST(GfxDisplayList, WorldSpriteInterpolatesMotionDepthAndCamera) {
+    auto before = PresentationQuad(8, 12, 32);
+    auto after = PresentationQuad(24, 20, 96);
+    before.scene = after.scene = 0;
+    before.state.depth_test = after.state.depth_test = gfx::DepthTest::Greater;
+    before.interpolation.world_corners = after.interpolation.world_corners = true;
+    gfx::detail::Mat4 view{};
+    view[0] = view[5] = view[10] = view[15] = 1;
+    gfx::detail::SpriteScene scene{0, view, {1, 1, 0, 0}};
+    auto newest_view = view;
+    newest_view[12] = 4;
+    for (auto &v : before.vertices) v.z = 0.25f;
+    for (auto &v : after.vertices) { v.z = 0.75f; v.u += 16; }
+    std::vector<gfx::Vertex2D> result;
+    for (float alpha : {0.0f, 0.25f, 0.5f, 0.75f}) {
+        auto display_view = view;
+        display_view[12] = 4 * alpha;
+        ASSERT_TRUE(gfx::detail::InterpolateSprite(before, scene, view, after, scene, newest_view,
+                                                   display_view, alpha, result));
+        EXPECT_FLOAT_EQ(result[0].x, 8 + 16 * alpha);
+        EXPECT_FLOAT_EQ(result[0].y, 12 + 8 * alpha);
+        EXPECT_FLOAT_EQ(result[0].z, 0.25f + 0.5f * alpha);
+        EXPECT_EQ(result[0].color[3], 32 + 64 * alpha);
+        EXPECT_EQ(result[0].u, after.vertices[0].u); // coin spin remains a discrete atlas frame
+    }
+    EXPECT_FALSE(gfx::detail::InterpolateSprite(before, scene, view, after, scene, newest_view,
+                                               newest_view, 1, result));
+    EXPECT_EQ(std::memcmp(result.data(), after.vertices.data(), result.size() * sizeof(result[0])), 0);
+}
+
+TEST(GfxMisc, WorldSpriteRecordingBlendsOwnMotionAndKeepsCanonicalExact) {
+    GfxFixture fixture(64, 48, 1.0f, true, 64, 48);
+    auto record = [&](float x, uint64_t generation, bool tagged, int cut, bool multiple_views = false) {
+        gfx::BeginRecording();
+        gfx::Clear(true, kClear.data(), true, 0);
+        if (cut == 1) gfx::CutInterpolation();
+        if (cut == 2) gfx::CutCameraInterpolation();
+        gfx::MeshTransform transform = gfx::IdentityMeshTransform();
+        gfx::MeshConstants constants{};
+        Identity(constants.mvp);
+        const std::vector<gfx::Vertex3D> background = {Vert({-1, -1, 0}, {0, 0, 1}),
+                                                     Vert({3, -1, 0}, {0, 0, 1}),
+                                                     Vert({-1, 3, 0}, {0, 0, 1})};
+        gfx::DrawMeshImmediate(background, kTriangle, constants, {}, {}, &transform);
+        if (multiple_views) {
+            transform.view[12] = 4;
+            gfx::DrawMeshImmediate(background, kTriangle, constants, {}, {}, &transform);
+        }
+        auto sprite = PresentationQuad(x, 12, 128);
+        for (auto &v : sprite.vertices) v.z = 0.5f;
+        sprite.state.depth_test = gfx::DepthTest::Greater;
+        gfx::Interp2DScope scope({tagged ? 17u : 0u, generation, tagged});
+        gfx::Draw2D(sprite.primitive, sprite.vertices, {}, sprite.state);
+        return gfx::EndRecording();
+    };
+    auto render = [&](const gfx::DisplayList &list, float alpha, gfx::RenderOptions options) {
+        options.present = !options.canonical;
+        EXPECT_TRUE(gfx::RenderList(list, alpha, options));
+        EXPECT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+        return fixture.pixels;
+    };
+    auto before = record(8, 3, true, 0);
+    auto oldest = render(*before, 1, {.canonical = true});
+    auto after = record(24, 3, true, 0);
+    auto newest = render(*after, 1, {.canonical = true});
+    ASSERT_NE(oldest, newest);
+    for (float alpha : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+        auto actual = render(*after, alpha, {.previous = before.get()});
+        auto expected = record(8 + 16 * alpha, 3, false, 0);
+        EXPECT_EQ(actual, render(*expected, 1, {})) << alpha;
+        EXPECT_EQ(render(*after, alpha, {.canonical = true}), newest);
+    }
+    for (int cut : {0, 1, 2}) {
+        auto reused = record(24, cut ? 3 : 4, true, cut);
+        render(*reused, 1, {.canonical = true});
+        EXPECT_EQ(render(*reused, 0, {.previous = before.get()}), newest);
+    }
+    EXPECT_EQ(render(*after, 0, {}), newest);
+    auto multi_before = record(8, 3, true, 0, true);
+    render(*multi_before, 1, {.canonical = true});
+    auto multi_after = record(24, 3, true, 0, true);
+    auto multi_newest = render(*multi_after, 1, {.canonical = true});
+    EXPECT_EQ(render(*multi_after, 0.5f, {.previous = multi_before.get()}), multi_newest);
+}
+
+TEST(GfxDisplayList, WorldSpritePerspectiveUsesWorldEndpoints) {
+    auto before = PresentationQuad(1, 0, 128);
+    auto after = PresentationQuad(2, 0, 128);
+    before.scene = after.scene = 0;
+    before.state.depth_test = after.state.depth_test = gfx::DepthTest::Greater;
+    before.interpolation.world_corners = after.interpolation.world_corners = true;
+    for (auto &v : before.vertices) v.z = 0.5f;
+    for (auto &v : after.vertices) v.z = 0.25f;
+    gfx::detail::Mat4 view{};
+    view[0] = view[5] = view[10] = view[15] = 1;
+    auto projection = view;
+    projection[10] = projection[15] = 0;
+    projection[11] = projection[14] = 1; // clip w = world z; reversed depth = 1/z
+    gfx::detail::SpriteScene scene{0, projection, {1, 1, 0, 0}};
+    std::vector<gfx::Vertex2D> result;
+    ASSERT_TRUE(gfx::detail::InterpolateSprite(before, scene, view, after, scene, view, view, 0.5f, result));
+    EXPECT_FLOAT_EQ(result[0].x, 5.0f / 3.0f); // (world x,z)=(2,2) -> (8,4), midpoint (5,3)
+    EXPECT_FLOAT_EQ(result[0].z, 1.0f / 3.0f);
+}
+
+TEST(GfxDisplayList, WorldSpriteRejectsReuseTeleportAndIncompatibleViews) {
+    auto before = PresentationQuad(8, 12, 32);
+    auto after = PresentationQuad(24, 20, 96);
+    before.scene = after.scene = 0;
+    before.state.depth_test = after.state.depth_test = gfx::DepthTest::Greater;
+    before.interpolation.world_corners = after.interpolation.world_corners = true;
+    for (auto &v : before.vertices) v.z = 0.5f;
+    for (auto &v : after.vertices) v.z = 0.5f;
+    gfx::detail::Mat4 view{};
+    view[0] = view[5] = view[10] = view[15] = 1;
+    gfx::detail::SpriteScene scene{0, view, {1, 1, 0, 0}};
+    auto reject = [&](auto draw, auto new_scene, auto display_view) {
+        std::vector<gfx::Vertex2D> result;
+        EXPECT_FALSE(gfx::detail::InterpolateSprite(before, scene, view, draw, new_scene, view,
+                                                   display_view, 0.5f, result));
+        EXPECT_EQ(std::memcmp(result.data(), draw.vertices.data(), result.size() * sizeof(result[0])), 0);
+    };
+    auto change = [&](auto mutate) { auto draw = after; mutate(draw); reject(draw, scene, view); };
+    change([](auto &d) { ++d.interpolation.generation; });
+    change([](auto &d) { d.interpolation.key = 0; });
+    change([](auto &d) { d.interpolation.world_corners = false; });
+    change([](auto &d) { d.interpolation.teleport_distance = 10; });
+    change([](auto &d) { d.vertices[0].x = INFINITY; });
+    change([](auto &d) { d.vertices[0].z = -0.1f; });
+    change([](auto &d) { ++d.binding.texture; });
+    change([](auto &d) { ++d.target; });
+    change([](auto &d) { ++d.occurrence; });
+    change([](auto &d) { d.vertices.pop_back(); });
+    auto changed_scene = scene;
+    changed_scene.projection[0] = 2;
+    reject(after, changed_scene, view);
+    changed_scene = scene;
+    changed_scene.to_clip[0] = 2;
+    reject(after, changed_scene, view);
+    auto behind = view;
+    behind[15] = -1;
+    reject(after, scene, behind);
+    auto near_crossing = view;
+    near_crossing[14] = -1;
+    reject(after, scene, near_crossing);
+    reject(after, scene, gfx::detail::Mat4{});
+}
