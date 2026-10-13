@@ -24,7 +24,7 @@ bool          g_pointer_cursor = false;
 bool Live() { return g_captured || !g_capture_enabled; }
 
 void UpdateCursor(bool focused, bool client) {
-    if (MousePointerCursorHidden(g_captured || (g_pointer_cursor && Live()), focused, client)) {
+    if (MousePointerCursorHidden(MouseOwnsCursor(), focused, client)) {
         SDL_HideCursor();
     } else {
         SDL_ShowCursor();
@@ -186,6 +186,7 @@ bool MouseHandleEvent(const SDL_Event &event) {
 bool MouseCaptured() { return g_captured; }
 
 bool MouseInputLive() { return Live(); }
+bool MouseOwnsCursor() { return g_captured || (g_pointer_cursor && Live()); }
 
 std::uint32_t MouseButtons() { return g_buttons; }
 

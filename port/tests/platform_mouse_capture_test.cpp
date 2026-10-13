@@ -4,6 +4,40 @@
 #include "platform/mouse.hpp"
 #include "platform/window.hpp"
 
+TEST(MouseCaptureState, ReleasedPointerCannotReclaimCursorUntilRecapture) {
+    ASSERT_EQ(WindowHandle(), nullptr);
+    MouseStop();
+    int release[] = {SDL_SCANCODE_F12};
+    MouseConfigure(true, release);
+    SDL_Event event{};
+    event.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+    event.button.button = SDL_BUTTON_LEFT;
+    ASSERT_TRUE(MouseHandleEvent(event));
+    MouseSetPointerCursor(true);
+    EXPECT_TRUE(MouseCaptured());
+    EXPECT_TRUE(MouseOwnsCursor());
+    event.type = SDL_EVENT_KEY_DOWN;
+    event.key.scancode = SDL_SCANCODE_F12;
+    MouseHandleEvent(event);
+    for (int i = 0; i < 3; ++i) {
+        MouseSetPointerCursor(true);
+        EXPECT_FALSE(MouseCaptured());
+        EXPECT_FALSE(MouseInputLive());
+        EXPECT_FALSE(MouseOwnsCursor());
+    }
+    event.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+    MouseHandleEvent(event);
+    event.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
+    MouseHandleEvent(event);
+    EXPECT_FALSE(MouseCaptured());
+    EXPECT_FALSE(MouseOwnsCursor());
+    MouseConfigure(false, {});
+    EXPECT_TRUE(MouseInputLive());
+    EXPECT_TRUE(MouseOwnsCursor());
+    MouseStop();
+    MouseConfigure(true, {});
+}
+
 namespace {
 void Pump() {
     SDL_Event event;
