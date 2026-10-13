@@ -1037,6 +1037,10 @@ InputPadState InputGetLookPad(int pad) {
         state.left_x = state.look_left_x;
         state.left_y = state.look_left_y;
     }
+    if (pad == 0 && g_look_left && !Deflected(state.left_x) && !Deflected(state.left_y)) {
+        state.left_x = state.right_x;
+        state.left_y = state.right_y;
+    }
     return state;
 }
 
@@ -1130,7 +1134,7 @@ InputPadState InputApplyKeyboardMouse(InputPadState base, const InputKeyboardMou
     // Recompose without keys before merging devices. Mouse buttons and whole-axis
     // bindings retain their normal priority too. The recursive call has no keys.
     base.keyboard_left = false;
-    if (!held.keys.empty()) {
+    if (push[kAxisLeftX] || push[kAxisLeftY]) {
         InputKeyboardMouse without_keys = held;
         without_keys.keys.clear();
         const auto look = InputApplyKeyboardMouse(base, without_keys);

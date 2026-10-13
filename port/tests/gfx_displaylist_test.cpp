@@ -1200,7 +1200,14 @@ TEST(GfxMisc, HostReplacementSuppressesOnlyTheTaggedMainDisplayGroup) {
     settings.logical_width = 64;
     settings.logical_height = 48;
     GfxFixture fixture(64, 48, 1, settings);
+    const auto target = gfx::CreateRenderTarget(64, 48, true, true);
+    ASSERT_NE(target, gfx::kNullTexture);
     gfx::BeginRecording();
+    gfx::SetRenderTarget(target);
+    gfx::Clear(true, kClear.data(), true, 0);
+    gfx::SetInterp2D({77});
+    gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 64, 48, {255, 0, 0, 255}), {}, {});
+    gfx::SetRenderTarget(gfx::kMainTarget);
     gfx::Clear(true, kClear.data(), true, 0);
     gfx::SetInterp2D({77});
     gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 32, 48, {255, 0, 0, 255}), {}, {});
@@ -1211,6 +1218,9 @@ TEST(GfxMisc, HostReplacementSuppressesOnlyTheTaggedMainDisplayGroup) {
     std::vector<uint8_t> canonical, display;
     uint32_t             w = 0, h = 0;
     ASSERT_TRUE(gfx::ReadbackFrame(canonical, w, h));
+    EXPECT_EQ(canonical[(32 * w + 8) * 4], 255);
+    EXPECT_EQ(canonical[(32 * w + 8) * 4 + 2], 0);
+    EXPECT_EQ(canonical[(32 * w + 48) * 4 + 2], 255);
     gfx::BeginRecording();
     gfx::SetInterp2D({77});
     gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 16, 16, {0, 255, 0, 255}), {}, {});
@@ -1221,9 +1231,15 @@ TEST(GfxMisc, HostReplacementSuppressesOnlyTheTaggedMainDisplayGroup) {
     EXPECT_EQ(pixel(8, 8, 1), 255);   // host overlay is not suppressed by its identical key
     EXPECT_EQ(pixel(8, 32, 0), 0);    // original hand is hidden
     EXPECT_EQ(pixel(48, 32, 2), 255); // unclaimed selection highlight is retained
+    std::vector<uint8_t> offscreen;
+    uint32_t tw = 0, th = 0;
+    ASSERT_TRUE(gfx::ReadbackTexture(target, offscreen, tw, th));
+    EXPECT_EQ(offscreen[(32 * tw + 8) * 4], 255);
+    EXPECT_EQ(offscreen[(32 * tw + 8) * 4 + 2], 0);
     ASSERT_TRUE(gfx::PresentCanonical());
     ASSERT_TRUE(gfx::ReadbackFrame(display, w, h));
     EXPECT_EQ(display, canonical);
+    gfx::DestroyTexture(target);
 }
 
 TEST(GfxMisc, CompositeBoundsUnionEndpointsAndClampPadding) {

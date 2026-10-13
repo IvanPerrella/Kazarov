@@ -74,3 +74,22 @@ TEST(KeyboardLook, DisplayTotalPeeksLiveMotionBeforeLatchWithoutDoubleApplying) 
     EXPECT_NEAR(InputPeekMouseLookTotal().pitch, display.pitch, 1e-8);
     MouseConfigure(true, {});
 }
+
+TEST(KeyboardLook, LookOnLeftKeepsRightStickWhileMovementOrUnrelatedKeysAreHeld) {
+    InputResetBindings();
+    InputSetLookOnLeftStick(true);
+    for (int key : {SDL_SCANCODE_W, SDL_SCANCODE_SPACE}) {
+        InputPadState pad{.connected = true, .right_x = 220, .right_y = 35};
+        auto mixed = InputApplyKeyboardMouse(pad, {.keys = {key}});
+        InputSetOverride(0, &mixed);
+        EXPECT_EQ(InputGetLookPad(0).left_x, 220);
+        EXPECT_EQ(InputGetLookPad(0).left_y, 35);
+        EXPECT_EQ(mixed.keyboard_left, key == SDL_SCANCODE_W);
+        pad.left_x = 250;
+        mixed = InputApplyKeyboardMouse(pad, {.keys = {key}});
+        InputSetOverride(0, &mixed);
+        EXPECT_EQ(InputGetLookPad(0).left_x, 250); // Physical left stick has priority.
+    }
+    InputSetLookOnLeftStick(false);
+    InputSetOverride(0, nullptr);
+}
