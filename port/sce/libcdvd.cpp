@@ -10,8 +10,8 @@
 #include "platform/paths.hpp"
 #include "libcdvd_extensions.hpp"
 
-// The game reads a directory, not a drive: initialising it and choosing the media succeed. The
-// rest of libcdvd has no caller left, InitCDFile and the ReadBG group being replaced.
+// The game reads extracted files, not a drive: media selection succeeds and search/seek provide
+// advisory preload hints. Bulk reads belong to the consumer's native file loader.
 
 int sceCdInit(int mode) {
     return 1;
