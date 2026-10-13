@@ -670,6 +670,9 @@ void RetireDeletions() {
     SubmitUploadsAndWait();
     for (Frame &frame : g.frames) {
         WaitFrame(frame);
+    }
+    // An idle slot can own deletions of resources still referenced by another slot's submission.
+    for (Frame &frame : g.frames) {
         RunDeletions(frame);
     }
 }
