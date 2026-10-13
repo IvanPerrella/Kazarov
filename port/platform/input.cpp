@@ -190,6 +190,7 @@ InputKeyboardMouse                                       g_scripted;
 // The mouse is a menu's pointer (InputSetMenuMouse); the motion it has gathered for it.
 bool  g_menu_mouse = false;
 bool  g_menu_navigation = false;
+bool  g_keyboard_stick_navigation = true;
 bool  g_developer_menu = false;
 float g_menu_dx = 0.0f;
 float g_menu_dy = 0.0f;
@@ -946,6 +947,10 @@ void InputSetMenuNavigation(bool on) {
     g_menu_navigation = on;
 }
 
+void InputSetKeyboardStickNavigation(bool on) {
+    g_keyboard_stick_navigation = on;
+}
+
 void InputSetDeveloperMenu(bool on) {
     g_developer_menu = on;
 }
@@ -990,7 +995,7 @@ const InputPadState &InputGetPad(int pad) {
         return kAbsent;
     }
     g_view[pad] = g_override[pad] ? *g_override[pad] : g_state[pad];
-    if (!g_stick_live) {
+    if (g_keyboard_stick_navigation && !g_stick_live) {
         g_view[pad].buttons |= g_view[pad].stick_dpad;
     }
     return g_view[pad];
@@ -1109,6 +1114,8 @@ InputPadState InputApplyKeyboardMouse(InputPadState base, const InputKeyboardMou
         std::uint8_t &byte = AxisOf(base, static_cast<Axis>(axis));
         if (!Deflected(byte) && deflection[axis] != 0.0f) {
             byte = InputStickByte(deflection[axis]);
+            if (axis == kAxisLeftX) base.left_x_from_keys = push[axis] != 0;
+            if (axis == kAxisLeftY) base.left_y_from_keys = push[axis] != 0;
         }
     }
     return base;
