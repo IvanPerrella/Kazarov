@@ -459,6 +459,46 @@ TEST(GfxMeshDc2, InstancedFacesKeepMeshAndTextureIdentity) {
     gfx::DestroyTexture(texture_b);
 }
 
+// A newly visible (or material-cut) draw has no pose predecessor, but still belongs to the
+// interpolated camera. Its Prog0 clip planes must follow the same camera as its ordinary MVP.
+TEST(GfxMeshDc2, UnmatchedProg0ClipFollowsInterpolatedCamera) {
+    GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+    const std::vector<gfx::Vertex3D> vertices = {
+        Vert({0.1f, -0.2f, 0.5f}, {0, 0, 1}), Vert({0.5f, -0.2f, 0.5f}, {0, 0, 1}),
+        Vert({0.3f, 0.2f, 0.5f}, {0, 0, 1})};
+    auto record = [&](float camera_x, gfx::InterpKey key) {
+        auto transform = gfx::IdentityMeshTransform();
+        transform.view[12] = camera_x;
+        gfx::MeshConstants constants = {};
+        std::memcpy(constants.mvp, transform.view, sizeof constants.mvp);
+        gfx::Prog0Constants block = {};
+        Identity(block.model_world);
+        std::memcpy(block.clip_or_view, transform.view, sizeof block.clip_or_view);
+        block.flags = gfx::kProg0Unlit | gfx::kProg0Scissor;
+        for (int k = 0; k < 4; ++k) {
+            block.object_color[k] = k == 3 ? 128.0f : 200.0f;
+            block.diffuse[k] = 1;
+        }
+        gfx::BeginRecording();
+        gfx::Clear(true, kClear.data(), true, 0);
+        gfx::SetInterpKey(key);
+        gfx::DrawMeshImmediateProg0(vertices, kTriangle, constants, block, {}, {}, &transform);
+        return gfx::EndRecording();
+    };
+    auto before = record(0, 1);
+    auto newest = record(1.0f, 2);
+    auto expected = record(0.5f, 3);
+    ASSERT_TRUE(gfx::RenderList(*expected, 1, {.canonical = true}));
+    auto coverage = ReadCoverage(fixture);
+    ASSERT_GT(coverage.count, 0);
+    ASSERT_TRUE(gfx::RenderList(*newest, 1, {.canonical = true}));
+    ASSERT_TRUE(gfx::RenderList(*newest, 0.5f, {.previous = before.get(), .present = true}));
+    auto display = ReadCoverage(fixture);
+    ASSERT_EQ(newest->cache.match[0], -1);
+    EXPECT_EQ(display.count, coverage.count);
+    EXPECT_NEAR(display.x, coverage.x, 0.01);
+}
+
 TEST(GfxMeshDc2, TextureChangeCutsPoseMatching) {
     GfxFixture fixture(kWidth, kHeight);
     const std::vector<gfx::Vertex3D> vertices = {

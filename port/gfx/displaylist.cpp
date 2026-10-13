@@ -765,20 +765,24 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
         }
         bool        turned = match >= 0 && previous.records[match].model != record.model && last_turned;
         const Mat3 &delta = last_delta;
-        if (match >= 0 && mesh->prog0 >= 0) {
-            const MeshEntry &earlier = std::get<MeshEntry>(previous.entries[previous.records[match].entry]);
-            if (earlier.prog0 >= 0) {
-                const Prog0Constants &newest = list.prog0_blocks[static_cast<size_t>(mesh->prog0)];
-                Prog0Constants        block;
-                BlendProg0Bones(previous.prog0_blocks[static_cast<size_t>(earlier.prog0)], newest, alpha,
-                                record.teleport_distance, block);
-                bool bones = std::memcmp(block.bones, newest.bones, sizeof block.bones) != 0;
-                bool placed = (model != record.model || moved[record.camera]) &&
-                              MoveProg0(record, list.cameras[record.camera], views[record.camera], model, block);
-                if (bones || placed) {
-                    out.prog0_index[mesh->record] = static_cast<int32_t>(out.prog0.size());
-                    out.prog0.push_back(block);
+        if (mesh->prog0 >= 0) {
+            const Prog0Constants &newest = list.prog0_blocks[static_cast<size_t>(mesh->prog0)];
+            Prog0Constants block = newest;
+            if (match >= 0) {
+                const MeshEntry &earlier = std::get<MeshEntry>(previous.entries[previous.records[match].entry]);
+                if (earlier.prog0 >= 0) {
+                    BlendProg0Bones(previous.prog0_blocks[static_cast<size_t>(earlier.prog0)], newest, alpha,
+                                    record.teleport_distance, block);
                 }
+            }
+            bool bones = std::memcmp(block.bones, newest.bones, sizeof block.bones) != 0;
+            // Camera motion applies to every transformed draw, including newly visible faces
+            // and material cuts with no previous pose. Their clip planes and eye must follow it.
+            bool placed = (model != record.model || moved[record.camera]) &&
+                          MoveProg0(record, list.cameras[record.camera], views[record.camera], model, block);
+            if (bones || placed) {
+                out.prog0_index[mesh->record] = static_cast<int32_t>(out.prog0.size());
+                out.prog0.push_back(block);
             }
         }
         if (!turned && !moved[record.camera]) {

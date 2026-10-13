@@ -375,7 +375,9 @@ renders one.
   apply as for other draws. The rest of the block follows the interpolated model and camera:
   `model_world` is the interpolated model, `clip_or_view` and the object-space eye are re-based
   through the tick's and the interpolated object-to-eye transforms, and point lights shift with the
-  object's origin.
+  object's origin. This camera re-base also applies to transformed Prog0 draws with no matching
+  predecessor: newly visible faces keep their newest bones, while their clip planes and lighting
+  eye follow the same camera as their MVP.
 - **Instanced keys.** A key drawn with more than one model in a tick is one object placed several
   times (a town's parts and tiles share their frames), and culling changes which places are drawn,
   so occurrences do not line up from tick to tick. Such a key, from the tick it is first seen so
