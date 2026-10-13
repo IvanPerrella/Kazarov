@@ -22,12 +22,15 @@ TEST(GfxMeshDc2, SkippedAndInsertedPartsResynchronizeSurfacePairing) {
     const std::vector<gfx::Vertex3D> vertices = {
         {{-.1f, -.1f, .5f}}, {{.1f, -.1f, .5f}}, {{0, .1f, .5f}}};
     const std::vector<uint32_t> indices{0, 1, 2};
-    auto                        record = [&](const std::vector<int> &parts, float x) {
+    auto                        record = [&](const std::vector<int> &parts, float x, bool mirrored = false) {
         gfx::BeginRecording();
         gfx::Clear(true, white, true, 0);
         gfx::SetInterpKey(123);
         auto transform = gfx::IdentityMeshTransform();
         transform.model[12] = x;
+        if (mirrored) {
+            transform.model[0] = -1;
+        }
         gfx::MeshConstants constants{};
         std::memcpy(constants.mvp, transform.model, sizeof constants.mvp);
         for (int part : parts) {
@@ -52,6 +55,14 @@ TEST(GfxMeshDc2, SkippedAndInsertedPartsResynchronizeSurfacePairing) {
             EXPECT_EQ(after->cache.match[i], parts[i] == 3 ? -1 : parts[i]) << "part " << parts[i];
         }
     }
+    auto mirrored = record({0, 1, 2}, .1f, true);
+    ASSERT_TRUE(gfx::RenderList(*mirrored, 1, {.canonical = true}));
+    ASSERT_TRUE(gfx::RenderList(*mirrored, .5f, {.previous = before.get(), .present = true}));
+    EXPECT_EQ(mirrored->cache.match, (std::vector<int32_t>{-1, -1, -1}));
+    auto repeated = record({0, 2, 2}, .1f);
+    ASSERT_TRUE(gfx::RenderList(*repeated, 1, {.canonical = true}));
+    ASSERT_TRUE(gfx::RenderList(*repeated, .5f, {.previous = before.get(), .present = true}));
+    EXPECT_EQ(repeated->cache.match, (std::vector<int32_t>{0, 2, -1}));
     for (auto texture : textures) {
         gfx::DestroyTexture(texture);
     }

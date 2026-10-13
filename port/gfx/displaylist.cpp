@@ -385,6 +385,12 @@ bool SameSurface(const MeshEntry &a, const MeshEntry &b) {
     return true;
 }
 
+bool SameHandedness(const Mat4 &a, const Mat4 &b) {
+    const float sign_a = Dot(Column(a, 0), Cross(Column(a, 1), Column(a, 2)));
+    const float sign_b = Dot(Column(b, 0), Cross(Column(b, 1), Column(b, 2)));
+    return (sign_a < 0.0f) == (sign_b < 0.0f);
+}
+
 bool SameInstanceFace(const DisplayList &list, const DisplayList &previous, int32_t index, int32_t candidate) {
     const auto &a = std::get<MeshEntry>(list.entries[list.records[index].entry]);
     const auto &b = std::get<MeshEntry>(previous.entries[previous.records[candidate].entry]);
@@ -392,9 +398,7 @@ bool SameInstanceFace(const DisplayList &list, const DisplayList &previous, int3
     // cannot interpolate; keep each pass with its own handedness before comparing distance.
     const Mat4 &model_a = list.records[index].model;
     const Mat4 &model_b = previous.records[candidate].model;
-    float       handed_a = Dot(Column(model_a, 0), Cross(Column(model_a, 1), Column(model_a, 2)));
-    float       handed_b = Dot(Column(model_b, 0), Cross(Column(model_b, 1), Column(model_b, 2)));
-    return (handed_a < 0.0f) == (handed_b < 0.0f) && SameSurface(a, b) && a.mesh == b.mesh &&
+    return SameHandedness(model_a, model_b) && SameSurface(a, b) && a.mesh == b.mesh &&
            (a.mesh != kNullMesh || (a.indices == b.indices && a.vertices.size() == b.vertices.size()));
 }
 
@@ -491,8 +495,9 @@ void BuildMatches(const DisplayList &list, const DisplayList &previous) {
             for (size_t face = 0; face < it->second.records.size(); ++face) {
                 const int32_t     candidate = it->second.records[face];
                 const MeshRecord &earlier = previous.records[candidate];
-                if (claimed[face] || !SameSurface(std::get<MeshEntry>(list.entries[record.entry]),
-                                                  std::get<MeshEntry>(previous.entries[earlier.entry]))) {
+                if (claimed[face] || !SameHandedness(earlier.model, record.model) ||
+                    !SameSurface(std::get<MeshEntry>(list.entries[record.entry]),
+                                 std::get<MeshEntry>(previous.entries[earlier.entry]))) {
                     continue;
                 }
                 claimed[face] = true;
