@@ -413,7 +413,7 @@ TEST(GfxMisc, Keyed2DPresentationIsOptInAndCanonicalExact) {
 
 // One shared model has several faces per placement; culling and sorting can reorder either.
 TEST(GfxMeshDc2, InstancedFacesKeepMeshAndTextureIdentity) {
-    GfxFixture fixture(kWidth, kHeight);
+    GfxFixture                       fixture(kWidth, kHeight);
     const std::vector<gfx::Vertex3D> vertices = {
         Vert({-0.1f, -0.1f, 0.5f}, {0, 0, 1}), Vert({0.1f, -0.1f, 0.5f}, {0, 0, 1}),
         Vert({0, 0.1f, 0.5f}, {0, 0, 1})};
@@ -423,7 +423,7 @@ TEST(GfxMeshDc2, InstancedFacesKeepMeshAndTextureIdentity) {
     ASSERT_NE(mesh_b, gfx::kNullMesh);
     gfx::TextureHandle texture_a = gfx::CreateTexture({1, 1});
     gfx::TextureHandle texture_b = gfx::CreateTexture({1, 1});
-    const uint8_t white[4] = {128, 128, 128, 128};
+    const uint8_t      white[4] = {128, 128, 128, 128};
     ASSERT_TRUE(gfx::UpdateTexture(texture_a, 0, 0, 0, 1, 1, white));
     ASSERT_TRUE(gfx::UpdateTexture(texture_b, 0, 0, 0, 1, 1, white));
     auto record = [&](bool reordered) {
@@ -474,7 +474,7 @@ TEST(GfxMeshDc2, InstancedFacesKeepMeshAndTextureIdentity) {
 // A newly visible (or material-cut) draw has no pose predecessor, but still belongs to the
 // interpolated camera. Its Prog0 clip planes must follow the same camera as its ordinary MVP.
 TEST(GfxMeshDc2, UnmatchedProg0ClipFollowsInterpolatedCamera) {
-    GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+    GfxFixture                       fixture(kWidth, kHeight, 1.0f, Prog0Options());
     const std::vector<gfx::Vertex3D> vertices = {
         Vert({0.1f, -0.2f, 0.5f}, {0, 0, 1}), Vert({0.5f, -0.2f, 0.5f}, {0, 0, 1}),
         Vert({0.3f, 0.2f, 0.5f}, {0, 0, 1})};
@@ -512,12 +512,12 @@ TEST(GfxMeshDc2, UnmatchedProg0ClipFollowsInterpolatedCamera) {
 }
 
 TEST(GfxMeshDc2, TextureChangeCutsPoseMatching) {
-    GfxFixture fixture(kWidth, kHeight);
+    GfxFixture                       fixture(kWidth, kHeight);
     const std::vector<gfx::Vertex3D> vertices = {
         Vert({-0.1f, -0.1f, 0.5f}, {0, 0, 1}), Vert({0.1f, -0.1f, 0.5f}, {0, 0, 1}),
         Vert({0, 0.1f, 0.5f}, {0, 0, 1})};
-    auto texture_a = gfx::CreateTexture({1, 1});
-    auto texture_b = gfx::CreateTexture({1, 1});
+    auto          texture_a = gfx::CreateTexture({1, 1});
+    auto          texture_b = gfx::CreateTexture({1, 1});
     const uint8_t white[4] = {128, 128, 128, 128};
     ASSERT_TRUE(gfx::UpdateTexture(texture_a, 0, 0, 0, 1, 1, white));
     ASSERT_TRUE(gfx::UpdateTexture(texture_b, 0, 0, 0, 1, 1, white));
@@ -525,7 +525,7 @@ TEST(GfxMeshDc2, TextureChangeCutsPoseMatching) {
         gfx::BeginRecording();
         gfx::Clear(true, kClear.data(), true, 0);
         gfx::SetInterpKey(88);
-        auto transform = gfx::IdentityMeshTransform();
+        auto               transform = gfx::IdentityMeshTransform();
         gfx::MeshConstants constants = {};
         Identity(constants.mvp);
         gfx::DrawMeshImmediate(vertices, kTriangle, constants, binding, {}, &transform);
@@ -534,8 +534,12 @@ TEST(GfxMeshDc2, TextureChangeCutsPoseMatching) {
     for (bool palette : {false, true}) {
         gfx::TextureBinding a, b;
         a.texture = b.texture = texture_a;
-        if (palette) { a.palette = texture_a; b.palette = texture_b; }
-        else { b.texture = texture_b; }
+        if (palette) {
+            a.palette = texture_a;
+            b.palette = texture_b;
+        } else {
+            b.texture = texture_b;
+        }
         auto before = record(a), after = record(b);
         ASSERT_TRUE(gfx::RenderList(*after, 1, {.canonical = true}));
         ASSERT_TRUE(gfx::RenderList(*after, 0.5f, {.previous = before.get(), .present = true}));
@@ -546,7 +550,7 @@ TEST(GfxMeshDc2, TextureChangeCutsPoseMatching) {
 }
 
 TEST(GfxMeshDc2, MirroredInstancesAtSameOriginKeepHandedness) {
-    GfxFixture fixture(kWidth, kHeight);
+    GfxFixture                       fixture(kWidth, kHeight);
     const std::vector<gfx::Vertex3D> vertices = {
         Vert({-0.1f, -0.1f, 0.5f}, {0, 0, 1}), Vert({0.1f, -0.1f, 0.5f}, {0, 0, 1}),
         Vert({0, 0.1f, 0.5f}, {0, 0, 1})};
@@ -576,7 +580,7 @@ TEST(GfxMeshDc2, MirroredInstancesAtSameOriginKeepHandedness) {
 
 // Tint changes presentation RGB only, including draws with no pose predecessor or transform.
 TEST(GfxMeshDc2, InterpolationTintClassifiesGeometryAndPreservesCanonical) {
-    GfxFixture fixture(kWidth, kHeight);
+    GfxFixture                       fixture(kWidth, kHeight);
     const std::vector<gfx::Vertex3D> vertices = {
         Vert({-1, -1, 0.5f}, {0, 0, 1}), Vert({3, -1, 0.5f}, {0, 0, 1}),
         Vert({-1, 3, 0.5f}, {0, 0, 1})};
@@ -603,8 +607,7 @@ TEST(GfxMeshDc2, InterpolationTintClassifiesGeometryAndPreservesCanonical) {
         ASSERT_TRUE(gfx::RenderList(*list, 0, {.canonical = true, .interpolation_tint = true}));
         ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
         EXPECT_EQ(fixture.pixels, canonical);
-        ASSERT_TRUE(gfx::RenderList(*list, 0.5f, {.previous = before.get(), .present = true,
-                                               .interpolation_tint = true}));
+        ASSERT_TRUE(gfx::RenderList(*list, 0.5f, {.previous = before.get(), .present = true, .interpolation_tint = true}));
         ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
         EXPECT_TRUE(fixture.PixelNear(kWidth / 2, kHeight / 2, r, g, b, 3));
         // No diagnostic state leaks into the next ordinary display replay.
@@ -633,7 +636,6 @@ TEST(GfxMeshDc2, InterpolationTintClassifiesGeometryAndPreservesCanonical) {
     gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 640, 480, {255, 255, 255, 128}), {}, sprite_state);
     auto billboard = gfx::EndRecording();
     check(billboard, 255, 255, 71);
-
 }
 
 // Display diagnostics must not colour reusable targets that a later canonical tick can sample.
@@ -653,12 +655,14 @@ TEST(GfxMeshDc2, InterpolationTintPreservesReusableTargetPixels) {
     auto list = gfx::EndRecording();
     ASSERT_TRUE(gfx::RenderList(*list, 1, {.canonical = true}));
     std::vector<uint8_t> before, after;
-    uint32_t width = 0, height = 0;
+    uint32_t             width = 0, height = 0;
     ASSERT_TRUE(gfx::ReadbackTexture(target, before, width, height));
     ASSERT_TRUE(gfx::RenderList(*list, 1, {.present = true, .interpolation_tint = true}));
     ASSERT_TRUE(gfx::ReadbackTexture(target, after, width, height));
     size_t changed = 0;
-    for (size_t i = 0; i < before.size(); ++i) changed += before[i] != after[i];
+    for (size_t i = 0; i < before.size(); ++i) {
+        changed += before[i] != after[i];
+    }
     EXPECT_EQ(changed, 0u);
     gfx::DestroyTexture(target);
 }
@@ -671,11 +675,18 @@ TEST(GfxDisplayList, WorldSpriteInterpolatesMotionDepthAndCamera) {
     before.interpolation.world_corners = after.interpolation.world_corners = true;
     gfx::detail::Mat4 view{};
     view[0] = view[5] = view[10] = view[15] = 1;
-    gfx::detail::SpriteScene scene{0, view, {1, 1, 0, 0}};
+    gfx::detail::SpriteScene scene{
+        0, view, {1, 1, 0, 0}
+    };
     auto newest_view = view;
     newest_view[12] = 4;
-    for (auto &v : before.vertices) v.z = 0.25f;
-    for (auto &v : after.vertices) { v.z = 0.75f; v.u += 16; }
+    for (auto &v : before.vertices) {
+        v.z = 0.25f;
+    }
+    for (auto &v : after.vertices) {
+        v.z = 0.75f;
+        v.u += 16;
+    }
     std::vector<gfx::Vertex2D> result;
     for (float alpha : {0.0f, 0.25f, 0.5f, 0.75f}) {
         auto display_view = view;
@@ -689,30 +700,36 @@ TEST(GfxDisplayList, WorldSpriteInterpolatesMotionDepthAndCamera) {
         EXPECT_EQ(result[0].u, after.vertices[0].u); // coin spin remains a discrete atlas frame
     }
     EXPECT_FALSE(gfx::detail::InterpolateSprite(before, scene, view, after, scene, newest_view,
-                                               newest_view, 1, result));
+                                                newest_view, 1, result));
     EXPECT_EQ(std::memcmp(result.data(), after.vertices.data(), result.size() * sizeof(result[0])), 0);
 }
 
 TEST(GfxMisc, WorldSpriteRecordingBlendsOwnMotionAndKeepsCanonicalExact) {
     GfxFixture fixture(64, 48, 1.0f, true, 64, 48);
-    auto record = [&](float x, uint64_t generation, bool tagged, int cut, bool multiple_views = false) {
+    auto       record = [&](float x, uint64_t generation, bool tagged, int cut, bool multiple_views = false) {
         gfx::BeginRecording();
         gfx::Clear(true, kClear.data(), true, 0);
-        if (cut == 1) gfx::CutInterpolation();
-        if (cut == 2) gfx::CutCameraInterpolation();
+        if (cut == 1) {
+            gfx::CutInterpolation();
+        }
+        if (cut == 2) {
+            gfx::CutCameraInterpolation();
+        }
         gfx::MeshTransform transform = gfx::IdentityMeshTransform();
         gfx::MeshConstants constants{};
         Identity(constants.mvp);
         const std::vector<gfx::Vertex3D> background = {Vert({-1, -1, 0}, {0, 0, 1}),
-                                                     Vert({3, -1, 0}, {0, 0, 1}),
-                                                     Vert({-1, 3, 0}, {0, 0, 1})};
+                                                       Vert({3, -1, 0}, {0, 0, 1}),
+                                                       Vert({-1, 3, 0}, {0, 0, 1})};
         gfx::DrawMeshImmediate(background, kTriangle, constants, {}, {}, &transform);
         if (multiple_views) {
             transform.view[12] = 4;
             gfx::DrawMeshImmediate(background, kTriangle, constants, {}, {}, &transform);
         }
         auto sprite = PresentationQuad(x, 12, 128);
-        for (auto &v : sprite.vertices) v.z = 0.5f;
+        for (auto &v : sprite.vertices) {
+            v.z = 0.5f;
+        }
         sprite.state.depth_test = gfx::DepthTest::Greater;
         gfx::Interp2DScope scope({tagged ? 17u : 0u, generation, tagged});
         gfx::Draw2D(sprite.primitive, sprite.vertices, {}, sprite.state);
@@ -754,14 +771,20 @@ TEST(GfxDisplayList, WorldSpritePerspectiveUsesWorldEndpoints) {
     before.scene = after.scene = 0;
     before.state.depth_test = after.state.depth_test = gfx::DepthTest::Greater;
     before.interpolation.world_corners = after.interpolation.world_corners = true;
-    for (auto &v : before.vertices) v.z = 0.5f;
-    for (auto &v : after.vertices) v.z = 0.25f;
+    for (auto &v : before.vertices) {
+        v.z = 0.5f;
+    }
+    for (auto &v : after.vertices) {
+        v.z = 0.25f;
+    }
     gfx::detail::Mat4 view{};
     view[0] = view[5] = view[10] = view[15] = 1;
     auto projection = view;
     projection[10] = projection[15] = 0;
     projection[11] = projection[14] = 1; // clip w = world z; reversed depth = 1/z
-    gfx::detail::SpriteScene scene{0, projection, {1, 1, 0, 0}};
+    gfx::detail::SpriteScene scene{
+        0, projection, {1, 1, 0, 0}
+    };
     std::vector<gfx::Vertex2D> result;
     ASSERT_TRUE(gfx::detail::InterpolateSprite(before, scene, view, after, scene, view, view, 0.5f, result));
     EXPECT_FLOAT_EQ(result[0].x, 5.0f / 3.0f); // (world x,z)=(2,2) -> (8,4), midpoint (5,3)
@@ -774,15 +797,21 @@ TEST(GfxDisplayList, WorldSpriteRejectsReuseTeleportAndIncompatibleViews) {
     before.scene = after.scene = 0;
     before.state.depth_test = after.state.depth_test = gfx::DepthTest::Greater;
     before.interpolation.world_corners = after.interpolation.world_corners = true;
-    for (auto &v : before.vertices) v.z = 0.5f;
-    for (auto &v : after.vertices) v.z = 0.5f;
+    for (auto &v : before.vertices) {
+        v.z = 0.5f;
+    }
+    for (auto &v : after.vertices) {
+        v.z = 0.5f;
+    }
     gfx::detail::Mat4 view{};
     view[0] = view[5] = view[10] = view[15] = 1;
-    gfx::detail::SpriteScene scene{0, view, {1, 1, 0, 0}};
+    gfx::detail::SpriteScene scene{
+        0, view, {1, 1, 0, 0}
+    };
     auto reject = [&](auto draw, auto new_scene, auto display_view) {
         std::vector<gfx::Vertex2D> result;
         EXPECT_FALSE(gfx::detail::InterpolateSprite(before, scene, view, draw, new_scene, view,
-                                                   display_view, 0.5f, result));
+                                                    display_view, 0.5f, result));
         EXPECT_EQ(std::memcmp(result.data(), draw.vertices.data(), result.size() * sizeof(result[0])), 0);
     };
     auto change = [&](auto mutate) { auto draw = after; mutate(draw); reject(draw, scene, view); };

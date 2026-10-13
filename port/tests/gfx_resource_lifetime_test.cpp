@@ -224,6 +224,80 @@ TEST(GfxMeshDc2, DoomedTextureBindingsCannotEscapeTheirRecording) {
     gfx::DestroyMesh(mesh);
 }
 
+// All three presentation paths share recording validation, including its bookkeeping.
+class GfxPresentationOwnership : public ::testing::TestWithParam<int> {};
+
+TEST_P(GfxPresentationOwnership, DoomedBindingsStayInTheirOwningRecording) {
+    GfxFixture fixture(kWidth, kHeight);
+    const auto texture = gfx::CreateTexture(gfx::TextureDesc{2, 2});
+    const auto indexed = gfx::CreateTexture(gfx::TextureDesc{2, 2, gfx::TextureFormat::Index8});
+    const auto doomed_indexed = gfx::CreateTexture(gfx::TextureDesc{2, 2, gfx::TextureFormat::Index8});
+    const auto palette = gfx::CreatePalette();
+    const auto live_palette = gfx::CreatePalette();
+    ASSERT_NE(texture, gfx::kNullTexture);
+    ASSERT_NE(indexed, gfx::kNullTexture);
+    ASSERT_NE(doomed_indexed, gfx::kNullTexture);
+    ASSERT_NE(palette, gfx::kNullTexture);
+    ASSERT_NE(live_palette, gfx::kNullTexture);
+    gfx::DrawState state;
+    if (GetParam() != 0) {
+        state.depth_test = gfx::DepthTest::Greater;
+    }
+    state.screen_space = GetParam() == 2;
+    const gfx::Interp2D tag{.key = 73, .generation = 4, .world_corners = GetParam() == 1};
+    auto                draw = [&](const gfx::TextureBinding &binding) {
+        gfx::Interp2DScope scope(tag);
+        gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 32, 32, {128, 128, 128, 255}), binding, state);
+    };
+    auto doomed_draws = [&] {
+        draw({.texture = texture});
+        draw({.texture = indexed, .palette = palette});
+        draw({.texture = doomed_indexed, .palette = live_palette});
+    };
+    gfx::BeginRecording();
+    gfx::DestroyTexture(texture);
+    gfx::DestroyTexture(palette);
+    gfx::DestroyTexture(doomed_indexed);
+    doomed_draws();
+    auto owner = gfx::EndRecording();
+    ASSERT_EQ(gfx::ListStats(*owner).draws_2d, 3u);
+    ASSERT_EQ(owner->tagged_2d.size(), 3u);
+    EXPECT_EQ(owner->occurrences_2d.at(tag.key), 3u);
+
+    gfx::BeginRecording();
+    doomed_draws();
+    auto other = gfx::EndRecording();
+    EXPECT_TRUE(other->entries.empty());
+    EXPECT_TRUE(other->tagged_2d.empty());
+    EXPECT_TRUE(other->occurrences_2d.empty());
+    EXPECT_FALSE(other->needs_base);
+
+    // Rejected draws must not consume the occurrence of a subsequent valid keyed draw.
+    gfx::BeginRecording();
+    doomed_draws();
+    draw({.texture = indexed, .palette = live_palette});
+    auto valid = gfx::EndRecording();
+    ASSERT_EQ(gfx::ListStats(*valid).draws_2d, 1u);
+    ASSERT_EQ(valid->tagged_2d.size(), 1u);
+    const auto &entry = std::get<gfx::detail::Draw2DEntry>(valid->entries.front());
+    EXPECT_EQ(entry.occurrence, 0u);
+    EXPECT_EQ(entry.interpolation.world_corners, tag.world_corners);
+    EXPECT_EQ(entry.state.screen_space, state.screen_space);
+
+    gfx::RenderOptions canonical;
+    canonical.canonical = true;
+    EXPECT_TRUE(gfx::RenderList(*owner, 1.0f, canonical));
+    EXPECT_TRUE(gfx::RenderList(*owner, 0.5f, {}));
+    owner.reset();
+    EXPECT_TRUE(gfx::RenderList(*other, 1.0f, canonical));
+    EXPECT_TRUE(gfx::RenderList(*valid, 0.5f, {}));
+    valid.reset();
+    gfx::DestroyTexture(indexed);
+    gfx::DestroyTexture(live_palette);
+}
+
+INSTANTIATE_TEST_SUITE_P(Keyed2DBillboardAndDepthOfField, GfxPresentationOwnership, ::testing::Values(0, 1, 2));
+
 TEST(GfxMeshDc2, SecondDestroyOfDoomedHandleIsHarmless) {
     GfxFixture         fixture(kWidth, kHeight);
     gfx::TextureHandle texture = gfx::CreateTexture(gfx::TextureDesc{4, 4});

@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -378,8 +378,8 @@ bool SameInstanceFace(const DisplayList &list, const DisplayList &previous, int3
     // cannot interpolate; keep each pass with its own handedness before comparing distance.
     const Mat4 &model_a = list.records[index].model;
     const Mat4 &model_b = previous.records[candidate].model;
-    float handed_a = Dot(Column(model_a, 0), Cross(Column(model_a, 1), Column(model_a, 2)));
-    float handed_b = Dot(Column(model_b, 0), Cross(Column(model_b, 1), Column(model_b, 2)));
+    float       handed_a = Dot(Column(model_a, 0), Cross(Column(model_a, 1), Column(model_a, 2)));
+    float       handed_b = Dot(Column(model_b, 0), Cross(Column(model_b, 1), Column(model_b, 2)));
     return (handed_a < 0.0f) == (handed_b < 0.0f) && SameSurface(a, b) && a.mesh == b.mesh &&
            (a.mesh != kNullMesh || (a.indices == b.indices && a.vertices.size() == b.vertices.size()));
 }
@@ -751,7 +751,7 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
         const auto           &draw = std::get<Draw2DEntry>(list.entries[pair[0]]);
         const auto           &before = std::get<Draw2DEntry>(previous.entries[pair[1]]);
         std::vector<Vertex2D> vertices;
-        bool blended = false;
+        bool                  blended = false;
         // Camera pairing currently uses first-appearance order. Multi-view lists cannot prove
         // that association after a reorder, so keep their own sprite motion newest.
         if (draw.interpolation.world_corners && draw.scene >= 0 && before.scene >= 0 &&
@@ -760,7 +760,7 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
             const auto &earlier = previous.scenes[before.scene];
             if (cache.cameras[scene.camera] == static_cast<int32_t>(earlier.camera)) {
                 blended = InterpolateSprite(before, earlier, previous.cameras[earlier.camera],
-                                             draw, scene, list.cameras[scene.camera], views[scene.camera], alpha, vertices);
+                                            draw, scene, list.cameras[scene.camera], views[scene.camera], alpha, vertices);
             }
         } else {
             blended = Interpolate2D(before, draw, alpha, vertices);
@@ -811,7 +811,7 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
         const Mat3 &delta = last_delta;
         if (mesh->prog0 >= 0) {
             const Prog0Constants &newest = list.prog0_blocks[static_cast<size_t>(mesh->prog0)];
-            Prog0Constants block = newest;
+            Prog0Constants        block = newest;
             if (match >= 0) {
                 const MeshEntry &earlier = std::get<MeshEntry>(previous.entries[previous.records[match].entry]);
                 if (earlier.prog0 >= 0) {
@@ -970,18 +970,36 @@ uint32_t MeshTint(const MeshEntry &mesh, const DisplayList &list, const Override
 const char *MeshReason(const MeshEntry &mesh, const DisplayList &list, const DisplayList *previous,
                        const Overrides *overrides) {
     const MeshRecord &record = list.records[mesh.record];
-    if (!record.has_transform) return "no_transform";
-    if (overrides == nullptr) return list.cut ? "list_cut" : "no_interpolation_pair";
-    if (record.no_interpolation) return "excluded_pose";
-    if (record.key == 0) return "no_key";
-    if (list.cache.match[mesh.record] >= 0) return "matched";
-    if (g_instanced_keys.contains(record.key)) return "unmatched_instance_surface";
+    if (!record.has_transform) {
+        return "no_transform";
+    }
+    if (overrides == nullptr) {
+        return list.cut ? "list_cut" : "no_interpolation_pair";
+    }
+    if (record.no_interpolation) {
+        return "excluded_pose";
+    }
+    if (record.key == 0) {
+        return "no_key";
+    }
+    if (list.cache.match[mesh.record] >= 0) {
+        return "matched";
+    }
+    if (g_instanced_keys.contains(record.key)) {
+        return "unmatched_instance_surface";
+    }
     bool key_seen = false;
     for (const MeshRecord &old : previous->records) {
-        if (old.key != record.key) continue;
+        if (old.key != record.key) {
+            continue;
+        }
         key_seen = true;
-        if (old.occurrence != record.occurrence) continue;
-        if (Moved(old.model, record.model) > record.teleport_distance) return "teleport";
+        if (old.occurrence != record.occurrence) {
+            continue;
+        }
+        if (Moved(old.model, record.model) > record.teleport_distance) {
+            return "teleport";
+        }
         return "surface_changed";
     }
     return key_seen ? "missing_occurrence" : "unmatched";
@@ -990,9 +1008,13 @@ const char *MeshReason(const MeshEntry &mesh, const DisplayList &list, const Dis
 void TraceInterpolation(const DisplayList &list, const DisplayList *previous, const Overrides *overrides,
                         float alpha) {
     const char *path = std::getenv("KZ_INTERPOLATION_TRACE");
-    if (path == nullptr || *path == '\0' || alpha != 0.0f) return;
+    if (path == nullptr || *path == '\0' || alpha != 0.0f) {
+        return;
+    }
     FILE *file = std::fopen(path, "a");
-    if (file == nullptr) return;
+    if (file == nullptr) {
+        return;
+    }
     std::fprintf(file, "frame,%llu,previous,%llu,cameras,%zu,cut,%d,camera_cut,%d\n",
                  static_cast<unsigned long long>(list.serial),
                  static_cast<unsigned long long>(previous ? previous->serial : 0),
@@ -1000,14 +1022,16 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
     std::fprintf(file, "entry,kind,status,reason,key,occurrence,match,camera,mesh,texture,palette,blend,depth,fog,fog_changed,material_changed,projection_changed,local_changed,prog0_flags,x,y,z,x0,y0,x1,y1,target,tint_applied\n");
     TextureHandle target = kMainTarget;
     for (size_t i = 0; i < list.entries.size(); ++i) {
-        if (const auto *change = std::get_if<TargetEntry>(&list.entries[i])) target = change->target;
+        if (const auto *change = std::get_if<TargetEntry>(&list.entries[i])) {
+            target = change->target;
+        }
         if (const MeshEntry *mesh = std::get_if<MeshEntry>(&list.entries[i])) {
             const MeshRecord &r = list.records[mesh->record];
-            int32_t match = overrides ? list.cache.match[mesh->record] : -1;
-            bool fog = false, material = false, projection = false, local = false;
+            int32_t           match = overrides ? list.cache.match[mesh->record] : -1;
+            bool              fog = false, material = false, projection = false, local = false;
             if (match >= 0 && previous) {
                 const MeshRecord &old = previous->records[match];
-                const auto &a = std::get<MeshEntry>(previous->entries[old.entry]);
+                const auto       &a = std::get<MeshEntry>(previous->entries[old.entry]);
                 projection = r.projection != old.projection;
                 local = r.local != old.local || r.middle != old.middle;
                 fog = std::memcmp(a.state.fog_color, mesh->state.fog_color, 3) != 0;
@@ -1032,16 +1056,20 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
                          mesh->prog0 >= 0 ? list.prog0_blocks[mesh->prog0].flags : 0,
                          r.model[12], r.model[13], r.model[14], target, target == kMainTarget);
         } else if (const Draw2DEntry *sprite = std::get_if<Draw2DEntry>(&list.entries[i])) {
-            bool carried = overrides && overrides->sprites.contains(sprite);
-            uint32_t status = carried ? 4 : (sprite->state.depth_test == DepthTest::Always || sprite->state.screen_space) ? 3 : 2;
-            float x0 = INFINITY, y0 = INFINITY, x1 = -INFINITY, y1 = -INFINITY;
+            bool     carried = overrides && overrides->sprites.contains(sprite);
+            uint32_t status = carried ? 4 : (sprite->state.depth_test == DepthTest::Always || sprite->state.screen_space) ? 3
+                                                                                                                          : 2;
+            float    x0 = INFINITY, y0 = INFINITY, x1 = -INFINITY, y1 = -INFINITY;
             for (const auto &v : sprite->vertices) {
-                x0 = std::min(x0, v.x); y0 = std::min(y0, v.y);
-                x1 = std::max(x1, v.x); y1 = std::max(y1, v.y);
+                x0 = std::min(x0, v.x);
+                y0 = std::min(y0, v.y);
+                x1 = std::max(x1, v.x);
+                y1 = std::max(y1, v.y);
             }
             std::fprintf(file, "%zu,2d,%u,%s,0,0,-1,%d,0,%u,%u,%d,%d,%d,0,0,0,0,0,0,0,0,%.6g,%.6g,%.6g,%.6g,%u,%d\n",
-                         i, status, carried ? "reprojected_corners" : status == 3 ? (sprite->state.screen_space ? "screen_effect" : "flat_2d") :
-                         sprite->scene < 0 ? "missing_sprite_scene" : "newest_sprite_corners",
+                         i, status, carried ? "reprojected_corners" : status == 3     ? (sprite->state.screen_space ? "screen_effect" : "flat_2d")
+                                                                  : sprite->scene < 0 ? "missing_sprite_scene"
+                                                                                      : "newest_sprite_corners",
                          sprite->scene, sprite->binding.texture, sprite->binding.palette,
                          sprite->state.blend, static_cast<int>(sprite->state.depth_test), sprite->state.fog,
                          x0, y0, x1, y1, target, target == kMainTarget);
@@ -1071,13 +1099,14 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                         }
                     }
                     if (tint && !canonical && CurrentRenderTarget() == kMainTarget) {
-                        g.interpolation_tint = overrides && overrides->sprites.contains(&e) ? 4 :
-                                               (e.state.depth_test == DepthTest::Always || e.state.screen_space) ? 3 : 2;
+                        g.interpolation_tint = overrides && overrides->sprites.contains(&e) ? 4 : (e.state.depth_test == DepthTest::Always || e.state.screen_space) ? 3
+                                                                                                                                                                    : 2;
                     }
                     Draw2DSided(e.primitive, *vertices, GrabbedBinding(e.binding, canonical), e.state, e.side);
                 } else if constexpr (std::is_same_v<T, MeshEntry>) {
-                    if (tint && !canonical && CurrentRenderTarget() == kMainTarget)
+                    if (tint && !canonical && CurrentRenderTarget() == kMainTarget) {
                         g.interpolation_tint = MeshTint(e, list, overrides);
+                    }
                     const MeshConstants *constants = &e.constants;
                     if (overrides != nullptr && overrides->index[e.record] >= 0) {
                         constants = &overrides->constants[overrides->index[e.record]];
@@ -1239,50 +1268,69 @@ bool InterpolateSprite(const Draw2DEntry &before, const SpriteScene &before_scen
         before.binding != after.binding || before.state != after.state || before.side != after.side ||
         after.state.depth_test == DepthTest::Always || before.vertices.size() != after.vertices.size() ||
         before_scene.projection != after_scene.projection ||
-        std::memcmp(before_scene.to_clip, after_scene.to_clip, sizeof after_scene.to_clip) != 0) return false;
+        std::memcmp(before_scene.to_clip, after_scene.to_clip, sizeof after_scene.to_clip) != 0) {
+        return false;
+    }
 
     Mat4 old_inverse, new_inverse;
     if (!Invert(Multiply(before_scene.projection, before_view), old_inverse) ||
-        !Invert(Multiply(after_scene.projection, after_view), new_inverse)) return false;
+        !Invert(Multiply(after_scene.projection, after_view), new_inverse)) {
+        return false;
+    }
     const Mat4 project = Multiply(after_scene.projection, display_view);
-    auto transform = [](const Mat4 &matrix, const std::array<float, 4> &point, std::array<float, 4> &result) {
+    auto       transform = [](const Mat4 &matrix, const std::array<float, 4> &point, std::array<float, 4> &result) {
         for (int r = 0; r < 4; ++r) {
             result[r] = 0;
-            for (int c = 0; c < 4; ++c) result[r] += matrix[c * 4 + r] * point[c];
+            for (int c = 0; c < 4; ++c) {
+                result[r] += matrix[c * 4 + r] * point[c];
+            }
         }
-        if (!(result[3] > 1e-6f)) return false;
+        if (!(result[3] > 1e-6f)) {
+            return false;
+        }
         for (int r = 0; r < 3; ++r) {
             result[r] /= result[3];
-            if (!std::isfinite(result[r])) return false;
+            if (!std::isfinite(result[r])) {
+                return false;
+            }
         }
         result[3] = 1;
         return true;
     };
     auto unproject = [&](const Vertex2D &vertex, const Mat4 &inverse, std::array<float, 4> &world) {
-        if (!(vertex.z >= 0 && vertex.z <= 1)) return false;
-        return transform(inverse, {vertex.x * after_scene.to_clip[0] + after_scene.to_clip[2],
-                                  vertex.y * after_scene.to_clip[1] + after_scene.to_clip[3], vertex.z, 1}, world);
+        if (!(vertex.z >= 0 && vertex.z <= 1)) {
+            return false;
+        }
+        return transform(inverse, {vertex.x * after_scene.to_clip[0] + after_scene.to_clip[2], vertex.y * after_scene.to_clip[1] + after_scene.to_clip[3], vertex.z, 1}, world);
     };
-    if (after_scene.to_clip[0] == 0 || after_scene.to_clip[1] == 0) return false;
+    if (after_scene.to_clip[0] == 0 || after_scene.to_clip[1] == 0) {
+        return false;
+    }
     alpha = std::max(alpha, 0.0f);
     auto blended = after.vertices;
     for (size_t i = 0; i < blended.size(); ++i) {
         std::array<float, 4> a, b, point, clip;
-        if (!unproject(before.vertices[i], old_inverse, a) || !unproject(after.vertices[i], new_inverse, b)) return false;
+        if (!unproject(before.vertices[i], old_inverse, a) || !unproject(after.vertices[i], new_inverse, b)) {
+            return false;
+        }
         float distance_squared = 0;
         for (int r = 0; r < 3; ++r) {
             const float delta = b[r] - a[r];
             distance_squared += delta * delta;
             point[r] = a[r] + delta * alpha;
         }
-        if (!(std::sqrt(distance_squared) <= after.interpolation.teleport_distance)) return false;
+        if (!(std::sqrt(distance_squared) <= after.interpolation.teleport_distance)) {
+            return false;
+        }
         point[3] = 1;
-        if (!transform(project, point, clip) || !(clip[2] >= 0 && clip[2] <= 1)) return false;
+        if (!transform(project, point, clip) || !(clip[2] >= 0 && clip[2] <= 1)) {
+            return false;
+        }
         blended[i].x = (clip[0] - after_scene.to_clip[2]) / after_scene.to_clip[0];
         blended[i].y = (clip[1] - after_scene.to_clip[3]) / after_scene.to_clip[1];
         blended[i].z = clip[2];
         blended[i].color[3] = static_cast<uint8_t>(std::lround(before.vertices[i].color[3] +
-                                          (float(after.vertices[i].color[3]) - before.vertices[i].color[3]) * alpha));
+                                                               (float(after.vertices[i].color[3]) - before.vertices[i].color[3]) * alpha));
     }
     out = std::move(blended);
     return true;
@@ -1500,8 +1548,10 @@ bool RenderList(const DisplayList &list, float alpha, const RenderOptions &optio
         return false;
     }
     const char *setting = std::getenv("KZ_INTERPOLATION_TINT");
-    bool tint = options.interpolation_tint || (setting && std::strcmp(setting, "1") == 0);
-    if (tint) TraceInterpolation(list, options.previous, interpolate ? &overrides : nullptr, alpha);
+    bool        tint = options.interpolation_tint || (setting && std::strcmp(setting, "1") == 0);
+    if (tint) {
+        TraceInterpolation(list, options.previous, interpolate ? &overrides : nullptr, alpha);
+    }
     Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint);
     if (options.overlay != nullptr && options.overlay->instance == g.renderer_instance) {
         SetRenderTarget(kMainTarget);

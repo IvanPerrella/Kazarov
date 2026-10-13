@@ -660,10 +660,10 @@ bool      CurrentNoInterpolation();
 // multi-view lists retain newest own motion until camera identity can be established.
 struct Interp2D {
     InterpKey key = 0;
-    uint64_t generation = 0;
+    uint64_t  generation = 0;
     // Depth-tested billboards: blend matched corners in world space, then project through
     // the presentation camera. UV animation stays newest; texture, topology and state must match.
-    bool world_corners = false;
+    bool  world_corners = false;
     float teleport_distance = 200.0f;
 };
 
