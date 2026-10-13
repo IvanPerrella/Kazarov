@@ -939,12 +939,16 @@ const char *MeshReason(const MeshEntry &mesh, const DisplayList &list, const Dis
     if (record.no_interpolation) return "excluded_pose";
     if (record.key == 0) return "no_key";
     if (list.cache.match[mesh.record] >= 0) return "matched";
+    if (g_instanced_keys.contains(record.key)) return "unmatched_instance_surface";
+    bool key_seen = false;
     for (const MeshRecord &old : previous->records) {
         if (old.key != record.key) continue;
-        if (Moved(old.model, record.model) > record.teleport_distance) return "teleport_or_instance_cut";
-        if (old.occurrence == record.occurrence) return "surface_or_instance_cut";
+        key_seen = true;
+        if (old.occurrence != record.occurrence) continue;
+        if (Moved(old.model, record.model) > record.teleport_distance) return "teleport";
+        return "surface_changed";
     }
-    return "unmatched";
+    return key_seen ? "missing_occurrence" : "unmatched";
 }
 
 void TraceInterpolation(const DisplayList &list, const DisplayList *previous, const Overrides *overrides,
