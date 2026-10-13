@@ -345,6 +345,12 @@ renders one.
   the canonical object's bounds cannot leak into the enlarged composite. Callers
   must preserve texture-to-screen mapping and reject transparent fragments when an
   enlarged composite writes depth. This is separate from keyed 2D interpolation.
+  `BeginComposite(key, bounds, visible, padding)` / `EndComposite()` group a part's
+  scratch clear and copies. Presentation clears and scissors cover the union of its
+  two tick rectangles, expanded by the outline/filter padding and clipped to the visible
+  extent. Copy scissors retain each copy's texture-to-screen offset. Full-size vertices
+  retain identical sampling; pixels outside the scissor incur no fragment work. Bounds
+  must enclose the part at each tick; keys must remain stable across adjacent ticks.
 - **Interpolation.** A mesh draw may carry a `MeshTransform` (projection, view, middle, model,
   local: `mvp` is their product) and is tagged with the current `InterpKey` (`SetInterpKey`). A
   display render at `alpha` < 1 with `options.previous` matches each tagged draw with the previous

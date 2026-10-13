@@ -36,6 +36,7 @@ struct Draw2DEntry {
     TextureHandle         target = kMainTarget;
     std::vector<Vertex2D> presentation_vertices;
     DrawState             presentation_state;
+    int32_t               composite = -1;
 };
 
 // The projection and camera the meshes around a 3D sprite were drawn with, and where the target's
@@ -72,6 +73,7 @@ struct ClearEntry {
     LogicalRect rect = {};
     bool        has_presentation_rect = false;
     LogicalRect presentation_rect = {};
+    int32_t     composite = -1;
 };
 
 struct TargetEntry {
@@ -123,6 +125,16 @@ struct MeshRecord {
     Mat4      local = {};
 };
 
+struct CompositeRegion {
+    InterpKey   key;
+    uint32_t    occurrence;
+    LogicalRect bounds;
+    LogicalRect visible;
+    float       padding;
+};
+
+LogicalRect CompositeBounds(const CompositeRegion &now, const CompositeRegion *before);
+
 // What a display render of a list against one predecessor reuses from frame to frame.
 struct MatchCache {
     std::vector<std::array<uint32_t, 2> > draws_2d; // matched entry indices, newest then previous
@@ -158,6 +170,8 @@ struct DisplayList {
     std::unordered_map<InterpKey, uint32_t> occurrences_2d;
     std::vector<uint32_t>                   tagged_2d;
     mutable detail::MatchCache              cache;
+    std::vector<detail::CompositeRegion>    composites;
+    int32_t                                 composite = -1;
 
     DisplayList() = default;
     DisplayList(const DisplayList &) = delete;

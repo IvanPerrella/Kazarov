@@ -656,6 +656,13 @@ using DisplayListRef = std::shared_ptr<const DisplayList>;
 // points of the same space from tick to tick (the cloth's), not for geometry rebuilt in a space or
 // an order of its own every tick (the shadow volumes).
 using InterpKey = uint64_t;
+
+// Group a scratch-image clear and its screen-space copies. Display rendering bounds them to
+// the union of this part's two tick rectangles, padded in logical pixels. Canonical draws are
+// unchanged. Keys identify parts; repeated uses of a key pair in submission order.
+void BeginComposite(InterpKey key, const LogicalRect &bounds, const LogicalRect &visible, float padding);
+void EndComposite();
+
 void      SetInterpKey(InterpKey key, bool no_interpolation = false, float teleport_distance = INFINITY,
                        bool blend_vertices = false);
 InterpKey CurrentInterpKey();

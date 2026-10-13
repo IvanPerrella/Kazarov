@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <utility>
@@ -42,6 +43,9 @@ TEST(GfxMeshDc2, InterpolatedOutlineEscapesNewestPartCrop) {
         gfx::BeginRecording();
         gfx::Clear(true, clear, true, 0);
         gfx::SetRenderTarget(target);
+        if (tagged) {
+            gfx::BeginComposite(17, crop, full, 1);
+        }
         gfx::Clear(true, clear, false, 0, &crop, tagged ? &full : nullptr);
         gfx::SetInterpKey(17);
         gfx::DrawMeshImmediateProg0(triangle, indices, constants, block, {}, {}, &transform);
@@ -65,6 +69,7 @@ TEST(GfxMeshDc2, InterpolatedOutlineEscapesNewestPartCrop) {
         const gfx::Presentation2D presentation{display_quad, state};
         gfx::Draw2D(gfx::Primitive::Quads, quad, binding, state,
                     tagged ? &presentation : nullptr);
+        gfx::EndComposite();
         return gfx::EndRecording();
     };
     auto render = [&](const gfx::DisplayList &list, float alpha, gfx::RenderOptions options) {
@@ -1034,6 +1039,9 @@ TEST(GfxMisc, PresentationCompositeKeepsMovingMeshAndClearsReusedTarget) {
         // A shared scratch image can contain another object's pixels outside the tick's box.
         gfx::Clear(true, stale, false, 0);
         const gfx::LogicalRect box{(x + 0.8f) * 32 - 1, 18, 15, 12};
+        if (replacement) {
+            gfx::BeginComposite(1, box, full, 1);
+        }
         gfx::Clear(true, transparent, false, 0, &box, replacement ? &full : nullptr);
         gfx::MeshConstants constants{};
         Identity(constants.mvp);
@@ -1062,6 +1070,7 @@ TEST(GfxMisc, PresentationCompositeKeepsMovingMeshAndClearsReusedTarget) {
         binding.filter = gfx::Filter::Nearest;
         gfx::Draw2D(gfx::Primitive::Quads, quad, binding, state,
                     replacement ? &presentation : nullptr);
+        gfx::EndComposite();
         return gfx::EndRecording();
     };
     auto read = [&](const gfx::DisplayList &list, float alpha, gfx::RenderOptions options) {
@@ -1215,4 +1224,95 @@ TEST(GfxMisc, HostReplacementSuppressesOnlyTheTaggedMainDisplayGroup) {
     ASSERT_TRUE(gfx::PresentCanonical());
     ASSERT_TRUE(gfx::ReadbackFrame(display, w, h));
     EXPECT_EQ(display, canonical);
+}
+
+TEST(GfxMisc, CompositeBoundsUnionEndpointsAndClampPadding) {
+    gfx::detail::CompositeRegion before{
+        1, 0, {10, 20, 30,  40 },
+          {0,  0,  640, 480},
+          2
+    };
+    auto now = before;
+    now.bounds = {50, 5, 10, 10};
+    now.padding = 4;
+    const auto both = gfx::detail::CompositeBounds(now, &before);
+    EXPECT_FLOAT_EQ(both.x, 6);
+    EXPECT_FLOAT_EQ(both.y, 1);
+    EXPECT_FLOAT_EQ(both.w, 58);
+    EXPECT_FLOAT_EQ(both.h, 63);
+    now.bounds = {-20, -20, 680, 520};
+    const auto clamped = gfx::detail::CompositeBounds(now, &before);
+    EXPECT_FLOAT_EQ(clamped.x, 0);
+    EXPECT_FLOAT_EQ(clamped.y, 0);
+    EXPECT_FLOAT_EQ(clamped.w, 640);
+    EXPECT_FLOAT_EQ(clamped.h, 480);
+}
+
+// Opt-in GPU workload: the same 64 outlined parts with full-frame and bounded composites.
+// Readback drains the GPU before each timed interval ends; initialization is not timed.
+TEST(GfxMisc, DISABLED_OutlineComposite4KBenchmark) {
+    GfxOptions options;
+    options.offscreen = true;
+    options.logical_width = 640;
+    options.logical_height = 480;
+    GfxFixture             fixture(3840, 2160, 1, options);
+    const auto             target = gfx::NamedRenderTarget("composite-benchmark", 640, 480, true, true);
+    const gfx::LogicalRect full{0, 0, 640, 480};
+    const uint8_t          clear[4] = {};
+    auto                   record = [&](bool bounded) {
+        gfx::BeginRecording();
+        gfx::Clear(true, clear, true, 0);
+        for (int part = 0; part < 64; ++part) {
+            const gfx::LogicalRect box{float(20 + (part % 8) * 75), float(20 + (part / 8) * 55), 24, 32};
+            if (bounded) {
+                gfx::BeginComposite(part + 1, box, full, 3);
+            }
+            gfx::SetRenderTarget(target);
+            gfx::Clear(true, clear, false, 0, &box, &full);
+            gfx::Draw2D(gfx::Primitive::Quads, Quad(box.x, box.y, box.w, box.h, {128, 128, 128, 128}), {}, {});
+            gfx::SetRenderTarget(gfx::kMainTarget);
+            for (int copy = 0; copy < 5; ++copy) {
+                auto quad = Quad(0, 0, 640, 480, {128, 128, 128, 128});
+                for (auto &v : quad) {
+                    v.u = v.x;
+                    v.v = v.y;
+                    v.x += copy == 1 ? 1 : copy == 2 ? -1
+                                                     : 0;
+                    v.y += copy == 3 ? 1 : copy == 4 ? -1
+                                                     : 0;
+                }
+                gfx::DrawState state;
+                state.blend = true;
+                state.alpha_test = true;
+                state.alpha_func = gfx::AlphaFunc::Greater;
+                gfx::Presentation2D presentation{quad, state};
+                gfx::TextureBinding binding;
+                binding.texture = target;
+                gfx::Draw2D(gfx::Primitive::Quads, quad, binding, state, &presentation);
+            }
+            gfx::EndComposite();
+        }
+        return gfx::EndRecording();
+    };
+    std::vector<uint8_t> reference;
+    for (bool bounded : {false, true}) {
+        const auto list = record(bounded);
+        ASSERT_TRUE(gfx::RenderList(*list, 1, {.canonical = true}));
+        for (int i = 0; i < 5; ++i) {
+            ASSERT_TRUE(gfx::RenderList(*list, 1, {.present = true}));
+        }
+        ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 60; ++i) {
+            ASSERT_TRUE(gfx::RenderList(*list, 1, {.present = true}));
+        }
+        ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+        const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 60;
+        std::printf("COMPOSITE_4K bounded=%d parts=64 frames=60 ms/frame=%.3f\n", bounded, ms);
+        if (!bounded) {
+            reference = fixture.pixels;
+        } else {
+            EXPECT_EQ(fixture.pixels, reference);
+        }
+    }
 }

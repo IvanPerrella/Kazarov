@@ -1093,7 +1093,22 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
 }
 
 void Replay(const DisplayList &list, bool canonical, const Overrides *overrides, bool host = false,
-            bool tint = false, InterpKey suppressed_2d_key = 0) {
+            bool tint = false, InterpKey suppressed_2d_key = 0, const DisplayList *previous = nullptr) {
+    std::vector<LogicalRect> composites;
+    if (!canonical) {
+        for (const auto &region : list.composites) {
+            const CompositeRegion *before = nullptr;
+            if (previous) {
+                for (const auto &candidate : previous->composites) {
+                    if (candidate.key == region.key && candidate.occurrence == region.occurrence) {
+                        before = &candidate;
+                        break;
+                    }
+                }
+            }
+            composites.push_back(CompositeBounds(region, before));
+        }
+    }
     g.replaying = true;
     g.quiet = !canonical;
     g.host_draws = host;
@@ -1113,9 +1128,19 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                     const std::vector<Vertex2D> *vertices = &e.vertices;
                     const DrawState             *state = &e.state;
                     UiSide                       side = e.side;
+                    DrawState                    bounded_state;
                     if (!canonical && !e.presentation_vertices.empty()) {
                         vertices = &e.presentation_vertices;
                         state = &e.presentation_state;
+                        if (e.composite >= 0 && vertices->size() == 4) {
+                            bounded_state = *state;
+                            bounded_state.scissor = true;
+                            bounded_state.extend_scissor = false;
+                            bounded_state.scissor_rect = composites[e.composite];
+                            bounded_state.scissor_rect.x += (*vertices)[0].x - (*vertices)[0].u;
+                            bounded_state.scissor_rect.y += (*vertices)[0].y - (*vertices)[0].v;
+                            state = &bounded_state;
+                        }
                         // Composite replacements are in target space, independent of the original UI box.
                         side = {};
                     } else if (overrides != nullptr) {
@@ -1167,6 +1192,9 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                                                       ? &e.presentation_rect
                                                   : e.has_rect ? &e.rect
                                                                : nullptr;
+                        if (!canonical && e.has_presentation_rect && e.composite >= 0) {
+                            rect = &composites[e.composite];
+                        }
                         Clear(e.color, e.rgba, e.depth, e.z, rect);
                     }
                 } else if constexpr (std::is_same_v<T, TargetEntry>) {
@@ -1391,6 +1419,23 @@ void BlendProg0Bones(const Prog0Constants &before, const Prog0Constants &after, 
 
 bool RecordingCalls() { return g.list != nullptr; }
 
+LogicalRect CompositeBounds(const CompositeRegion &now, const CompositeRegion *before) {
+    float left = now.bounds.x, top = now.bounds.y;
+    float right = left + now.bounds.w, bottom = top + now.bounds.h;
+    if (before) {
+        left = std::min(left, before->bounds.x);
+        top = std::min(top, before->bounds.y);
+        right = std::max(right, before->bounds.x + before->bounds.w);
+        bottom = std::max(bottom, before->bounds.y + before->bounds.h);
+    }
+    const float pad = std::max(now.padding, before ? before->padding : 0.0f);
+    left = std::clamp(std::floor(left - pad), now.visible.x, now.visible.x + now.visible.w);
+    top = std::clamp(std::floor(top - pad), now.visible.y, now.visible.y + now.visible.h);
+    right = std::clamp(std::ceil(right + pad), left, now.visible.x + now.visible.w);
+    bottom = std::clamp(std::ceil(bottom + pad), top, now.visible.y + now.visible.h);
+    return {left, top, right - left, bottom - top};
+}
+
 void RecordEntry(Entry &&entry) {
     DisplayList &list = *g.list;
     if (Draw2DEntry *draw = std::get_if<Draw2DEntry>(&entry)) {
@@ -1402,6 +1447,7 @@ void RecordEntry(Entry &&entry) {
             draw->scene = list.scene;
         }
         draw->target = g.record_target;
+        draw->composite = list.composite;
         draw->interpolation = g.interp_2d;
         if (draw->interpolation.key != 0) {
             draw->occurrence = list.occurrences_2d[draw->interpolation.key]++;
@@ -1453,7 +1499,9 @@ void RecordClear(const ClearEntry &entry) {
         (!entry.has_rect || CoversLogicalFrame(entry.rect))) {
         list.main_cleared = true;
     }
-    list.entries.push_back(entry);
+    ClearEntry bounded = entry;
+    bounded.composite = list.composite;
+    list.entries.push_back(bounded);
 }
 
 void RecordDoomedTexture(TextureHandle handle) { g.list->doomed_textures.push_back(handle); }
@@ -1463,6 +1511,26 @@ void RecordDoomedMesh(MeshHandle handle) { g.list->doomed_meshes.push_back(handl
 } // namespace detail
 
 using namespace detail;
+
+void BeginComposite(InterpKey key, const LogicalRect &bounds, const LogicalRect &visible, float padding) {
+    if (!g.list) {
+        return;
+    }
+    uint32_t occurrence = 0;
+    for (const auto &region : g.list->composites) {
+        if (region.key == key) {
+            ++occurrence;
+        }
+    }
+    g.list->composite = static_cast<int32_t>(g.list->composites.size());
+    g.list->composites.push_back({key, occurrence, bounds, visible, padding});
+}
+
+void EndComposite() {
+    if (g.list) {
+        g.list->composite = -1;
+    }
+}
 
 DisplayList::~DisplayList() {
     if (instance != g.renderer_instance || g.device == VK_NULL_HANDLE) {
@@ -1595,7 +1663,8 @@ bool RenderList(const DisplayList &list, float alpha, const RenderOptions &optio
     if (tint) {
         TraceInterpolation(list, options.previous, interpolate ? &overrides : nullptr, alpha);
     }
-    Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint, options.suppressed_2d_key);
+    Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint, options.suppressed_2d_key,
+           interpolate ? options.previous : nullptr);
     if (options.overlay != nullptr && options.overlay->instance == g.renderer_instance) {
         SetRenderTarget(kMainTarget);
         Replay(*options.overlay, false, nullptr, true, tint);
