@@ -321,6 +321,7 @@ struct Context {
     std::shared_ptr<DisplayList> list;
     TextureHandle                record_target = kMainTarget;
     InterpKey                    interp_key = 0;
+    Interp2D                     interp_2d;
     bool                         interp_no_interpolation = false;
     float                        interp_teleport_distance = INFINITY;
     bool                         interp_blend_vertices = false;

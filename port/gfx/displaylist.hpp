@@ -17,6 +17,7 @@ using Mat4 = std::array<float, 16>;
 
 // The visible edges a UI draw keeps its distance to: -1 the low edge, 1 the high edge, 0 neither.
 struct UiSide {
+    bool operator==(const UiSide &) const = default;
     int8_t x = 0;
     int8_t y = 0;
     bool   scissor = false;
@@ -30,6 +31,9 @@ struct Draw2DEntry {
     UiSide                side;
     // DisplayList::scenes: the scene a draw that tests depth (a 3D sprite) stands in, or -1.
     int32_t scene = -1;
+    Interp2D interpolation;
+    uint32_t occurrence = 0;
+    TextureHandle target = kMainTarget;
 };
 
 // The projection and camera the meshes around a 3D sprite were drawn with, and where the target's
@@ -117,6 +121,7 @@ struct MeshRecord {
 
 // What a display render of a list against one predecessor reuses from frame to frame.
 struct MatchCache {
+    std::vector<std::array<uint32_t, 2>> draws_2d; // matched entry indices, newest then previous
     uint64_t             previous_serial = 0;
     std::vector<int32_t> match;   // per record, the previous list's record, or -1
     std::vector<bool>    blend;   // per record, whether its immediate vertices moved since the match's
@@ -146,6 +151,8 @@ struct DisplayList {
     bool                                    needs_base = false;
     bool                                    main_cleared = false;
     std::unordered_map<InterpKey, uint32_t> occurrences;
+    std::unordered_map<InterpKey, uint32_t> occurrences_2d;
+    std::vector<uint32_t> tagged_2d;
     mutable detail::MatchCache              cache;
 
     DisplayList() = default;
@@ -174,6 +181,7 @@ bool InvertAffine(const Mat4 &m, Mat4 &out);
 // a at alpha 0, b at 1: translation lerped, rotation slerped, the rest of the 3x3 (scale, shear)
 // lerped in the rotation's frame. False (out = b) when either is not an invertible affine.
 bool InterpolateAffine(const Mat4 &a, const Mat4 &b, float alpha, Mat4 &out);
+bool Interpolate2D(const Draw2DEntry &before, const Draw2DEntry &after, float alpha, std::vector<Vertex2D> &out);
 // A bone that moved past teleport_distance is a cut, not motion, so it keeps after's pose.
 void BlendProg0Bones(const Prog0Constants &before, const Prog0Constants &after, float alpha, float teleport_distance,
                      Prog0Constants &out);

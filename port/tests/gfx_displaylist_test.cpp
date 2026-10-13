@@ -280,3 +280,121 @@ TEST(GfxMeshDc2, FillKeepsClearsAcrossTheWindow) {
     EXPECT_TRUE(fixture.PixelNear(64, 36, 255, 0, 0));
     gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
 }
+
+namespace {
+gfx::detail::Draw2DEntry PresentationQuad(float x, float y, uint8_t opacity) {
+    gfx::detail::Draw2DEntry draw{};
+    draw.primitive = gfx::Primitive::Quads;
+    draw.interpolation = {17, 3};
+    draw.vertices = {{x, y, 0, 0, 0, {128, 32, 16, opacity}},
+                     {x + 8, y, 0, 8, 0, {128, 32, 16, opacity}},
+                     {x + 8, y + 8, 0, 8, 8, {128, 32, 16, opacity}},
+                     {x, y + 8, 0, 0, 8, {128, 32, 16, opacity}}};
+    return draw;
+}
+}
+
+TEST(GfxDisplayList, Keyed2DInterpolatesOnlyScreenPositionAndOpacity) {
+    auto before = PresentationQuad(8, 12, 32);
+    auto after = PresentationQuad(24, 20, 96);
+    after.vertices[0].color[0] = 200;
+    std::vector<gfx::Vertex2D> result;
+    for (float alpha : {0.0f, 0.25f, 0.5f, 0.75f}) {
+        ASSERT_TRUE(gfx::detail::Interpolate2D(before, after, alpha, result));
+        for (size_t i = 0; i < result.size(); ++i) {
+            EXPECT_FLOAT_EQ(result[i].x, before.vertices[i].x + 16 * alpha);
+            EXPECT_FLOAT_EQ(result[i].y, before.vertices[i].y + 8 * alpha);
+            EXPECT_EQ(result[i].color[3], 32 + 64 * alpha);
+            EXPECT_EQ(result[i].color[0], after.vertices[i].color[0]);
+            EXPECT_EQ(result[i].u, after.vertices[i].u);
+            EXPECT_EQ(result[i].z, after.vertices[i].z);
+        }
+    }
+    EXPECT_FALSE(gfx::detail::Interpolate2D(before, after, 1.0f, result));
+    EXPECT_EQ(std::memcmp(result.data(), after.vertices.data(), result.size() * sizeof(result[0])), 0);
+}
+
+TEST(GfxDisplayList, Keyed2DRejectsReusedOrIncompatibleDraws) {
+    const auto before = PresentationQuad(8, 12, 32);
+    const auto after = PresentationQuad(24, 20, 96);
+    std::vector<gfx::detail::Draw2DEntry> incompatible;
+    auto change = [&](auto mutate) { auto draw = after; mutate(draw); incompatible.push_back(draw); };
+    change([](auto &d) { d.interpolation.key = 0; });
+    change([](auto &d) { ++d.interpolation.key; });
+    change([](auto &d) { ++d.interpolation.generation; });
+    change([](auto &d) { ++d.occurrence; });
+    change([](auto &d) { ++d.target; });
+    change([](auto &d) { d.primitive = gfx::Primitive::Triangles; });
+    change([](auto &d) { d.vertices.pop_back(); });
+    change([](auto &d) { ++d.binding.texture; });
+    change([](auto &d) { ++d.binding.palette; });
+    change([](auto &d) { d.binding.filter = gfx::Filter::Nearest; });
+    change([](auto &d) { d.binding.wrap_u = gfx::Wrap::Repeat; });
+    change([](auto &d) { d.state.blend = true; });
+    change([](auto &d) { d.state.scissor = true; });
+    change([](auto &d) { d.state.scissor_rect.x = 8; });
+    change([](auto &d) { d.state.alpha_ref = 7; });
+    change([](auto &d) { d.state.stencil_front.reference = 2; });
+    change([](auto &d) { d.side.x = 1; });
+    change([](auto &d) { d.scene = 0; });
+    change([](auto &d) { d.state.depth_test = gfx::DepthTest::Greater; });
+    change([](auto &d) { d.state.depth_write = true; });
+    change([](auto &d) { d.vertices[2].u += 1; });
+    change([](auto &d) { d.vertices[2].v += 1; });
+    change([](auto &d) { d.vertices[2].z += 1; });
+    change([](auto &d) { d.vertices[2].fog = 0; });
+    change([](auto &d) { d.vertices[2].x = INFINITY; });
+    for (size_t i = 0; i < incompatible.size(); ++i) {
+        std::vector<gfx::Vertex2D> result;
+        EXPECT_FALSE(gfx::detail::Interpolate2D(before, incompatible[i], 0.5f, result)) << i;
+        EXPECT_EQ(std::memcmp(result.data(), incompatible[i].vertices.data(), result.size() * sizeof(result[0])), 0) << i;
+    }
+}
+
+TEST(GfxMisc, Keyed2DPresentationIsOptInAndCanonicalExact) {
+    GfxFixture fixture(64, 48, 1.0f, true, 64, 48);
+    auto record = [&](float x, float y, uint8_t opacity, uint64_t generation, bool reverse, int cut) {
+        gfx::BeginRecording();
+        gfx::Clear(true, kClear.data(), true, 0);
+        if (cut == 1) gfx::CutInterpolation();
+        if (cut == 2) gfx::CutCameraInterpolation();
+        auto hud = PresentationQuad(40, 28, 128);
+        hud.vertices[0].color[1] = 128;
+        auto damage = PresentationQuad(x, y, opacity);
+        auto draw_damage = [&] {
+            gfx::Interp2DScope scope({generation ? 17u : 0u, generation});
+            gfx::Draw2D(damage.primitive, damage.vertices, damage.binding, damage.state);
+        };
+        auto draw_hud = [&] { gfx::Draw2D(hud.primitive, hud.vertices, hud.binding, hud.state); };
+        if (reverse) { draw_hud(); draw_damage(); } else { draw_damage(); draw_hud(); }
+        return gfx::EndRecording();
+    };
+    auto render = [&](const gfx::DisplayList &list, float alpha, gfx::RenderOptions options) {
+        EXPECT_TRUE(gfx::RenderList(list, alpha, options));
+        EXPECT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+        return fixture.pixels;
+    };
+    auto before = record(8, 8, 32, 3, true, 0);
+    render(*before, 1, {.canonical = true});
+    auto after = record(24, 12, 96, 3, false, 0);
+    const auto newest = render(*after, 1, {.canonical = true});
+    for (float alpha : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+        auto actual = render(*after, alpha, {.previous = before.get()});
+        auto expected = record(8 + 16 * alpha, 8 + 4 * alpha, uint8_t(32 + 64 * alpha), 0, false, 0);
+        EXPECT_EQ(actual, render(*expected, 1, {})) << alpha;
+        EXPECT_EQ(render(*after, 0.5f, {.canonical = true}), newest);
+    }
+    EXPECT_EQ(render(*after, 0, {}), newest); // new object, no predecessor
+    EXPECT_EQ(render(*after, 1, {.previous = before.get()}), newest);
+    for (int cut : {1, 2}) {
+        auto cut_list = record(24, 12, 96, 3, false, cut);
+        render(*cut_list, 1, {.canonical = true});
+        EXPECT_EQ(render(*cut_list, 0, {.previous = before.get()}), newest);
+    }
+    auto reused = record(24, 12, 96, 4, false, 0);
+    render(*reused, 1, {.canonical = true});
+    EXPECT_EQ(render(*reused, 0, {.previous = before.get()}), newest);
+    auto untagged = record(24, 12, 96, 0, false, 0);
+    render(*untagged, 1, {.canonical = true});
+    EXPECT_EQ(render(*untagged, 0, {.previous = before.get()}), newest);
+}

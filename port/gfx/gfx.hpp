@@ -252,6 +252,7 @@ enum class Wrap : uint8_t {
 };
 
 struct TextureBinding {
+    bool operator==(const TextureBinding &) const = default;
     TextureHandle texture = kNullTexture;
     TextureHandle palette = kNullTexture; // required with an Index8 texture
     Filter        filter = Filter::Linear;
@@ -265,6 +266,7 @@ struct TextureBinding {
 // GS ALPHA: ((A - B) * C >> 7) + D. A, B, D: 0 source, 1 destination, 2 zero. C: 0 source
 // alpha, 1 destination alpha, 2 fix.
 struct GsBlend {
+    bool operator==(const GsBlend &) const = default;
     uint8_t a = 0;
     uint8_t b = 1;
     uint8_t c = 0;
@@ -324,6 +326,7 @@ enum class StencilOp : uint8_t {
 
 // The test passes when (reference & compare_mask) compare (stored & compare_mask).
 struct StencilFace {
+    bool operator==(const StencilFace &) const = default;
     CompareOp compare = CompareOp::Always;
     StencilOp fail = StencilOp::Keep;
     StencilOp pass = StencilOp::Keep;
@@ -342,6 +345,7 @@ enum ColorWriteBits : uint8_t {
 };
 
 struct LogicalRect {
+    bool operator==(const LogicalRect &) const = default;
     float x;
     float y;
     float w;
@@ -354,6 +358,7 @@ float       LogicalHeight();
 LogicalRect LogicalFrame();
 
 struct DrawState {
+    bool operator==(const DrawState &) const = default;
     bool      blend = false; // GS PRIM.ABE
     GsBlend   alpha;
     DepthTest depth_test = DepthTest::Always;
@@ -642,6 +647,27 @@ void      SetInterpKey(InterpKey key, bool no_interpolation = false, float telep
                        bool blend_vertices = false);
 InterpKey CurrentInterpKey();
 bool      CurrentNoInterpolation();
+
+// Opt-in screen-space motion and opacity for the following 2D draws. Keys identify objects;
+// generation must change whenever an object is reused for a new emission. Each draw matches
+// only the same key, generation and occurrence with identical target, topology, UVs and state.
+// Glyphs, RGB and depth stay current. Untagged, new, incompatible and cut draws stay current,
+// as do all canonical renders and alpha 1. Depth-tested sprites use their existing camera path.
+struct Interp2D {
+    InterpKey key = 0;
+    uint64_t generation = 0;
+};
+void SetInterp2D(Interp2D interpolation);
+Interp2D CurrentInterp2D();
+class Interp2DScope {
+public:
+    explicit Interp2DScope(Interp2D interpolation) : previous_(CurrentInterp2D()) { SetInterp2D(interpolation); }
+    ~Interp2DScope() { SetInterp2D(previous_); }
+    Interp2DScope(const Interp2DScope &) = delete;
+    Interp2DScope &operator=(const Interp2DScope &) = delete;
+private:
+    Interp2D previous_;
+};
 
 // Not inside a frame BeginFrame opened.
 void           BeginRecording();

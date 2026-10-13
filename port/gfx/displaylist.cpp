@@ -375,6 +375,26 @@ void BuildMatches(const DisplayList &list, const DisplayList &previous) {
     cache.previous_serial = previous.serial;
     cache.match.assign(list.records.size(), -1);
     cache.blend.assign(list.records.size(), false);
+    cache.draws_2d.clear();
+    if (!list.camera_cut && !list.tagged_2d.empty()) {
+        std::unordered_map<InterpKey, std::vector<uint32_t>> before_2d;
+        for (uint32_t entry : previous.tagged_2d) {
+            before_2d[std::get<Draw2DEntry>(previous.entries[entry]).interpolation.key].push_back(entry);
+        }
+        for (uint32_t entry : list.tagged_2d) {
+            const auto &draw = std::get<Draw2DEntry>(list.entries[entry]);
+            auto found = before_2d.find(draw.interpolation.key);
+            if (found == before_2d.end()) continue;
+            for (uint32_t candidate : found->second) {
+                const auto &earlier = std::get<Draw2DEntry>(previous.entries[candidate]);
+                if (earlier.occurrence == draw.occurrence &&
+                    earlier.interpolation.generation == draw.interpolation.generation) {
+                    cache.draws_2d.push_back({entry, candidate});
+                    break;
+                }
+            }
+        }
+    }
 
     std::unordered_map<InterpKey, KeyDraws> before = DrawsByKey(previous);
     std::unordered_map<InterpKey, KeyDraws> now = DrawsByKey(list);
@@ -670,6 +690,14 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
     }
 
     MoveSprites(list, views, moved, out);
+    for (const auto &pair : cache.draws_2d) {
+        const auto &draw = std::get<Draw2DEntry>(list.entries[pair[0]]);
+        const auto &before = std::get<Draw2DEntry>(previous.entries[pair[1]]);
+        std::vector<Vertex2D> vertices;
+        if (Interpolate2D(before, draw, alpha, vertices)) {
+            out.sprites[&draw] = std::move(vertices);
+        }
+    }
 
     out.index.assign(list.records.size(), -1);
     out.constants.clear();
@@ -993,6 +1021,32 @@ bool InterpolateAffine(const Mat4 &a, const Mat4 &b, float alpha, Mat4 &out) {
     return Interpolate(a, b, alpha, out, nullptr);
 }
 
+bool Interpolate2D(const Draw2DEntry &before, const Draw2DEntry &after, float alpha, std::vector<Vertex2D> &out) {
+    out = after.vertices;
+    if (!(alpha < 1.0f) || after.interpolation.key == 0 || before.interpolation.key != after.interpolation.key ||
+        before.interpolation.generation != after.interpolation.generation || before.occurrence != after.occurrence ||
+        before.primitive != after.primitive || before.target != after.target || before.binding != after.binding ||
+        before.state != after.state || before.side != after.side || before.scene != -1 || after.scene != -1 ||
+        after.state.depth_test != DepthTest::Always || after.state.depth_write || before.vertices.size() != out.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < out.size(); i++) {
+        const auto &a = before.vertices[i];
+        const auto &b = after.vertices[i];
+        if (a.u != b.u || a.v != b.v || a.z != b.z || a.fog != b.fog ||
+            !std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(b.x) || !std::isfinite(b.y)) return false;
+    }
+    alpha = std::max(alpha, 0.0f);
+    for (size_t i = 0; i < out.size(); i++) {
+        const auto &a = before.vertices[i];
+        const auto &b = after.vertices[i];
+        out[i].x = a.x + (b.x - a.x) * alpha;
+        out[i].y = a.y + (b.y - a.y) * alpha;
+        out[i].color[3] = static_cast<uint8_t>(std::lround(a.color[3] + (float(b.color[3]) - a.color[3]) * alpha));
+    }
+    return true;
+}
+
 void BlendProg0Bones(const Prog0Constants &before, const Prog0Constants &after, float alpha, float teleport_distance,
                      Prog0Constants &out) {
     out = after;
@@ -1025,6 +1079,12 @@ void RecordEntry(Entry &&entry) {
         NoteMainDraw(list);
         if (draw->state.depth_test != DepthTest::Always) {
             draw->scene = list.scene;
+        }
+        draw->target = g.record_target;
+        draw->interpolation = g.interp_2d;
+        if (draw->interpolation.key != 0) {
+            draw->occurrence = list.occurrences_2d[draw->interpolation.key]++;
+            list.tagged_2d.push_back(static_cast<uint32_t>(list.entries.size()));
         }
     } else if (const TargetEntry *target = std::get_if<TargetEntry>(&entry)) {
         auto it = list.target_scenes.find(target->target);
@@ -1121,6 +1181,9 @@ InterpKey CurrentInterpKey() { return g.interp_key; }
 
 bool CurrentNoInterpolation() { return g.interp_no_interpolation; }
 
+void SetInterp2D(Interp2D interpolation) { g.interp_2d = interpolation; }
+Interp2D CurrentInterp2D() { return g.interp_2d; }
+
 void BeginRecording() {
     if (g.list != nullptr) {
         return;
@@ -1135,6 +1198,7 @@ void BeginRecording() {
     g.list->serial = ++g.list_serial;
     g.record_target = kMainTarget;
     g.interp_key = 0;
+    g.interp_2d = {};
     g.interp_no_interpolation = false;
     g.interp_teleport_distance = INFINITY;
     g.interp_blend_vertices = false;
