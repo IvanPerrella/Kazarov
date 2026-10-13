@@ -149,3 +149,29 @@ TEST(GfxMeshDc2, RightAnchoredHudClipsItsAnimationAtTheShiftedFrame) {
     EXPECT_TRUE(fixture.PixelNear(340, 60, 255, 0, 0));
     EXPECT_TRUE(fixture.PixelNear(1240, 60, 255, 0, 0));
 }
+
+TEST(GfxMeshDc2, FillScissorCanKeepItsLogicalExtent) {
+    GfxFixture fixture(1280, 720, 1.0f, true, kLogicalWidth, kLogicalHeight);
+    gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
+    for (bool anchored : {false, true}) {
+        SCOPED_TRACE(anchored);
+        for (bool extend : {true, false}) {
+            SCOPED_TRACE(extend);
+            fixture.Frame(kBlue, [&] {
+                // With a fixed scissor, anchored geometry still clips against the original frame.
+                gfx::UiAnchorScope anchor(anchored ? gfx::UiAnchor::Side(-1, -1) : gfx::UiAnchor{});
+                gfx::DrawState state;
+                state.depth_test = gfx::DepthTest::Always;
+                state.depth_write = false;
+                state.scissor = true;
+                state.scissor_rect = {0, 0, 512, 480};
+                state.extend_scissor = extend;
+                gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 512, 480, kRed), {}, state);
+            });
+            EXPECT_TRUE(fixture.PixelNear(60, 360, extend ? 255 : 0, 0, extend ? 0 : 255));
+            EXPECT_TRUE(fixture.PixelNear(640, 360, 255, 0, 0));
+            EXPECT_TRUE(fixture.PixelNear(1220, 360, extend && !anchored ? 255 : 0, 0,
+                                         extend && !anchored ? 0 : 255));
+        }
+    }
+}
