@@ -380,9 +380,13 @@ renders one.
   times (a town's parts and tiles share their frames), and culling changes which places are drawn,
   so occurrences do not line up from tick to tick. Such a key, from the tick it is first seen so
   until the next `CutInterpolation()`, matches by place instead: each draw with the previous draw
-  whose model is identical, and what is left with the nearest previous model that nothing stood
-  still at, no further than 25 units away. A place that comes into view therefore starts where it
-  is instead of sliding in from a neighbour's.
+  whose model is identical, and what is left with the nearest unclaimed previous model, no further
+  than 25 units away. Each face also needs the same mesh, index range and texture binding; an
+  immediate face needs the same index topology and vertex count. Each predecessor is claimed only
+  once, so culling or sorting faces does not borrow another surface's pose. All keyed draws cut
+  pose matching when their texture or palette binding changes. Materials and other draw state
+  remain newest. A place that comes into view starts where it is instead of sliding in from a
+  neighbour's.
 - **Faces that depend on the view.** A display render replays a draw under a camera the tick did
   not have, so anything the recorder decided from the tick's eye can be wrong in it. What turns
   towards or away from the eye must be left to `DrawState::cull`: the shadow volumes are recorded

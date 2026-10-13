@@ -336,6 +336,26 @@ float Moved(const Mat4 &before, const Mat4 &after) {
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+// Placement identifies an instance, but its faces still need the same surface. In particular,
+// borrowing a different face's bone palette or vertex rewrite is not a valid interpolation.
+bool SameSurface(const MeshEntry &a, const MeshEntry &b) {
+    if (a.binding.texture != b.binding.texture || a.binding.palette != b.binding.palette ||
+        a.binding.filter != b.binding.filter || a.binding.wrap_u != b.binding.wrap_u ||
+        a.binding.wrap_v != b.binding.wrap_v || a.binding.ignore_alpha != b.binding.ignore_alpha ||
+        a.first_index != b.first_index || a.index_count != b.index_count ||
+        (a.prog0 >= 0) != (b.prog0 >= 0)) {
+        return false;
+    }
+    return true;
+}
+
+bool SameInstanceFace(const DisplayList &list, const DisplayList &previous, int32_t index, int32_t candidate) {
+    const auto &a = std::get<MeshEntry>(list.entries[list.records[index].entry]);
+    const auto &b = std::get<MeshEntry>(previous.entries[previous.records[candidate].entry]);
+    return SameSurface(a, b) && a.mesh == b.mesh &&
+           (a.mesh != kNullMesh || (a.indices == b.indices && a.vertices.size() == b.vertices.size()));
+}
+
 // Each place with the previous draw that stood exactly there, then what is left with the nearest
 // previous place nothing stood still at, within a step.
 void MatchInstanced(const DisplayList &list, const DisplayList &previous, const KeyDraws &draws,
@@ -347,7 +367,8 @@ void MatchInstanced(const DisplayList &list, const DisplayList &previous, const 
             continue;
         }
         for (size_t i = 0; i < before.records.size(); i++) {
-            if (previous.records[before.records[i]].model == record.model) {
+            if (!stood[i] && previous.records[before.records[i]].model == record.model &&
+                SameInstanceFace(list, previous, index, before.records[i])) {
                 stood[i] = true;
                 match[index] = before.records[i];
                 break;
@@ -362,10 +383,14 @@ void MatchInstanced(const DisplayList &list, const DisplayList &previous, const 
         float nearest = std::min(kInstanceStep, record.teleport_distance);
         for (size_t i = 0; i < before.records.size(); i++) {
             float moved = Moved(previous.records[before.records[i]].model, record.model);
-            if (!stood[i] && moved <= nearest) {
+            if (!stood[i] && moved <= nearest && SameInstanceFace(list, previous, index, before.records[i])) {
                 nearest = moved;
                 match[index] = before.records[i];
             }
+        }
+        if (match[index] >= 0) {
+            auto found = std::find(before.records.begin(), before.records.end(), match[index]);
+            stood[static_cast<size_t>(found - before.records.begin())] = true;
         }
     }
 }
@@ -425,7 +450,9 @@ void BuildMatches(const DisplayList &list, const DisplayList &previous) {
                 if (earlier.occurrence != record.occurrence) {
                     continue;
                 }
-                if (!(Moved(earlier.model, record.model) > record.teleport_distance)) {
+                if (!(Moved(earlier.model, record.model) > record.teleport_distance) &&
+                    SameSurface(std::get<MeshEntry>(list.entries[record.entry]),
+                                std::get<MeshEntry>(previous.entries[earlier.entry]))) {
                     cache.match[index] = candidate;
                     cache.blend[index] =
                         record.blend_vertices && earlier.blend_vertices &&

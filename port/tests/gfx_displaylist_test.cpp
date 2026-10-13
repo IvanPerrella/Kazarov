@@ -398,3 +398,97 @@ TEST(GfxMisc, Keyed2DPresentationIsOptInAndCanonicalExact) {
     render(*untagged, 1, {.canonical = true});
     EXPECT_EQ(render(*untagged, 0, {.previous = before.get()}), newest);
 }
+
+// One shared model has several faces per placement; culling and sorting can reorder either.
+TEST(GfxMeshDc2, InstancedFacesKeepMeshAndTextureIdentity) {
+    GfxFixture fixture(kWidth, kHeight);
+    const std::vector<gfx::Vertex3D> vertices = {
+        Vert({-0.1f, -0.1f, 0.5f}, {0, 0, 1}), Vert({0.1f, -0.1f, 0.5f}, {0, 0, 1}),
+        Vert({0, 0.1f, 0.5f}, {0, 0, 1})};
+    gfx::MeshHandle mesh_a = gfx::CreateMesh(vertices, kTriangle);
+    gfx::MeshHandle mesh_b = gfx::CreateMesh(vertices, kTriangle);
+    ASSERT_NE(mesh_a, gfx::kNullMesh);
+    ASSERT_NE(mesh_b, gfx::kNullMesh);
+    gfx::TextureHandle texture_a = gfx::CreateTexture({1, 1});
+    gfx::TextureHandle texture_b = gfx::CreateTexture({1, 1});
+    const uint8_t white[4] = {128, 128, 128, 128};
+    ASSERT_TRUE(gfx::UpdateTexture(texture_a, 0, 0, 0, 1, 1, white));
+    ASSERT_TRUE(gfx::UpdateTexture(texture_b, 0, 0, 0, 1, 1, white));
+    auto record = [&](bool reordered) {
+        gfx::BeginRecording();
+        gfx::Clear(true, kClear.data(), true, 0.0f);
+        gfx::SetInterpKey(77);
+        auto draw = [&](float x, gfx::MeshHandle mesh, gfx::TextureHandle texture) {
+            auto transform = gfx::IdentityMeshTransform();
+            transform.model[12] = x;
+            gfx::MeshConstants constants = {};
+            std::memcpy(constants.mvp, transform.model, sizeof constants.mvp);
+            constants.diffuse[0] = constants.diffuse[3] = 1.0f;
+            gfx::TextureBinding binding;
+            binding.texture = texture;
+            gfx::DrawMesh(mesh, 0, 3, constants, binding, {}, &transform);
+        };
+        if (!reordered) {
+            draw(-0.4f, mesh_a, texture_a);
+            draw(-0.4f, mesh_b, texture_a);
+            draw(-0.4f, mesh_a, texture_b);
+            draw(0.4f, mesh_a, texture_a);
+            draw(0.4f, mesh_b, texture_a);
+            draw(0.4f, mesh_a, texture_b);
+        } else {
+            // Moving right place comes first; the stationary left place lost one face to culling.
+            draw(0.5f, mesh_a, texture_b);
+            draw(0.5f, mesh_b, texture_a);
+            draw(0.5f, mesh_a, texture_a);
+            draw(-0.4f, mesh_b, texture_a);
+        }
+        return gfx::EndRecording();
+    };
+    auto before = record(false);
+    auto after = record(true);
+    ASSERT_TRUE(gfx::RenderList(*after, 1, {.canonical = true}));
+    ASSERT_TRUE(gfx::RenderList(*after, 0.5f, {.previous = before.get(), .present = true}));
+    ASSERT_EQ(after->cache.match.size(), 4u);
+    EXPECT_EQ(after->cache.match[0], 5);
+    EXPECT_EQ(after->cache.match[1], 4);
+    EXPECT_EQ(after->cache.match[2], 3);
+    EXPECT_EQ(after->cache.match[3], 1);
+    gfx::DestroyMesh(mesh_a);
+    gfx::DestroyMesh(mesh_b);
+    gfx::DestroyTexture(texture_a);
+    gfx::DestroyTexture(texture_b);
+}
+
+TEST(GfxMeshDc2, TextureChangeCutsPoseMatching) {
+    GfxFixture fixture(kWidth, kHeight);
+    const std::vector<gfx::Vertex3D> vertices = {
+        Vert({-0.1f, -0.1f, 0.5f}, {0, 0, 1}), Vert({0.1f, -0.1f, 0.5f}, {0, 0, 1}),
+        Vert({0, 0.1f, 0.5f}, {0, 0, 1})};
+    auto texture_a = gfx::CreateTexture({1, 1});
+    auto texture_b = gfx::CreateTexture({1, 1});
+    const uint8_t white[4] = {128, 128, 128, 128};
+    ASSERT_TRUE(gfx::UpdateTexture(texture_a, 0, 0, 0, 1, 1, white));
+    ASSERT_TRUE(gfx::UpdateTexture(texture_b, 0, 0, 0, 1, 1, white));
+    auto record = [&](gfx::TextureBinding binding) {
+        gfx::BeginRecording();
+        gfx::Clear(true, kClear.data(), true, 0);
+        gfx::SetInterpKey(88);
+        auto transform = gfx::IdentityMeshTransform();
+        gfx::MeshConstants constants = {};
+        Identity(constants.mvp);
+        gfx::DrawMeshImmediate(vertices, kTriangle, constants, binding, {}, &transform);
+        return gfx::EndRecording();
+    };
+    for (bool palette : {false, true}) {
+        gfx::TextureBinding a, b;
+        a.texture = b.texture = texture_a;
+        if (palette) { a.palette = texture_a; b.palette = texture_b; }
+        else { b.texture = texture_b; }
+        auto before = record(a), after = record(b);
+        ASSERT_TRUE(gfx::RenderList(*after, 1, {.canonical = true}));
+        ASSERT_TRUE(gfx::RenderList(*after, 0.5f, {.previous = before.get(), .present = true}));
+        EXPECT_EQ(after->cache.match[0], -1);
+    }
+    gfx::DestroyTexture(texture_a);
+    gfx::DestroyTexture(texture_b);
+}
