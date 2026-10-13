@@ -18,6 +18,26 @@ namespace {
 
 constexpr Mat4 kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
+// Validate bindings while their recording still owns them, before a later replay can outlive them.
+bool CanRecordBinding(const TextureBinding &binding) {
+    if (binding.texture == kNullTexture || binding.texture == kPreviousFrame) {
+        return true;
+    }
+    const Texture *texture = LookupTexture(binding.texture);
+    if (texture == nullptr) {
+        Error("a recorded draw names unavailable texture %#x", binding.texture);
+        return false;
+    }
+    if (texture->desc.format == TextureFormat::Index8) {
+        const Texture *palette = LookupTexture(binding.palette);
+        if (palette == nullptr || palette->desc.format != TextureFormat::Rgba8) {
+            Error("a recorded indexed draw names unavailable palette %#x", binding.palette);
+            return false;
+        }
+    }
+    return true;
+}
+
 struct Quat {
     float x, y, z, w;
 };
@@ -1297,6 +1317,9 @@ bool RecordingCalls() { return g.list != nullptr; }
 void RecordEntry(Entry &&entry) {
     DisplayList &list = *g.list;
     if (Draw2DEntry *draw = std::get_if<Draw2DEntry>(&entry)) {
+        if (!CanRecordBinding(draw->binding)) {
+            return;
+        }
         NoteMainDraw(list);
         if (draw->state.depth_test != DepthTest::Always && !draw->state.screen_space) {
             draw->scene = list.scene;
@@ -1315,6 +1338,9 @@ void RecordEntry(Entry &&entry) {
 }
 
 void RecordMesh(MeshEntry &&entry, const MeshTransform *transform, const Prog0Constants *prog0) {
+    if (!CanRecordBinding(entry.binding)) {
+        return;
+    }
     DisplayList &list = *g.list;
     NoteMainDraw(list);
     MeshRecord record;

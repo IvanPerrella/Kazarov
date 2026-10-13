@@ -183,6 +183,47 @@ TEST(GfxMeshDc2, DoomedResourcesCannotEscapeTheirRecording) {
     EXPECT_TRUE(gfx::RenderList(*other, 1.0f, canonical));
 }
 
+TEST(GfxMeshDc2, DoomedTextureBindingsCannotEscapeTheirRecording) {
+    GfxFixture fixture(kWidth, kHeight);
+    const auto texture = gfx::CreateTexture(gfx::TextureDesc{2, 2});
+    const auto indexed = gfx::CreateTexture(gfx::TextureDesc{2, 2, gfx::TextureFormat::Index8});
+    const auto palette = gfx::CreatePalette();
+    const auto mesh = gfx::CreateMesh(RedTriangle(), kTriangle);
+    ASSERT_NE(texture, gfx::kNullTexture);
+    ASSERT_NE(indexed, gfx::kNullTexture);
+    ASSERT_NE(palette, gfx::kNullTexture);
+    ASSERT_NE(mesh, gfx::kNullMesh);
+    auto draws = [&] {
+        for (const auto binding : {
+                 gfx::TextureBinding{.texture = texture},
+                 gfx::TextureBinding{.texture = indexed, .palette = palette}
+        }) {
+            gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 32, 32, {128, 128, 128, 255}), binding, {});
+            gfx::DrawMesh(mesh, 0, 3, PlainConstants(), binding, {});
+            gfx::DrawMeshImmediate(RedTriangle(), kTriangle, PlainConstants(), binding, {});
+        }
+    };
+    gfx::BeginRecording();
+    gfx::DestroyTexture(texture);
+    gfx::DestroyTexture(palette);
+    draws();
+    auto owner = gfx::EndRecording();
+    ASSERT_EQ(gfx::ListStats(*owner).draws_2d, 2u);
+    ASSERT_EQ(gfx::ListStats(*owner).mesh_draws, 4u);
+
+    gfx::BeginRecording();
+    draws();
+    auto other = gfx::EndRecording();
+    EXPECT_EQ(gfx::ListStats(*other).draws_2d, 0u);
+    EXPECT_EQ(gfx::ListStats(*other).mesh_draws, 0u);
+    owner.reset();
+    gfx::RenderOptions canonical;
+    canonical.canonical = true;
+    EXPECT_TRUE(gfx::RenderList(*other, 1.0f, canonical));
+    gfx::DestroyTexture(indexed);
+    gfx::DestroyMesh(mesh);
+}
+
 TEST(GfxMeshDc2, SecondDestroyOfDoomedHandleIsHarmless) {
     GfxFixture         fixture(kWidth, kHeight);
     gfx::TextureHandle texture = gfx::CreateTexture(gfx::TextureDesc{4, 4});
