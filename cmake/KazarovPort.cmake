@@ -1,4 +1,4 @@
-# The shared PC port in <kazarov>/port: the gfx, audio and platform libraries, the sce sources a
+# The shared PC port in <kazarov>/src/cpp: the gfx, audio and platform libraries, the sce sources a
 # consumer compiles, and the shared GoogleTest cases.
 #
 # Host code never sees a game header. sce sources are compiled by the consumer with its own
@@ -7,7 +7,8 @@
 
 include_guard(GLOBAL)
 
-get_filename_component(KZ_PORT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../port" ABSOLUTE)
+get_filename_component(KZ_PORT_INCLUDE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../include" ABSOLUTE)
+get_filename_component(KZ_PORT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../src/cpp" ABSOLUTE)
 
 # Takes the file from the first KZ_PORT_VENDOR_DIRS entry that holds it. Otherwise it is fetched at its
 # pinned hash, which is what a build without a vendor copy does; the Flatpak build has no network.
@@ -26,7 +27,7 @@ endfunction()
 function(_kz_port_headers_target)
     if(NOT TARGET kz_port_headers)
         add_library(kz_port_headers INTERFACE)
-        target_include_directories(kz_port_headers INTERFACE ${KZ_PORT_ROOT})
+        target_include_directories(kz_port_headers INTERFACE ${KZ_PORT_INCLUDE_ROOT})
     endif()
 endfunction()
 
@@ -92,10 +93,14 @@ function(kz_port_host_library target)
 
     file(GLOB host_sources CONFIGURE_DEPENDS
         ${KZ_PORT_ROOT}/gfx/*.cpp ${KZ_PORT_ROOT}/audio/*.cpp ${KZ_PORT_ROOT}/platform/*.cpp)
+    option(KZ_PORT_BUILD_TIM2 "Build the legacy TIM2 decoder into the host library" ON)
+    if(NOT KZ_PORT_BUILD_TIM2)
+        list(FILTER host_sources EXCLUDE REGEX "/gfx/tim2\\.cpp$")
+    endif()
 
     _kz_port_headers_target()
     add_library(${target} OBJECT ${host_sources} ${shader_headers})
-    target_include_directories(${target} PRIVATE ${KZ_PORT_ROOT} ${generated_dir} ${vendor_dirs})
+    target_include_directories(${target} PRIVATE ${KZ_PORT_INCLUDE_ROOT} ${generated_dir} ${vendor_dirs})
     target_link_libraries(${target} PRIVATE SDL3::SDL3 Vulkan::Vulkan nlohmann_json::nlohmann_json)
     # The game's replacement units include "gfx/gfx.hpp", so the include root is part of this library's interface.
     target_link_libraries(${target} PUBLIC kz_port_headers)
@@ -125,6 +130,6 @@ function(kz_port_tests target)
     _kz_port_headers_target()
     file(GLOB tests CONFIGURE_DEPENDS ${KZ_PORT_ROOT}/tests/*_test.cpp)
     target_sources(${target} PRIVATE ${tests})
-    target_include_directories(${target} PRIVATE ${KZ_PORT_ROOT}/tests)
+    target_include_directories(${target} PRIVATE ${KZ_PORT_INCLUDE_ROOT}/tests)
     target_link_libraries(${target} PRIVATE kz_port_headers)
 endfunction()

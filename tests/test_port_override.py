@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / 'scripts' / 'port_override.py'
+SCRIPT = Path(__file__).resolve().parent.parent / 'scripts' / 'build' / 'port_override.py'
 MARKER = 'g_retail_marker'
 
 

@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-BIN = Path(__file__).resolve().parent.parent / 'bin'
-KZ_FFMPEG = Path(__file__).resolve().parent.parent / 'image' / 'kz-ffmpeg'
+BIN = Path(__file__).resolve().parent.parent / 'scripts' / 'build'
+KZ_FFMPEG = Path(__file__).resolve().parent.parent / 'tools' / 'ffmpeg' / 'kz-ffmpeg'
 KZ_FFMPEG_LAUNCHER = BIN / 'kz-ffmpeg'
 LICENSE_LINE = 'License: LGPL version 2.1 or later'
 GPL_LICENSE_LINE = 'License: GPL version 2 or later'

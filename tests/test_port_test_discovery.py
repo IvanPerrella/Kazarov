@@ -26,5 +26,5 @@ def test_consumer_discovers_all_shared_regressions(tmp_path):
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     listed = {Path(line).resolve() for line in (build / 'sources.txt').read_text().splitlines()}
-    missing = {path.resolve() for path in (root / 'port/tests').rglob('*_test.cpp')} - listed
+    missing = {path.resolve() for path in (root / 'src/cpp/tests').rglob('*_test.cpp')} - listed
     assert not missing, f'shared regressions absent from kz_port_tests: {sorted(missing)}'
