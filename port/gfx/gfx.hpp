@@ -384,6 +384,8 @@ struct DrawState {
     // ColorWriteBits. Without VK_EXT_extended_dynamic_state3's dynamic mask only none or all of
     // them are honoured; any other non-zero mask writes every channel.
     uint8_t color_write_mask = kWriteRgba;
+    // A depth-tested screen effect samples the display image; its corners stay in screen space.
+    bool screen_space = false;
 };
 
 // ---- Drawing ---------------------------------------------------------------------------------

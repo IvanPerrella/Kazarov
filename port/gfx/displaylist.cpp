@@ -991,14 +991,14 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
                          r.model[12], r.model[13], r.model[14]);
         } else if (const Draw2DEntry *sprite = std::get_if<Draw2DEntry>(&list.entries[i])) {
             bool carried = overrides && overrides->sprites.contains(sprite);
-            uint32_t status = carried ? 4 : sprite->state.depth_test == DepthTest::Always ? 3 : 2;
+            uint32_t status = carried ? 4 : (sprite->state.depth_test == DepthTest::Always || sprite->state.screen_space) ? 3 : 2;
             float x0 = INFINITY, y0 = INFINITY, x1 = -INFINITY, y1 = -INFINITY;
             for (const auto &v : sprite->vertices) {
                 x0 = std::min(x0, v.x); y0 = std::min(y0, v.y);
                 x1 = std::max(x1, v.x); y1 = std::max(y1, v.y);
             }
             std::fprintf(file, "%zu,2d,%u,%s,0,0,-1,%d,0,%u,%u,%d,%d,%d,0,0,0,0,0,0,0,0,%.6g,%.6g,%.6g,%.6g\n",
-                         i, status, carried ? "reprojected_corners" : status == 3 ? "flat_2d" :
+                         i, status, carried ? "reprojected_corners" : status == 3 ? (sprite->state.screen_space ? "screen_effect" : "flat_2d") :
                          sprite->scene < 0 ? "missing_sprite_scene" : "newest_sprite_corners",
                          sprite->scene, sprite->binding.texture, sprite->binding.palette,
                          sprite->state.blend, static_cast<int>(sprite->state.depth_test), sprite->state.fog,
@@ -1030,7 +1030,7 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                     }
                     if (tint && !canonical) {
                         g.interpolation_tint = overrides && overrides->sprites.contains(&e) ? 4 :
-                                               e.state.depth_test == DepthTest::Always ? 3 : 2;
+                                               (e.state.depth_test == DepthTest::Always || e.state.screen_space) ? 3 : 2;
                     }
                     Draw2DSided(e.primitive, *vertices, GrabbedBinding(e.binding, canonical), e.state, e.side);
                 } else if constexpr (std::is_same_v<T, MeshEntry>) {
@@ -1212,7 +1212,7 @@ void RecordEntry(Entry &&entry) {
     DisplayList &list = *g.list;
     if (Draw2DEntry *draw = std::get_if<Draw2DEntry>(&entry)) {
         NoteMainDraw(list);
-        if (draw->state.depth_test != DepthTest::Always) {
+        if (draw->state.depth_test != DepthTest::Always && !draw->state.screen_space) {
             draw->scene = list.scene;
         }
         draw->target = g.record_target;
