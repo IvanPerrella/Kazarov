@@ -117,9 +117,10 @@ const InputMouseLook &InputGetMouseLook();
 // Non-draining display look: cumulative latched radians plus pending live motion.
 // An epoch change drops motion after focus loss, shutdown or input-owner changes.
 struct InputMouseLookTotal {
-    double yaw = 0, pitch = 0;
+    double        yaw = 0, pitch = 0;
     std::uint64_t epoch = 0;
 };
+
 InputMouseLookTotal InputPeekMouseLookTotal();
 
 // The game read pad 0's left stick (CGamePad::GetLX/GetLY, port/src/gamepad.cpp).

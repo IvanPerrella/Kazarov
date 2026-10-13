@@ -186,6 +186,7 @@ bool MouseHandleEvent(const SDL_Event &event) {
 bool MouseCaptured() { return g_captured; }
 
 bool MouseInputLive() { return Live(); }
+
 bool MouseOwnsCursor() { return g_captured || (g_pointer_cursor && Live()); }
 
 std::uint32_t MouseButtons() { return g_buttons; }

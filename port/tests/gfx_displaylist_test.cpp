@@ -1232,7 +1232,7 @@ TEST(GfxMisc, HostReplacementSuppressesOnlyTheTaggedMainDisplayGroup) {
     EXPECT_EQ(pixel(8, 32, 0), 0);    // original hand is hidden
     EXPECT_EQ(pixel(48, 32, 2), 255); // unclaimed selection highlight is retained
     std::vector<uint8_t> offscreen;
-    uint32_t tw = 0, th = 0;
+    uint32_t             tw = 0, th = 0;
     ASSERT_TRUE(gfx::ReadbackTexture(target, offscreen, tw, th));
     EXPECT_EQ(offscreen[(32 * tw + 8) * 4], 255);
     EXPECT_EQ(offscreen[(32 * tw + 8) * 4 + 2], 0);

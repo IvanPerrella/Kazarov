@@ -60,7 +60,7 @@ TEST(KeyboardLook, DisplayTotalPeeksLiveMotionBeforeLatchWithoutDoubleApplying) 
     InputResetBindings();
     MouseConfigure(false, {});
     const auto before = InputPeekMouseLookTotal();
-    SDL_Event motion{};
+    SDL_Event  motion{};
     motion.type = SDL_EVENT_MOUSE_MOTION;
     motion.motion.xrel = 12;
     motion.motion.yrel = 7;
@@ -80,7 +80,7 @@ TEST(KeyboardLook, LookOnLeftKeepsRightStickWhileMovementOrUnrelatedKeysAreHeld)
     InputSetLookOnLeftStick(true);
     for (int key : {SDL_SCANCODE_W, SDL_SCANCODE_SPACE}) {
         InputPadState pad{.connected = true, .right_x = 220, .right_y = 35};
-        auto mixed = InputApplyKeyboardMouse(pad, {.keys = {key}});
+        auto          mixed = InputApplyKeyboardMouse(pad, {.keys = {key}});
         InputSetOverride(0, &mixed);
         EXPECT_EQ(InputGetLookPad(0).left_x, 220);
         EXPECT_EQ(InputGetLookPad(0).left_y, 35);

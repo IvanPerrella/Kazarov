@@ -179,7 +179,7 @@ std::array<bool, SDL_SCANCODE_COUNT>                     g_keys{};
 float                                                    g_mouse_dx = 0.0f;
 float                                                    g_mouse_dy = 0.0f;
 InputMouseLook                                           g_mouse_look;
-InputMouseLookTotal g_mouse_look_total;
+InputMouseLookTotal                                      g_mouse_look_total;
 bool                                                     g_mouse_zoom = false;
 float                                                    g_scripted_wheel = 0.0f;
 std::int64_t                                             g_last_latch_tick = -1;
@@ -930,7 +930,9 @@ void InputLatchPad(int pad) {
 }
 
 void InputSetMenuMouse(bool on) {
-    if (on != g_menu_mouse) g_mouse_look_total = {0, 0, g_mouse_look_total.epoch + 1};
+    if (on != g_menu_mouse) {
+        g_mouse_look_total = {0, 0, g_mouse_look_total.epoch + 1};
+    }
     g_menu_mouse = on;
     g_menu_dx = 0.0f;
     g_menu_dy = 0.0f;
