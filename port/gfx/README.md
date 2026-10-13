@@ -349,7 +349,7 @@ renders one.
   constants bit for bit. Not interpolated: draws without a transform or without a match, those tagged
   `no_interpolation` or whose model moved further than the tag's teleport distance, every draw of a
   list after `CutInterpolation()`, the views after `CutCameraInterpolation()`, non-affine or
-  singular matrices, and 2D that tests no depth: they replay as recorded. 2D that tests depth (a
+  singular matrices, and untagged 2D that tests no depth: they replay as recorded. 2D that tests depth (a
   3D sprite: a fire, its glow) is recorded as the screen corners the tick's camera gave it, so it
   is carried to the interpolated camera instead: each corner goes back through the projection and
   view of the last mesh drawn on its target to where it stood in the world, and is seen again from
@@ -385,6 +385,14 @@ renders one.
   object's origin. This camera re-base also applies to transformed Prog0 draws with no matching
   predecessor: newly visible faces keep their newest bones, while their clip planes and lighting
   eye follow the same camera as their MVP.
+- **Opt-in 2D interpolation.** `SetInterp2D({key, generation})` tags subsequent screen-space draws;
+  `Interp2DScope` restores the previous tag on scope exit. Zero keys leave draws unchanged. Give each
+  object a stable key and change its generation when reusing that identity for another emission.
+  Display renders match key, generation and occurrence within the tick, with identical target,
+  topology, binding, draw state, UVs, depth and fog. Only finite XY positions and opacity interpolate;
+  RGB stays current. Canonical renders, alpha 1, cuts and unmatched/incompatible draws keep current
+  values. Depth-tested sprites keep their camera-based path. This is an optional consumer API;
+  recording a list does not opt its UI into interpolation.
 - **Instanced keys.** A key drawn with more than one model in a tick is one object placed several
   times (a town's parts and tiles share their frames), and culling changes which places are drawn,
   so occurrences do not line up from tick to tick. Such a key, from the tick it is first seen so
