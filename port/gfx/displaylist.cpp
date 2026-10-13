@@ -961,8 +961,10 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
                  static_cast<unsigned long long>(list.serial),
                  static_cast<unsigned long long>(previous ? previous->serial : 0),
                  list.cameras.size(), list.cut, list.camera_cut);
-    std::fprintf(file, "entry,kind,status,reason,key,occurrence,match,camera,mesh,texture,palette,blend,depth,fog,fog_changed,material_changed,projection_changed,local_changed,prog0_flags,x,y,z,x0,y0,x1,y1\n");
+    std::fprintf(file, "entry,kind,status,reason,key,occurrence,match,camera,mesh,texture,palette,blend,depth,fog,fog_changed,material_changed,projection_changed,local_changed,prog0_flags,x,y,z,x0,y0,x1,y1,target,tint_applied\n");
+    TextureHandle target = kMainTarget;
     for (size_t i = 0; i < list.entries.size(); ++i) {
+        if (const auto *change = std::get_if<TargetEntry>(&list.entries[i])) target = change->target;
         if (const MeshEntry *mesh = std::get_if<MeshEntry>(&list.entries[i])) {
             const MeshRecord &r = list.records[mesh->record];
             int32_t match = overrides ? list.cache.match[mesh->record] : -1;
@@ -985,14 +987,14 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
                     material = std::memcmp(a.constants.diffuse, mesh->constants.diffuse, sizeof a.constants.diffuse) != 0;
                 }
             }
-            std::fprintf(file, "%zu,%s,%u,%s,%llu,%u,%d,%u,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%u,%.6g,%.6g,%.6g,,,,\n",
+            std::fprintf(file, "%zu,%s,%u,%s,%llu,%u,%d,%u,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%u,%.6g,%.6g,%.6g,,,,,%u,%d\n",
                          i, mesh->prog0 >= 0 ? "prog0" : "mesh", MeshTint(*mesh, list, overrides),
                          MeshReason(*mesh, list, previous, overrides), static_cast<unsigned long long>(r.key),
                          r.occurrence, match, r.camera, mesh->mesh, mesh->binding.texture, mesh->binding.palette,
                          mesh->state.blend, static_cast<int>(mesh->state.depth_test), mesh->state.fog,
                          fog, material, projection, local,
                          mesh->prog0 >= 0 ? list.prog0_blocks[mesh->prog0].flags : 0,
-                         r.model[12], r.model[13], r.model[14]);
+                         r.model[12], r.model[13], r.model[14], target, target == kMainTarget);
         } else if (const Draw2DEntry *sprite = std::get_if<Draw2DEntry>(&list.entries[i])) {
             bool carried = overrides && overrides->sprites.contains(sprite);
             uint32_t status = carried ? 4 : (sprite->state.depth_test == DepthTest::Always || sprite->state.screen_space) ? 3 : 2;
@@ -1001,12 +1003,12 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
                 x0 = std::min(x0, v.x); y0 = std::min(y0, v.y);
                 x1 = std::max(x1, v.x); y1 = std::max(y1, v.y);
             }
-            std::fprintf(file, "%zu,2d,%u,%s,0,0,-1,%d,0,%u,%u,%d,%d,%d,0,0,0,0,0,0,0,0,%.6g,%.6g,%.6g,%.6g\n",
+            std::fprintf(file, "%zu,2d,%u,%s,0,0,-1,%d,0,%u,%u,%d,%d,%d,0,0,0,0,0,0,0,0,%.6g,%.6g,%.6g,%.6g,%u,%d\n",
                          i, status, carried ? "reprojected_corners" : status == 3 ? (sprite->state.screen_space ? "screen_effect" : "flat_2d") :
                          sprite->scene < 0 ? "missing_sprite_scene" : "newest_sprite_corners",
                          sprite->scene, sprite->binding.texture, sprite->binding.palette,
                          sprite->state.blend, static_cast<int>(sprite->state.depth_test), sprite->state.fog,
-                         x0, y0, x1, y1);
+                         x0, y0, x1, y1, target, target == kMainTarget);
         }
     }
     std::fclose(file);
@@ -1032,13 +1034,14 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                             vertices = &it->second;
                         }
                     }
-                    if (tint && !canonical) {
+                    if (tint && !canonical && CurrentRenderTarget() == kMainTarget) {
                         g.interpolation_tint = overrides && overrides->sprites.contains(&e) ? 4 :
                                                (e.state.depth_test == DepthTest::Always || e.state.screen_space) ? 3 : 2;
                     }
                     Draw2DSided(e.primitive, *vertices, GrabbedBinding(e.binding, canonical), e.state, e.side);
                 } else if constexpr (std::is_same_v<T, MeshEntry>) {
-                    if (tint && !canonical) g.interpolation_tint = MeshTint(e, list, overrides);
+                    if (tint && !canonical && CurrentRenderTarget() == kMainTarget)
+                        g.interpolation_tint = MeshTint(e, list, overrides);
                     const MeshConstants *constants = &e.constants;
                     if (overrides != nullptr && overrides->index[e.record] >= 0) {
                         constants = &overrides->constants[overrides->index[e.record]];

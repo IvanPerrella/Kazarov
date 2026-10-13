@@ -608,4 +608,45 @@ TEST(GfxMeshDc2, InterpolationTintClassifiesGeometryAndPreservesCanonical) {
     gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 640, 480, {255, 255, 255, 128}), {}, {});
     auto ui = gfx::EndRecording();
     check(ui, 71, 92, 255);
+    gfx::BeginRecording();
+    gfx::Clear(true, kClear.data(), true, 0);
+    gfx::SetInterpKey(71);
+    auto transform = gfx::IdentityMeshTransform();
+    transform.view[12] = 0.1f;
+    gfx::MeshConstants constants = {};
+    std::memcpy(constants.mvp, transform.view, sizeof constants.mvp);
+    gfx::DrawMeshImmediate(vertices, kTriangle, constants, {}, {}, &transform);
+    gfx::DrawState sprite_state;
+    sprite_state.depth_test = gfx::DepthTest::GEqual;
+    gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 640, 480, {255, 255, 255, 128}), {}, sprite_state);
+    auto billboard = gfx::EndRecording();
+    check(billboard, 255, 255, 71);
+
+}
+
+// Display diagnostics must not colour reusable targets that a later canonical tick can sample.
+TEST(GfxMeshDc2, InterpolationTintPreservesReusableTargetPixels) {
+    GfxFixture fixture(kWidth, kHeight);
+    const auto target = gfx::CreateRenderTarget(640, 480, true, true);
+    ASSERT_NE(target, gfx::kNullTexture);
+    gfx::BeginRecording();
+    gfx::SetRenderTarget(target);
+    gfx::Clear(true, kClear.data(), false, 0);
+    gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 640, 480, {255, 255, 255, 128}), {}, {});
+    gfx::SetRenderTarget(gfx::kMainTarget);
+    gfx::Clear(true, kClear.data(), true, 0);
+    gfx::TextureBinding binding;
+    binding.texture = target;
+    gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 640, 480, {128, 128, 128, 128}), binding, {});
+    auto list = gfx::EndRecording();
+    ASSERT_TRUE(gfx::RenderList(*list, 1, {.canonical = true}));
+    std::vector<uint8_t> before, after;
+    uint32_t width = 0, height = 0;
+    ASSERT_TRUE(gfx::ReadbackTexture(target, before, width, height));
+    ASSERT_TRUE(gfx::RenderList(*list, 1, {.present = true, .interpolation_tint = true}));
+    ASSERT_TRUE(gfx::ReadbackTexture(target, after, width, height));
+    size_t changed = 0;
+    for (size_t i = 0; i < before.size(); ++i) changed += before[i] != after[i];
+    EXPECT_EQ(changed, 0u);
+    gfx::DestroyTexture(target);
 }
