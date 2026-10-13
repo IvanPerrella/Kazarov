@@ -21,8 +21,10 @@ float         g_dy = 0.0f;
 float         g_wheel = 0.0f;
 bool          g_pointer_cursor = false;
 
+bool Live() { return g_captured || !g_capture_enabled; }
+
 void UpdateCursor(bool focused, bool client) {
-    if (MousePointerCursorHidden(g_pointer_cursor || g_captured, focused, client)) {
+    if (MousePointerCursorHidden(g_captured || (g_pointer_cursor && Live()), focused, client)) {
         SDL_HideCursor();
     } else {
         SDL_ShowCursor();
@@ -33,14 +35,13 @@ void SetCaptured(bool captured) {
     if (SDL_Window *window = WindowHandle()) {
         if (!SDL_SetWindowRelativeMouseMode(window, captured)) {
             g_captured = SDL_GetWindowRelativeMouseMode(window);
+            MouseSetPointerCursor(g_pointer_cursor);
             return;
         }
     }
     g_captured = captured;
     MouseSetPointerCursor(g_pointer_cursor);
 }
-
-bool Live() { return g_captured || !g_capture_enabled; }
 
 bool Fullscreen() {
     SDL_Window *window = WindowHandle();
@@ -80,6 +81,7 @@ void MouseConfigure(bool capture, std::span<const int> release_scancodes) {
         SDL_Window *window = WindowHandle();
         if (window && (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS)) SetCaptured(true);
     }
+    MouseSetPointerCursor(g_pointer_cursor);
 }
 
 void MouseStart() {
@@ -182,6 +184,8 @@ bool MouseHandleEvent(const SDL_Event &event) {
 }
 
 bool MouseCaptured() { return g_captured; }
+
+bool MouseInputLive() { return Live(); }
 
 std::uint32_t MouseButtons() { return g_buttons; }
 

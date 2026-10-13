@@ -21,6 +21,8 @@ void MouseStop();
 bool MouseHandleEvent(const SDL_Event &event);
 
 bool MouseCaptured();
+// Explicit release disables pointer input until recapture; capture-disabled input stays live.
+bool MouseInputLive();
 
 // Bit n-1 for Mouse n while held: 1 left, 2 right, 3 middle, 4 and 5 the side buttons.
 std::uint32_t MouseButtons();

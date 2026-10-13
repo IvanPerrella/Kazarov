@@ -86,6 +86,9 @@ TEST_F(MouseCapture, ExplicitWindowedReleaseSurvivesRefocus) {
     MouseStart();
     ASSERT_TRUE(MouseCaptured());
     ASSERT_STREQ(SDL_GetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE), "0");
+    MouseSetPointerCursor(true);
+    ASSERT_TRUE(MouseInputLive());
+    ASSERT_FALSE(SDL_CursorVisible());
     SDL_Event event{};
     event.type = SDL_EVENT_KEY_DOWN;
     event.key.scancode = SDL_SCANCODE_ESCAPE;
@@ -94,12 +97,22 @@ TEST_F(MouseCapture, ExplicitWindowedReleaseSurvivesRefocus) {
     event.key.scancode = SDL_SCANCODE_F12;
     ASSERT_FALSE(MouseHandleEvent(event));
     ASSERT_FALSE(MouseCaptured());
+    ASSERT_FALSE(MouseInputLive());
+    ASSERT_FALSE(SDL_GetWindowRelativeMouseMode(WindowHandle()));
+    ASSERT_TRUE(SDL_CursorVisible());
+    for (int i = 0; i < 3; ++i) {
+        MouseSetPointerCursor(true);
+        ASSERT_TRUE(SDL_CursorVisible());
+        ASSERT_FALSE(SDL_GetWindowRelativeMouseMode(WindowHandle()));
+    }
     event.type = SDL_EVENT_WINDOW_FOCUS_LOST;
     MouseHandleEvent(event);
     event.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
     MouseHandleEvent(event);
     ASSERT_FALSE(MouseCaptured());
+    ASSERT_TRUE(SDL_CursorVisible());
     MouseConfigure(false, {});
+    ASSERT_TRUE(MouseInputLive());
     MouseHandleEvent(event);
     ASSERT_FALSE(MouseCaptured());
 }
