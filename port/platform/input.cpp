@@ -1114,8 +1114,6 @@ InputPadState InputApplyKeyboardMouse(InputPadState base, const InputKeyboardMou
         std::uint8_t &byte = AxisOf(base, static_cast<Axis>(axis));
         if (!Deflected(byte) && deflection[axis] != 0.0f) {
             byte = InputStickByte(deflection[axis]);
-            if (axis == kAxisLeftX) base.left_x_from_keys = push[axis] != 0;
-            if (axis == kAxisLeftY) base.left_y_from_keys = push[axis] != 0;
         }
     }
     return base;

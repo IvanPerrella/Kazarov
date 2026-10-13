@@ -47,9 +47,6 @@ struct InputPadState {
     // D-pad bits the left-stick keys add only while the game is not reading the left stick: the
     // screens that read the d-pad alone (the developer menu, the dungeon loader).
     std::uint16_t stick_dpad = 0;
-    // Ownership of each merged left axis; a deflected controller axis takes precedence.
-    bool left_x_from_keys = false;
-    bool left_y_from_keys = false;
 };
 
 // What the keyboard and the mouse hold: SDL scancodes, mouse buttons (bit n-1 for Mouse n) and the
@@ -173,7 +170,8 @@ void InputSetMenuMouse(bool on);
 void InputSetMenuNavigation(bool on);
 
 // Whether movement keys may also navigate D-pad-only screens (on by default).
-// Games with independent keyboard movement and D-pad bindings can opt out.
+// Games with their own menu stick conversion can disable this fallback in every mode;
+// merged stick axes remain available for that conversion and for field movement.
 void InputSetKeyboardStickNavigation(bool on);
 
 void InputSetDeveloperMenu(bool on);
