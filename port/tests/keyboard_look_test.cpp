@@ -3,6 +3,7 @@
 
 #include "platform/input.hpp"
 #include "platform/input_script.hpp"
+#include "platform/mouse.hpp"
 
 TEST(KeyboardLook, MovementDoesNotHideSimultaneousControllerLook) {
     InputResetBindings();
@@ -32,4 +33,44 @@ TEST(KeyboardLook, ScriptRetainsControllerAndMouseAxisProvenance) {
     EXPECT_GT(InputGetLookPad(0).left_y, 128);
     InputSetOverride(0, nullptr);
     InputResetBindings();
+}
+
+TEST(KeyboardLook, DisplayTotalRetainsMultipleLogicSamplesAndDoesNotDrain) {
+    InputResetBindings();
+    InputPadState pad{.connected = true};
+    InputSetOverride(0, &pad);
+    InputSetScriptedDevices({.mouse_dx = 5, .mouse_dy = 3});
+    const auto before = InputPeekMouseLookTotal();
+    InputLatchPad(0);
+    const auto one = InputGetMouseLook();
+    InputLatchPad(0);
+    const auto total = InputPeekMouseLookTotal();
+    EXPECT_NEAR(total.yaw - before.yaw, 2 * one.yaw, 1e-8);
+    EXPECT_NEAR(total.pitch - before.pitch, 2 * one.pitch, 1e-8);
+    EXPECT_EQ(InputPeekMouseLookTotal().yaw, total.yaw);
+    EXPECT_EQ(InputGetMouseLook().yaw, one.yaw);
+    InputSetMenuMouse(true);
+    EXPECT_NE(InputPeekMouseLookTotal().epoch, total.epoch);
+    InputSetMenuMouse(false);
+    InputSetOverride(0, nullptr);
+    InputSetScriptedDevices({});
+}
+
+TEST(KeyboardLook, DisplayTotalPeeksLiveMotionBeforeLatchWithoutDoubleApplying) {
+    InputResetBindings();
+    MouseConfigure(false, {});
+    const auto before = InputPeekMouseLookTotal();
+    SDL_Event motion{};
+    motion.type = SDL_EVENT_MOUSE_MOTION;
+    motion.motion.xrel = 12;
+    motion.motion.yrel = 7;
+    InputHandleEvent(motion);
+    const auto display = InputPeekMouseLookTotal();
+    EXPECT_NE(display.yaw, before.yaw);
+    EXPECT_NE(display.pitch, before.pitch);
+    EXPECT_EQ(InputPeekMouseLookTotal().yaw, display.yaw);
+    InputLatchPad(0);
+    EXPECT_NEAR(InputPeekMouseLookTotal().yaw, display.yaw, 1e-8);
+    EXPECT_NEAR(InputPeekMouseLookTotal().pitch, display.pitch, 1e-8);
+    MouseConfigure(true, {});
 }

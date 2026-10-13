@@ -179,6 +179,7 @@ std::array<bool, SDL_SCANCODE_COUNT>                     g_keys{};
 float                                                    g_mouse_dx = 0.0f;
 float                                                    g_mouse_dy = 0.0f;
 InputMouseLook                                           g_mouse_look;
+InputMouseLookTotal g_mouse_look_total;
 bool                                                     g_mouse_zoom = false;
 float                                                    g_scripted_wheel = 0.0f;
 std::int64_t                                             g_last_latch_tick = -1;
@@ -730,6 +731,7 @@ void InputApplyConfig(const HostSettings &config) {
 }
 
 void InputShutdown() {
+    g_mouse_look_total = {0, 0, g_mouse_look_total.epoch + 1};
     InputSetMovementLocked(false);
     MouseStop();
     g_menu_mouse = false;
@@ -823,6 +825,7 @@ void InputHandleEvent(const SDL_Event &event) {
         g_last_keyboard = true;
     }
     if (MouseHandleEvent(event)) {
+        g_mouse_look_total = {0, 0, g_mouse_look_total.epoch + 1};
         return;
     }
     switch (event.type) {
@@ -861,6 +864,7 @@ void InputHandleEvent(const SDL_Event &event) {
             g_host_polled[kZoomResetHost] = HostPolledHeld(kZoomResetHost);
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
+            g_mouse_look_total = {0, 0, g_mouse_look_total.epoch + 1};
             g_keys.fill(false);
             g_mouse_look.yaw = g_mouse_look.pitch = 0.0f;
             g_mouse_look.zoom = 0.0f;
@@ -910,6 +914,8 @@ void InputLatchPad(int pad) {
     std::uint64_t read = g_mouse_look.read + 1;
     g_mouse_look = MouseLookFromMotion(dx, dy);
     g_mouse_look.read = read;
+    g_mouse_look_total.yaw += g_mouse_look.yaw;
+    g_mouse_look_total.pitch += g_mouse_look.pitch;
     // Menus take the live wheel themselves. Everything else drains it each pad read, including
     // disabled zoom and loads, so it cannot be played back when gameplay next owns the camera.
     float wheel = g_menu_mouse ? 0.0f : MouseTakeWheel() + std::exchange(g_scripted_wheel, 0.0f);
@@ -924,6 +930,7 @@ void InputLatchPad(int pad) {
 }
 
 void InputSetMenuMouse(bool on) {
+    if (on != g_menu_mouse) g_mouse_look_total = {0, 0, g_mouse_look_total.epoch + 1};
     g_menu_mouse = on;
     g_menu_dx = 0.0f;
     g_menu_dy = 0.0f;
@@ -985,6 +992,18 @@ InputMenuMouse InputTakeMenuMouse() {
 }
 
 const InputMouseLook &InputGetMouseLook() { return g_mouse_look; }
+
+InputMouseLookTotal InputPeekMouseLookTotal() {
+    auto total = g_mouse_look_total;
+    if (!g_menu_mouse && !g_override[0]) {
+        float dx = 0, dy = 0;
+        MousePeekMotion(dx, dy);
+        const auto pending = MouseLookFromMotion(dx, dy);
+        total.yaw += pending.yaw;
+        total.pitch += pending.pitch;
+    }
+    return total;
+}
 
 void InputPeekMenuMouseMotion(float &dx, float &dy) {
     dx = dy = 0;
