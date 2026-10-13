@@ -47,7 +47,8 @@ struct RecordingSizes {
     size_t records = 0;
     size_t prog0 = 0;
 };
-RecordingSizes g_recording_sizes;
+std::array<RecordingSizes, 2> g_recording_sizes;
+size_t g_recording_kind = 0;
 
 struct Quat {
     float x, y, z, w;
@@ -1498,7 +1499,7 @@ void SetInterp2D(Interp2D interpolation) { g.interp_2d = interpolation; }
 
 Interp2D CurrentInterp2D() { return g.interp_2d; }
 
-void BeginRecording() {
+void BeginRecording(RecordingKind kind) {
     if (g.list != nullptr) {
         return;
     }
@@ -1508,10 +1509,12 @@ void BeginRecording() {
     }
     PrepareRecording();
     g.list = std::make_shared<DisplayList>();
-    if (g_recording_sizes.instance == g.renderer_instance) {
-        g.list->entries.reserve(g_recording_sizes.entries);
-        g.list->records.reserve(g_recording_sizes.records);
-        g.list->prog0_blocks.reserve(g_recording_sizes.prog0);
+    g_recording_kind = kind == RecordingKind::Overlay ? 1 : 0;
+    const auto &sizes = g_recording_sizes[g_recording_kind];
+    if (sizes.instance == g.renderer_instance) {
+        g.list->entries.reserve(sizes.entries);
+        g.list->records.reserve(sizes.records);
+        g.list->prog0_blocks.reserve(sizes.prog0);
     }
     g.list->instance = g.renderer_instance;
     g.list->serial = ++g.list_serial;
@@ -1530,7 +1533,7 @@ DisplayListRef EndRecording() {
         // Leave the usual geometric-growth slack for small visibility changes.
         // Derive it from size, so a smaller scene does not retain a high-water mark.
         auto capacity = [](size_t size) { return size == 0 ? size_t{0} : std::bit_ceil(size); };
-        g_recording_sizes = {list->instance, capacity(list->entries.size()), capacity(list->records.size()),
+        g_recording_sizes[g_recording_kind] = {list->instance, capacity(list->entries.size()), capacity(list->records.size()),
                              capacity(list->prog0_blocks.size())};
     }
     return list;

@@ -8,6 +8,7 @@
 
 #include "gfx/displaylist.hpp"
 #include "gfx_fixture.hpp"
+#include "platform/overlay.hpp"
 
 using namespace dc::test;
 
@@ -238,6 +239,31 @@ TEST(GfxDisplayList, RecordingReservationToleratesSmallGrowthAndResetsWithRender
         EXPECT_EQ(empty->records.capacity(), 0u);
         EXPECT_EQ(empty->prog0_blocks.capacity(), 0u);
     }
+}
+
+TEST(GfxDisplayList, RecordingOverlayKeepsSeparateCapacityHistory) {
+    GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+    gfx::Prog0Constants constants{};
+    gfx::BeginRecording();
+    for (int i = 0; i < 129; ++i) {
+        gfx::detail::RecordMesh({}, nullptr, &constants);
+    }
+    auto game = gfx::EndRecording();
+    auto overlay = OverlayRecord("60");
+    ASSERT_NE(overlay, nullptr);
+    EXPECT_LT(overlay->entries.capacity(), game->entries.size());
+    EXPECT_EQ(overlay->records.capacity(), 0u);
+    EXPECT_EQ(overlay->prog0_blocks.capacity(), 0u);
+    gfx::BeginRecording();
+    auto next_game = gfx::EndRecording();
+    EXPECT_GE(next_game->entries.capacity(), game->entries.size());
+    EXPECT_GE(next_game->records.capacity(), game->records.size());
+    EXPECT_GE(next_game->prog0_blocks.capacity(), game->prog0_blocks.size());
+    auto next_overlay = OverlayRecord("61");
+    ASSERT_NE(next_overlay, nullptr);
+    EXPECT_GE(next_overlay->entries.capacity(), overlay->entries.size());
+    EXPECT_LT(next_overlay->entries.capacity(), game->entries.size());
+    EXPECT_EQ(next_overlay->prog0_blocks.capacity(), 0u);
 }
 
 TEST(GfxDisplayList, BonesBlendPerBoneAtHalf) {

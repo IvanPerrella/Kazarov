@@ -162,7 +162,7 @@ void OverlayDrawText(std::string_view text, const gfx::LogicalMapping &mapping, 
 }
 
 gfx::DisplayListRef OverlayRecord(std::string_view text) {
-    gfx::BeginRecording();
+    gfx::BeginRecording(gfx::RecordingKind::Overlay);
     if (!gfx::Recording()) {
         return nullptr;
     }

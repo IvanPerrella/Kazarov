@@ -692,7 +692,9 @@ private:
 };
 
 // Not inside a frame BeginFrame opened.
-void           BeginRecording();
+// Game and host overlay lists keep independent reservation histories; neither owns prior commands.
+enum class RecordingKind { Game, Overlay };
+void           BeginRecording(RecordingKind kind = RecordingKind::Game);
 DisplayListRef EndRecording();
 bool           Recording();
 // The list being recorded is not interpolated from its predecessor (a mode's first tick, a cut).
