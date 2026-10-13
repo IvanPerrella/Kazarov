@@ -373,6 +373,8 @@ struct DrawState {
     bool        texa_aem = true;
     uint8_t     texa_ta0 = 0x80;
     bool        scissor = false;
+    // Frame-edge scissors normally follow Fill. Sliding UI can retain the logical frame.
+    bool        extend_scissor = true;
     // Infinite extents mean the whole frame, which is only known once RendererInit has run.
     LogicalRect scissor_rect = {0.0f, 0.0f, INFINITY, INFINITY};
     // Faces are told apart by winding, as for culling; lines are front faces.

@@ -442,7 +442,8 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
         g.bound.topology = static_cast<int>(topology);
         vkCmdSetPrimitiveTopology(cmd, topology);
     }
-    VkRect2D scissor = state.scissor ? PixelRect(mapping, ExtendClearRect(ScissorRect(state.scissor_rect), mapping),
+    VkRect2D scissor = state.scissor ? PixelRect(mapping, (state.extend_scissor ? ExtendClearRect(ScissorRect(state.scissor_rect), mapping)
+                                                                        : ScissorRect(state.scissor_rect)),
                                                  side.scissor ? dx : 0.0f, side.scissor ? dy : 0.0f)
                                      : VkRect2D{
                                            {0,                   0                   },
