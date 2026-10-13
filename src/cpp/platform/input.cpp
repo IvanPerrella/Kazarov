@@ -732,6 +732,7 @@ void InputApplyConfig(const HostSettings &config) {
 
 void InputShutdown() {
     g_mouse_look_total = {0, 0, g_mouse_look_total.epoch + 1};
+    g_last_latch_tick = -1;
     InputSetMovementLocked(false);
     MouseStop();
     g_menu_mouse = false;
@@ -824,8 +825,12 @@ void InputHandleEvent(const SDL_Event &event) {
         (event.type == SDL_EVENT_MOUSE_MOTION && (event.motion.xrel != 0.0f || event.motion.yrel != 0.0f))) {
         g_last_keyboard = true;
     }
-    if (MouseHandleEvent(event)) {
+    const bool was_live = MouseInputLive();
+    const bool swallowed = MouseHandleEvent(event);
+    if (swallowed || (was_live && !MouseInputLive())) {
         g_mouse_look_total = {0, 0, g_mouse_look_total.epoch + 1};
+    }
+    if (swallowed) {
         return;
     }
     switch (event.type) {
@@ -908,6 +913,9 @@ void InputLatchPad(int pad) {
         dx = g_scripted.mouse_dx;
         dy = g_scripted.mouse_dy;
     } else if (static_cast<double>(ticks) > kMouseLookMaxGapSeconds * ClockTickRate()) {
+        if (dx != 0.0f || dy != 0.0f) {
+            ++g_mouse_look_total.epoch;
+        }
         dx = 0.0f;
         dy = 0.0f;
     }
@@ -1085,6 +1093,10 @@ void InputSetOverride(int pad, const InputPadState *state) {
     if (pad < 0 || pad >= kInputPadCount) {
         return;
     }
+    // Changing live/script ownership can remove pending motion from the display sample.
+    if (pad == 0 && (state != nullptr) != g_override[pad].has_value()) {
+        ++g_mouse_look_total.epoch;
+    }
     if (state != nullptr) {
         g_override[pad] = *state;
     } else {
@@ -1094,85 +1106,90 @@ void InputSetOverride(int pad, const InputPadState *state) {
 
 InputPadState InputApplyKeyboardMouse(InputPadState base, const InputKeyboardMouse &held) {
     EnsureBindings();
-    std::array<int, 4>   push{};
-    std::array<float, 4> mouse{};
-    float                mouse_y = g_mouse.invert_y ? -held.mouse_dy : held.mouse_dy;
-    for (std::size_t i = 0; i < kActionCount; ++i) {
-        bool down = false;
-        for (const Source &source : g_bindings[i]) {
-            if (kActions[i].kind != ActionKind::Host && ZoomReserved(source)) {
+    bool       keyboard_left = false;
+    const auto compose = [&](InputPadState base, bool include_keys) {
+        std::array<int, 4>   push{};
+        std::array<float, 4> mouse{};
+        float                mouse_y = g_mouse.invert_y ? -held.mouse_dy : held.mouse_dy;
+        for (std::size_t i = 0; i < kActionCount; ++i) {
+            bool down = false;
+            bool key_down = false;
+            for (const Source &source : g_bindings[i]) {
+                if (kActions[i].kind != ActionKind::Host && ZoomReserved(source)) {
+                    continue;
+                }
+                switch (source.kind) {
+                    case Source::Key:
+                        key_down |= include_keys && std::ranges::contains(held.keys, source.code);
+                        down |= key_down;
+                        break;
+                    case Source::MouseButton:
+                        down |= !g_menu_mouse && (held.mouse_buttons & (1u << (source.code - 1))) != 0;
+                        break;
+                    case Source::MouseAxis:
+                        if (g_menu_mouse) {
+                            break;
+                        }
+                        mouse[kActions[i].axis] += source.scale * MouseRadiansPerCount() / kMouseStickRadians *
+                                                   (source.code == 0 ? held.mouse_dx : mouse_y);
+                        break;
+                    case Source::GamepadButton:
+                        break;
+                }
+            }
+            if (!down) {
                 continue;
             }
-            switch (source.kind) {
-                case Source::Key:
-                    down |= std::ranges::find(held.keys, source.code) != held.keys.end();
-                    break;
-                case Source::MouseButton:
-                    down |= !g_menu_mouse && (held.mouse_buttons & (1u << (source.code - 1))) != 0;
-                    break;
-                case Source::MouseAxis:
-                    if (g_menu_mouse) {
-                        break;
-                    }
-                    mouse[kActions[i].axis] += source.scale * MouseRadiansPerCount() / kMouseStickRadians *
-                                               (source.code == 0 ? held.mouse_dx : mouse_y);
-                    break;
-                case Source::GamepadButton:
-                    break;
+            if (kActions[i].kind == ActionKind::Button) {
+                base.buttons |= kActions[i].button;
+            } else if (kActions[i].kind == ActionKind::HalfAxis) {
+                push[kActions[i].axis] += kActions[i].direction;
+                keyboard_left |= key_down && kActions[i].axis <= kAxisLeftY;
             }
         }
-        if (!down) {
-            continue;
+        if (include_keys && std::ranges::contains(held.keys, SDL_SCANCODE_ESCAPE)) {
+            base.buttons |= g_menu_navigation ? kInputCircle : kInputTriangle;
         }
-        if (kActions[i].kind == ActionKind::Button) {
-            base.buttons |= kActions[i].button;
-        } else if (kActions[i].kind == ActionKind::HalfAxis) {
-            push[kActions[i].axis] += kActions[i].direction;
+        std::array<float, 4> deflection{};
+        for (int x = kAxisLeftX; x <= kAxisRightX; x += 2) {
+            float key_x = static_cast<float>((push[x] > 0) - (push[x] < 0));
+            float key_y = static_cast<float>((push[x + 1] > 0) - (push[x + 1] < 0));
+            // Two keys held make a diagonal of the same length as one, as a stick's gate does.
+            if (key_x != 0.0f && key_y != 0.0f) {
+                key_x *= std::numbers::sqrt2_v<float> / 2.0f;
+                key_y *= std::numbers::sqrt2_v<float> / 2.0f;
+            }
+            deflection[x] = std::clamp(key_x + mouse[x], -1.0f, 1.0f);
+            deflection[x + 1] = std::clamp(key_y + mouse[x + 1], -1.0f, 1.0f);
         }
-    }
-    if (std::ranges::contains(held.keys, SDL_SCANCODE_ESCAPE)) {
-        base.buttons |= g_menu_navigation ? kInputCircle : kInputTriangle;
-    }
-    // Recompose without keys before merging devices. Mouse buttons and whole-axis
-    // bindings retain their normal priority too. The recursive call has no keys.
-    base.keyboard_left = false;
-    if (push[kAxisLeftX] || push[kAxisLeftY]) {
-        InputKeyboardMouse without_keys = held;
-        without_keys.keys.clear();
-        const auto look = InputApplyKeyboardMouse(base, without_keys);
-        base.keyboard_left = true;
-        base.look_left_x = look.left_x;
-        base.look_left_y = look.left_y;
-    }
-    std::array<float, 4> deflection{};
-    for (int x = kAxisLeftX; x <= kAxisRightX; x += 2) {
-        float key_x = static_cast<float>((push[x] > 0) - (push[x] < 0));
-        float key_y = static_cast<float>((push[x + 1] > 0) - (push[x + 1] < 0));
-        // Two keys held make a diagonal of the same length as one, as a stick's gate does.
-        if (key_x != 0.0f && key_y != 0.0f) {
-            key_x *= std::numbers::sqrt2_v<float> / 2.0f;
-            key_y *= std::numbers::sqrt2_v<float> / 2.0f;
+        if (push[kAxisLeftY] < 0) {
+            base.stick_dpad |= kInputUp;
+        } else if (push[kAxisLeftY] > 0) {
+            base.stick_dpad |= kInputDown;
         }
-        deflection[x] = std::clamp(key_x + mouse[x], -1.0f, 1.0f);
-        deflection[x + 1] = std::clamp(key_y + mouse[x + 1], -1.0f, 1.0f);
-    }
-    if (push[kAxisLeftY] < 0) {
-        base.stick_dpad |= kInputUp;
-    } else if (push[kAxisLeftY] > 0) {
-        base.stick_dpad |= kInputDown;
-    }
-    if (push[kAxisLeftX] < 0) {
-        base.stick_dpad |= kInputLeft;
-    } else if (push[kAxisLeftX] > 0) {
-        base.stick_dpad |= kInputRight;
-    }
-    for (int axis = kAxisLeftX; axis <= kAxisRightY; ++axis) {
-        std::uint8_t &byte = AxisOf(base, static_cast<Axis>(axis));
-        if (!Deflected(byte) && deflection[axis] != 0.0f) {
-            byte = InputStickByte(deflection[axis]);
+        if (push[kAxisLeftX] < 0) {
+            base.stick_dpad |= kInputLeft;
+        } else if (push[kAxisLeftX] > 0) {
+            base.stick_dpad |= kInputRight;
         }
+        for (int axis = kAxisLeftX; axis <= kAxisRightY; ++axis) {
+            std::uint8_t &byte = AxisOf(base, static_cast<Axis>(axis));
+            if (!Deflected(byte) && deflection[axis] != 0.0f) {
+                byte = InputStickByte(deflection[axis]);
+            }
+        }
+        return base;
+    };
+    auto mixed = compose(base, true);
+    mixed.keyboard_left = keyboard_left;
+    // Removing keys must preserve mouse-button and controller movement. Compose the
+    // keyboard-free look once, independently of the aggregate half-axis push.
+    if (keyboard_left) {
+        const auto look = compose(base, false);
+        mixed.look_left_x = look.left_x;
+        mixed.look_left_y = look.left_y;
     }
-    return base;
+    return mixed;
 }
 
 std::uint8_t InputStickByte(float deflection) {

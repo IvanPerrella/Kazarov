@@ -20,6 +20,7 @@ struct TrackCache::State {
     Loader                  loader;
     std::deque<Job>         queue;
     std::list<Job>          cached;
+    std::deque<Job>         failed;
     Job                     active;
     uint64_t                generation = 0;
     size_t                  bytes = 0, max_entries, max_bytes;
@@ -59,7 +60,13 @@ struct TrackCache::State {
                 }
                 const size_t size = track ? track->samples.size() * sizeof(int16_t) : 0;
                 // Oversized tracks may be played, but never retained in the cache.
-                if (size <= max_bytes && max_entries > 0) {
+                if (!track) {
+                    // Negative results have a separate bounded budget, cleared on reload.
+                    if (failed.size() == 256) {
+                        failed.pop_front();
+                    }
+                    failed.push_back(job);
+                } else if (size <= max_bytes && max_entries > 0) {
                     while (!cached.empty() && (cached.size() >= max_entries || bytes + size > max_bytes)) {
                         const auto &old = cached.back().result->track;
                         bytes -= old ? old->samples.size() * sizeof(int16_t) : 0;
@@ -69,9 +76,10 @@ struct TrackCache::State {
                     cached.push_front(job);
                 }
                 job.result->track = std::move(track);
-                job.result->ready.store(true, std::memory_order_release);
             }
             // Large PCM allocations are freed on the worker, outside the queue lock.
+            evicted.clear();
+            job.result->ready.store(true, std::memory_order_release);
         }
     }
 };
@@ -95,6 +103,11 @@ std::shared_ptr<const PendingTrack> TrackCache::Request(const std::string &key) 
             auto result = it->result;
             state_->cached.splice(state_->cached.begin(), state_->cached, it);
             return result;
+        }
+    }
+    for (const auto &job : state_->failed) {
+        if (job.key == key) {
+            return job.result;
         }
     }
     if (state_->active.result && state_->active.generation == state_->generation && state_->active.key == key) {
@@ -122,6 +135,7 @@ void TrackCache::Reset(Loader loader) {
         job.result->ready.store(true, std::memory_order_release);
     }
     state_->queue.clear();
+    state_->failed.clear();
     evicted.splice(evicted.end(), state_->cached);
     state_->bytes = 0;
     state_->loader = std::move(loader);

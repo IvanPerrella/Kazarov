@@ -8,7 +8,7 @@
 
 using namespace dc::test;
 
-TEST(GfxMeshDc2, SkippedAndInsertedPartsResynchronizeSurfacePairing) {
+TEST(GfxGpuMeshDc2, SkippedAndInsertedPartsResynchronizeSurfacePairing) {
     GfxOptions options;
     options.offscreen = true;
     GfxFixture                      fixture(64, 48, 1, options);
@@ -66,4 +66,57 @@ TEST(GfxMeshDc2, SkippedAndInsertedPartsResynchronizeSurfacePairing) {
     for (auto texture : textures) {
         gfx::DestroyTexture(texture);
     }
+}
+
+TEST(GfxGpuMeshDc2, NewGeometryCannotClaimSurvivingSurfacePose) {
+    GfxOptions options;
+    options.offscreen = true;
+    GfxFixture    fixture(64, 48, 1, options);
+    const uint8_t white[4] = {128, 128, 128, 128};
+    const auto    x = gfx::CreateTexture({1, 1});
+    const auto    y = gfx::CreateTexture({1, 1});
+    ASSERT_TRUE(gfx::UpdateTexture(x, 0, 0, 0, 1, 1, white));
+    ASSERT_TRUE(gfx::UpdateTexture(y, 0, 0, 0, 1, 1, white));
+    std::vector<gfx::Vertex3D> geometry[] = {
+        {{{-.1f, -.1f, .5f}}, {{.1f, -.1f, .5f}}, {{0, .1f, .5f}}},
+        {{{-.2f, -.1f, .5f}}, {{.2f, -.1f, .5f}}, {{0, .2f, .5f}}},
+        {{{-.3f, -.1f, .5f}}, {{.3f, -.1f, .5f}}, {{0, .3f, .5f}}}
+    };
+    const std::vector<uint32_t> triangle{0, 1, 2}, reversed{0, 2, 1};
+    gfx::MeshHandle             meshes[3];
+    for (int part = 0; part < 3; ++part) {
+        meshes[part] = gfx::CreateMesh(geometry[part], triangle);
+    }
+    for (int mode = 0; mode < 3; ++mode) {
+        auto record = [&](bool newest) {
+            gfx::BeginRecording();
+            gfx::Clear(true, white, true, 0);
+            gfx::SetInterpKey(456 + mode);
+            auto               transform = gfx::IdentityMeshTransform();
+            gfx::MeshConstants constants{};
+            std::memcpy(constants.mvp, transform.model, sizeof constants.mvp);
+            for (int part : {newest ? 2 : 0, 1}) {
+                gfx::TextureBinding binding;
+                binding.texture = part == 0 ? x : y;
+                if (mode == 0) {
+                    gfx::DrawMesh(meshes[part], 0, 3, constants, binding, {}, &transform);
+                } else {
+                    // Mode 1 differs by topology, mode 2 by immutable immediate geometry.
+                    const auto &vertices = mode == 1 ? geometry[0] : geometry[part];
+                    const auto &indices = mode == 1 && part == 2 ? reversed : triangle;
+                    gfx::DrawMeshImmediate(vertices, indices, constants, binding, {}, &transform);
+                }
+            }
+            return gfx::EndRecording();
+        };
+        auto before = record(false), after = record(true);
+        ASSERT_TRUE(gfx::RenderList(*after, 1, {.canonical = true}));
+        ASSERT_TRUE(gfx::RenderList(*after, .5f, {.previous = before.get(), .present = true}));
+        EXPECT_EQ(after->cache.match, (std::vector<int32_t>{-1, 1})) << "geometry mode " << mode;
+    }
+    for (auto mesh : meshes) {
+        gfx::DestroyMesh(mesh);
+    }
+    gfx::DestroyTexture(x);
+    gfx::DestroyTexture(y);
 }

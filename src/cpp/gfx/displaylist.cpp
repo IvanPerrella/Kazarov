@@ -391,6 +391,39 @@ bool SameHandedness(const Mat4 &a, const Mat4 &b) {
     return (sign_a < 0.0f) == (sign_b < 0.0f);
 }
 
+bool SamePartGeometry(const MeshEntry &a, const MeshEntry &b, const MeshRecord &record,
+                      const MeshRecord &earlier) {
+    if (a.mesh != b.mesh) {
+        return false;
+    }
+    if (a.mesh != kNullMesh) {
+        return true;
+    }
+    if (a.indices != b.indices || a.vertices.size() != b.vertices.size()) {
+        return false;
+    }
+    bool same_vertices = true;
+    for (size_t i = 0; i < a.vertices.size(); ++i) {
+        same_vertices &= std::memcmp(&a.vertices[i], &b.vertices[i], sizeof(Vertex3D)) == 0;
+    }
+    if (same_vertices) {
+        return true;
+    }
+    // Explicit vertex blending promises the same points in submission order.
+    // Without an immutable mesh handle, moving geometry cannot resynchronize to
+    // another occurrence: that would consume an unrelated part's pose.
+    if (!record.blend_vertices || !earlier.blend_vertices || record.occurrence != earlier.occurrence) {
+        return false;
+    }
+    for (size_t i = 0; i < a.vertices.size(); ++i) {
+        if (std::memcmp(a.vertices[i].uv, b.vertices[i].uv, sizeof(a.vertices[i].uv)) != 0 ||
+            std::memcmp(a.vertices[i].color, b.vertices[i].color, sizeof(a.vertices[i].color)) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool SameInstanceFace(const DisplayList &list, const DisplayList &previous, int32_t index, int32_t candidate) {
     const auto &a = std::get<MeshEntry>(list.entries[list.records[index].entry]);
     const auto &b = std::get<MeshEntry>(previous.entries[previous.records[candidate].entry]);
@@ -398,8 +431,8 @@ bool SameInstanceFace(const DisplayList &list, const DisplayList &previous, int3
     // cannot interpolate; keep each pass with its own handedness before comparing distance.
     const Mat4 &model_a = list.records[index].model;
     const Mat4 &model_b = previous.records[candidate].model;
-    return SameHandedness(model_a, model_b) && SameSurface(a, b) && a.mesh == b.mesh &&
-           (a.mesh != kNullMesh || (a.indices == b.indices && a.vertices.size() == b.vertices.size()));
+    return SameHandedness(model_a, model_b) && SameSurface(a, b) &&
+           SamePartGeometry(a, b, list.records[index], previous.records[candidate]);
 }
 
 // Each place with the previous draw that stood exactly there, then what is left with the nearest
@@ -495,9 +528,7 @@ void BuildMatches(const DisplayList &list, const DisplayList &previous) {
             for (size_t face = 0; face < it->second.records.size(); ++face) {
                 const int32_t     candidate = it->second.records[face];
                 const MeshRecord &earlier = previous.records[candidate];
-                if (claimed[face] || !SameHandedness(earlier.model, record.model) ||
-                    !SameSurface(std::get<MeshEntry>(list.entries[record.entry]),
-                                 std::get<MeshEntry>(previous.entries[earlier.entry]))) {
+                if (claimed[face] || !SameInstanceFace(list, previous, index, candidate)) {
                     continue;
                 }
                 claimed[face] = true;
@@ -1098,22 +1129,7 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
 }
 
 void Replay(const DisplayList &list, bool canonical, const Overrides *overrides, bool host = false,
-            bool tint = false, InterpKey suppressed_2d_key = 0, const DisplayList *previous = nullptr) {
-    std::vector<LogicalRect> composites;
-    if (!canonical) {
-        for (const auto &region : list.composites) {
-            const CompositeRegion *before = nullptr;
-            if (previous) {
-                for (const auto &candidate : previous->composites) {
-                    if (candidate.key == region.key && candidate.occurrence == region.occurrence) {
-                        before = &candidate;
-                        break;
-                    }
-                }
-            }
-            composites.push_back(CompositeBounds(region, before));
-        }
-    }
+            bool tint = false, InterpKey suppressed_2d_key = 0) {
     g.replaying = true;
     g.quiet = !canonical;
     g.host_draws = host;
@@ -1133,19 +1149,9 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                     const std::vector<Vertex2D> *vertices = &e.vertices;
                     const DrawState             *state = &e.state;
                     UiSide                       side = e.side;
-                    DrawState                    bounded_state;
                     if (!canonical && !e.presentation_vertices.empty()) {
                         vertices = &e.presentation_vertices;
                         state = &e.presentation_state;
-                        if (e.composite >= 0 && vertices->size() == 4) {
-                            bounded_state = *state;
-                            bounded_state.scissor = true;
-                            bounded_state.extend_scissor = false;
-                            bounded_state.scissor_rect = composites[e.composite];
-                            bounded_state.scissor_rect.x += (*vertices)[0].x - (*vertices)[0].u;
-                            bounded_state.scissor_rect.y += (*vertices)[0].y - (*vertices)[0].v;
-                            state = &bounded_state;
-                        }
                         // Composite replacements are in target space, independent of the original UI box.
                         side = {};
                     } else if (overrides != nullptr) {
@@ -1424,23 +1430,6 @@ void BlendProg0Bones(const Prog0Constants &before, const Prog0Constants &after, 
 
 bool RecordingCalls() { return g.list != nullptr; }
 
-LogicalRect CompositeBounds(const CompositeRegion &now, const CompositeRegion *before) {
-    float left = now.bounds.x, top = now.bounds.y;
-    float right = left + now.bounds.w, bottom = top + now.bounds.h;
-    if (before) {
-        left = std::min(left, before->bounds.x);
-        top = std::min(top, before->bounds.y);
-        right = std::max(right, before->bounds.x + before->bounds.w);
-        bottom = std::max(bottom, before->bounds.y + before->bounds.h);
-    }
-    const float pad = std::max(now.padding, before ? before->padding : 0.0f);
-    left = std::clamp(std::floor(left - pad), now.visible.x, now.visible.x + now.visible.w);
-    top = std::clamp(std::floor(top - pad), now.visible.y, now.visible.y + now.visible.h);
-    right = std::clamp(std::ceil(right + pad), left, now.visible.x + now.visible.w);
-    bottom = std::clamp(std::ceil(bottom + pad), top, now.visible.y + now.visible.h);
-    return {left, top, right - left, bottom - top};
-}
-
 void RecordEntry(Entry &&entry) {
     DisplayList &list = *g.list;
     if (Draw2DEntry *draw = std::get_if<Draw2DEntry>(&entry)) {
@@ -1452,7 +1441,6 @@ void RecordEntry(Entry &&entry) {
             draw->scene = list.scene;
         }
         draw->target = g.record_target;
-        draw->composite = list.composite;
         draw->interpolation = g.interp_2d;
         if (draw->interpolation.key != 0) {
             draw->occurrence = list.occurrences_2d[draw->interpolation.key]++;
@@ -1504,9 +1492,7 @@ void RecordClear(const ClearEntry &entry) {
         (!entry.has_rect || CoversLogicalFrame(entry.rect))) {
         list.main_cleared = true;
     }
-    ClearEntry bounded = entry;
-    bounded.composite = list.composite;
-    list.entries.push_back(bounded);
+    list.entries.push_back(entry);
 }
 
 void RecordDoomedTexture(TextureHandle handle) { g.list->doomed_textures.push_back(handle); }
@@ -1516,26 +1502,6 @@ void RecordDoomedMesh(MeshHandle handle) { g.list->doomed_meshes.push_back(handl
 } // namespace detail
 
 using namespace detail;
-
-void BeginComposite(InterpKey key, const LogicalRect &bounds, const LogicalRect &visible, float padding) {
-    if (!g.list) {
-        return;
-    }
-    uint32_t occurrence = 0;
-    for (const auto &region : g.list->composites) {
-        if (region.key == key) {
-            ++occurrence;
-        }
-    }
-    g.list->composite = static_cast<int32_t>(g.list->composites.size());
-    g.list->composites.push_back({key, occurrence, bounds, visible, padding});
-}
-
-void EndComposite() {
-    if (g.list) {
-        g.list->composite = -1;
-    }
-}
 
 DisplayList::~DisplayList() {
     if (instance != g.renderer_instance || g.device == VK_NULL_HANDLE) {
@@ -1668,8 +1634,7 @@ bool RenderList(const DisplayList &list, float alpha, const RenderOptions &optio
     if (tint) {
         TraceInterpolation(list, options.previous, interpolate ? &overrides : nullptr, alpha);
     }
-    Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint, options.suppressed_2d_key,
-           interpolate ? options.previous : nullptr);
+    Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint, options.suppressed_2d_key);
     if (options.overlay != nullptr && options.overlay->instance == g.renderer_instance) {
         SetRenderTarget(kMainTarget);
         Replay(*options.overlay, false, nullptr, true, tint);

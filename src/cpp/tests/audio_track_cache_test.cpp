@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdio>
 #include <future>
 #include <thread>
 
@@ -16,7 +17,7 @@ bool Wait(const std::shared_ptr<const audio::PendingTrack> &request) {
     }
     const auto deadline = std::chrono::steady_clock::now() + 2s;
     while (!request->ready.load() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(1ms);
+        std::this_thread::yield();
     }
     return request->ready.load();
 }
@@ -115,6 +116,58 @@ TEST(AudioTrackCache, ReloadDiscardsInFlightResultAndBoundsQueue) {
     ASSERT_TRUE(Wait(fresh));
     ASSERT_NE(fresh->Get(), nullptr);
     EXPECT_EQ(fresh->Get()->samples.size(), 128u);
+}
+
+TEST(AudioTrackCache, NullLoadsNeverEvictDecodedTracksAndReportOnceUntilReset) {
+    int  failures = 0;
+    auto loader = [&](const std::string &key) -> std::shared_ptr<const audio::PcmTrack> {
+        if (key == "missing") {
+            ++failures;
+            std::fprintf(stderr, "decode failed\n");
+            return nullptr;
+        }
+        return Track();
+    };
+    audio::TrackCache cache(loader, 2, 256);
+    auto              first = cache.Request("one");
+    auto              second = cache.Request("two");
+    ASSERT_TRUE(Wait(first));
+    ASSERT_TRUE(Wait(second));
+    testing::internal::CaptureStderr();
+    auto       missing = cache.Request("missing");
+    const bool ready = Wait(missing);
+    EXPECT_TRUE(ready);
+    if (ready) {
+        EXPECT_EQ(missing->Get(), nullptr);
+        EXPECT_EQ(cache.Request("one"), first);
+        EXPECT_EQ(cache.Request("two"), second);
+        for (int attempt = 0; attempt < 20; ++attempt) {
+            EXPECT_TRUE(Wait(cache.Request("missing")));
+        }
+    }
+    const auto reported = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(reported, "decode failed\n");
+    EXPECT_EQ(failures, 1);
+    cache.Reset(loader);
+    ASSERT_TRUE(Wait(cache.Request("missing")));
+    EXPECT_EQ(failures, 2);
+}
+
+TEST(AudioTrackCache, NegativeCacheIsBoundedAndDoesNotUseDecodedBudget) {
+    int               failures = 0;
+    audio::TrackCache cache([&](const std::string &) -> std::shared_ptr<const audio::PcmTrack> {
+        ++failures;
+        return nullptr;
+    },
+                            0, 0);
+    for (int key = 0; key < 257; ++key) {
+        ASSERT_TRUE(Wait(cache.Request(std::to_string(key))));
+    }
+    ASSERT_TRUE(Wait(cache.Request("256")));
+    EXPECT_EQ(failures, 257);
+    ASSERT_TRUE(Wait(cache.Request("0")));
+    EXPECT_EQ(failures, 258);
+    EXPECT_EQ(cache.CachedBytes(), 0u);
 }
 
 TEST(AudioTrackCache, LateDecodeDoesNotRestartStoppedOrReplacedPlayback) {

@@ -7,7 +7,7 @@
 
 using namespace dc::test;
 
-TEST(GfxMeshDc2, SlotRetirementWaitsEverySubmittedFrameBeforeDeleting) {
+TEST(GfxGpuMeshDc2, SlotRetirementWaitsEverySubmittedFrameBeforeDeleting) {
     GfxOptions options;
     options.offscreen = true;
     options.texture_slots = gfx::detail::kFirstUserSlot + 1;

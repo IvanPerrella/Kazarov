@@ -28,6 +28,7 @@ public:
     TrackCache &operator=(const TrackCache &) = delete;
 
     // At most sixteen pending requests and one decode. A full queue returns null.
+    // The last 256 failed keys are remembered separately until Reset, without evicting PCM.
     std::shared_ptr<const PendingTrack> Request(const std::string &key);
     // Invalidates queued/in-flight work without joining the worker. Existing playback owns its PCM.
     void   Reset(Loader loader);

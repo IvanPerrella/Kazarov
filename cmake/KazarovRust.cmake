@@ -26,7 +26,7 @@ if(WIN32)
     target_link_libraries(kazarov_core INTERFACE imm32 uxtheme opengl32 dwmapi)
 elseif(APPLE)
     target_link_libraries(kazarov_core INTERFACE
-        "-framework AppKit" "-framework CoreFoundation" "-framework CoreGraphics"
+        "-framework AppKit" "-framework Carbon" "-framework CoreFoundation" "-framework CoreGraphics"
         "-framework CoreVideo" "-framework Foundation" "-framework IOKit"
         "-framework OpenGL" "-framework QuartzCore" "-framework UniformTypeIdentifiers" objc)
 endif()

@@ -1,3 +1,7 @@
+#if defined(__APPLE__) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
+
 #include <eekernel.h>
 
 #include "sce/threads.hpp"

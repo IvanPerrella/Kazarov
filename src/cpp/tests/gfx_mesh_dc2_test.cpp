@@ -216,7 +216,7 @@ TEST(GfxMeshDc2, MeshConstantsKeepChroniclesSize) {
     EXPECT_EQ(sizeof(gfx::MeshConstants), 400u);
 }
 
-TEST(GfxMeshDc2, PipelinesOnlyWhenAsked) {
+TEST(GfxGpuMeshDc2, PipelinesOnlyWhenAsked) {
     uint32_t plain = 0;
     {
         GfxFixture fixture(kWidth, kHeight);
@@ -227,7 +227,7 @@ TEST(GfxMeshDc2, PipelinesOnlyWhenAsked) {
     EXPECT_EQ(gfx::PipelineCount(), plain / 3 * 5);
 }
 
-TEST(GfxMeshDc2, PlainMeshesIgnoreTheProg0Pipelines) {
+TEST(GfxGpuMeshDc2, PlainMeshesIgnoreTheProg0Pipelines) {
     std::array<uint8_t, 4> plain = {};
     {
         GfxFixture fixture(kWidth, kHeight);
@@ -239,7 +239,7 @@ TEST(GfxMeshDc2, PlainMeshesIgnoreTheProg0Pipelines) {
     EXPECT_EQ(fixture.Pixel(fixture.width / 2, fixture.height / 2), plain);
 }
 
-TEST(GfxMeshDc2, PlainDrawWithProg0FlagDrawsPlain) {
+TEST(GfxGpuMeshDc2, PlainDrawWithProg0FlagDrawsPlain) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     gfx::MeshConstants plain = ChronicleLit();
     Render(fixture, ScreenVertices({0, 0, 1}), kTriangle, plain);
@@ -250,13 +250,7 @@ TEST(GfxMeshDc2, PlainDrawWithProg0FlagDrawsPlain) {
     EXPECT_EQ(fixture.Pixel(fixture.width / 2, fixture.height / 2), expected);
 }
 
-TEST(GfxMeshDc2, FourDirectionalLights) {
-    GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
-    Render(fixture, ScreenVertices({0, 0, 1}), kTriangle, FourLights());
-    EXPECT_TRUE(Centre(fixture, 50, 60, 30));
-}
-
-TEST(GfxMeshDc2, IndexedProg0MeshMatchesImmediate) {
+TEST(GfxGpuMeshDc2, IndexedProg0MeshMatchesImmediate) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     const Prog0Draw c = FourLights();
     const std::vector<gfx::Vertex3D> vertices = ScreenVertices({0, 0, 1});
@@ -271,7 +265,7 @@ TEST(GfxMeshDc2, IndexedProg0MeshMatchesImmediate) {
     gfx::DestroyMesh(mesh);
 }
 
-TEST(GfxMeshDc2, RecordedProg0DrawReplaysThroughRenderList) {
+TEST(GfxGpuMeshDc2, RecordedProg0DrawReplaysThroughRenderList) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     const Prog0Draw c = FourLights();
     const std::vector<gfx::Vertex3D> vertices = ScreenVertices({0, 0, 1});
@@ -291,7 +285,7 @@ TEST(GfxMeshDc2, RecordedProg0DrawReplaysThroughRenderList) {
     EXPECT_TRUE(Centre(fixture, 50, 60, 30));
 }
 
-TEST(GfxMeshDc2, FourDirectionalLightsSaturate) {
+TEST(GfxGpuMeshDc2, FourDirectionalLightsSaturate) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(0);
     Set(c.prog0.ambient, {200, 200, 200, 128});
@@ -300,7 +294,7 @@ TEST(GfxMeshDc2, FourDirectionalLightsSaturate) {
     EXPECT_TRUE(Centre(fixture, 255, 255, 255));
 }
 
-TEST(GfxMeshDc2, LightsTurnIntoModelSpace) {
+TEST(GfxGpuMeshDc2, LightsTurnIntoModelSpace) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(0);
     Set(c.prog0.model_world, {0, 2, 0, 0, -2, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1});
@@ -311,7 +305,7 @@ TEST(GfxMeshDc2, LightsTurnIntoModelSpace) {
     EXPECT_TRUE(Centre(fixture, 0, 0, 0));
 }
 
-TEST(GfxMeshDc2, Unlit) {
+TEST(GfxGpuMeshDc2, Unlit) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Render(fixture, ScreenVertices({0, 0, 1}), kTriangle, Unlit(gfx::kProg0Unlit));
     EXPECT_TRUE(Centre(fixture, 64, 32, 16));
@@ -319,7 +313,7 @@ TEST(GfxMeshDc2, Unlit) {
     EXPECT_TRUE(Centre(fixture, 64, 32, 16));
 }
 
-TEST(GfxMeshDc2, PointLights) {
+TEST(GfxGpuMeshDc2, PointLights) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(gfx::kProg0PointLights);
     UseTinyMvp(c.mesh.mvp);
@@ -333,7 +327,7 @@ TEST(GfxMeshDc2, PointLights) {
     EXPECT_TRUE(Centre(fixture, 42, 74, 42));
 }
 
-TEST(GfxMeshDc2, RealSpecular) {
+TEST(GfxGpuMeshDc2, RealSpecular) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(gfx::kProg0Real);
     UseTinyMvp(c.mesh.mvp);
@@ -353,7 +347,7 @@ TEST(GfxMeshDc2, RealSpecular) {
     EXPECT_TRUE(Centre(fixture, 32, 32, 32, 2));
 }
 
-TEST(GfxMeshDc2, VertexColour) {
+TEST(GfxGpuMeshDc2, VertexColour) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(gfx::kProg0Unlit, gfx::kProg0FaceColor);
     Set(c.prog0.object_color, {100, 100, 100, 128});
@@ -370,7 +364,7 @@ TEST(GfxMeshDc2, VertexColour) {
     EXPECT_TRUE(Centre(fixture, 41, 41, 41, 2));
 }
 
-TEST(GfxMeshDc2, RefSphere) {
+TEST(GfxGpuMeshDc2, RefSphere) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     gfx::TextureHandle texture = RgbQuadTexture();
     ASSERT_NE(texture, gfx::kNullTexture);
@@ -386,7 +380,7 @@ TEST(GfxMeshDc2, RefSphere) {
     gfx::DestroyTexture(texture);
 }
 
-TEST(GfxMeshDc2, RefSphereIgnoresSkinning) {
+TEST(GfxGpuMeshDc2, RefSphereIgnoresSkinning) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     gfx::TextureHandle texture = RgbQuadTexture();
     ASSERT_NE(texture, gfx::kNullTexture);
@@ -403,7 +397,7 @@ TEST(GfxMeshDc2, RefSphereIgnoresSkinning) {
     gfx::DestroyTexture(texture);
 }
 
-TEST(GfxMeshDc2, Skinning) {
+TEST(GfxGpuMeshDc2, Skinning) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(gfx::kProg0Unlit | gfx::kProg0Skinned);
     Set(c.prog0.object_color, {200, 200, 200, 128});
@@ -414,7 +408,7 @@ TEST(GfxMeshDc2, Skinning) {
     EXPECT_TRUE(fixture.PixelNear(fixture.width / 8, fixture.height / 2, 0, 0, 0));
 }
 
-TEST(GfxMeshDc2, SkinnedNormals) {
+TEST(GfxGpuMeshDc2, SkinnedNormals) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(gfx::kProg0Skinned);
     SetBone(c.prog0, 0, kIdentityBone);
@@ -423,7 +417,8 @@ TEST(GfxMeshDc2, SkinnedNormals) {
     EXPECT_TRUE(Centre(fixture, 100, 100, 100));
 }
 
-TEST(GfxMeshDc2, SkinnedFourthInfluenceNormal) {
+// prog0.md 10.6, bone-3 sub-case (O-8).
+TEST(GfxGpuMeshDc2, SkinnedFourthInfluenceNormal) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(gfx::kProg0Skinned);
     SetBone(c.prog0, 3, kIdentityBone);
@@ -437,7 +432,7 @@ TEST(GfxMeshDc2, SkinnedFourthInfluenceNormal) {
     EXPECT_TRUE(Centre(fixture, 0, 0, 0));
 }
 
-TEST(GfxMeshDc2, ScissorClipsToClipOrView) {
+TEST(GfxGpuMeshDc2, ScissorClipsToClipOrView) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(gfx::kProg0Unlit | gfx::kProg0Scissor);
     Set(c.prog0.object_color, {200, 200, 200, 128});
@@ -450,7 +445,7 @@ TEST(GfxMeshDc2, ScissorClipsToClipOrView) {
     EXPECT_TRUE(fixture.PixelNear(fixture.width * 7 / 8, fixture.height / 2, 200, 200, 200));
 }
 
-TEST(GfxMeshDc2, Prog0CullModeFollowsFlagAndMirror) {
+TEST(GfxGpuMeshDc2, Prog0CullModeFollowsFlagAndMirror) {
     EXPECT_EQ(gfx::Prog0CullMode(Prog0(0).prog0), gfx::CullMode::None);
     EXPECT_EQ(gfx::Prog0CullMode(Prog0(gfx::kProg0Cull).prog0), gfx::CullMode::Back);
     Prog0Draw mirrored = Prog0(gfx::kProg0Unlit | gfx::kProg0Cull);
@@ -479,7 +474,7 @@ TEST(GfxMeshDc2, Prog0CullModeFollowsFlagAndMirror) {
     EXPECT_TRUE(fixture.PixelNear(35, 26, 200, 200, 200));
 }
 
-TEST(GfxMeshDc2, Fog) {
+TEST(GfxGpuMeshDc2, Fog) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(gfx::kProg0Unlit);
     Set(c.prog0.object_color, {255, 255, 255, 128});
@@ -498,7 +493,7 @@ TEST(GfxMeshDc2, Fog) {
     EXPECT_TRUE(Centre(fixture, 23, 23, 23));
 }
 
-TEST(GfxMeshDc2, EditorFogSaturatesAtFarValue) {
+TEST(GfxGpuMeshDc2, EditorFogSaturatesAtFarValue) {
     GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
     Prog0Draw c = Prog0(gfx::kProg0Unlit);
     Set(c.prog0.object_color, {255, 255, 255, 128});

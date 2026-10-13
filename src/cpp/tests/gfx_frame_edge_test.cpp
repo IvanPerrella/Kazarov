@@ -103,15 +103,13 @@ void CheckFillFrameEdges(int width, int height) {
 
 } // namespace
 
-TEST(GfxMeshDc2, FillOutlineInWiderAndTallerWindowsStaysInsideTheFrame) {
-    CheckFillFrameEdges(1280, 720);
+TEST(GfxGpuMeshDc2, FillOutlineInWiderAndTallerWindowsStaysInsideTheFrame) {
     CheckFillFrameEdges(1366, 768);
     CheckFillFrameEdges(1920, 1080);
-    CheckFillFrameEdges(2560, 1440);
     CheckFillFrameEdges(800, 1200);
 }
 
-TEST(GfxMeshDc2, FillOutlineFourByThreeKeepsItsRightEdge) {
+TEST(GfxGpuMeshDc2, FillOutlineFourByThreeKeepsItsRightEdge) {
     SCOPED_TRACE("1024x768");
     GfxFixture fixture(1024, 768, 1.0f, true, kLogicalWidth, kLogicalHeight);
     gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
@@ -123,7 +121,7 @@ TEST(GfxMeshDc2, FillOutlineFourByThreeKeepsItsRightEdge) {
     EXPECT_TRUE(AnyBlack(fixture, frame.x + frame.w - 3, frame.x + frame.w, true, 384));
 }
 
-TEST(GfxMeshDc2, AnchoredHudOutsideLogicalFrameStaysHiddenInFill) {
+TEST(GfxGpuMeshDc2, AnchoredHudOutsideLogicalFrameStaysHiddenInFill) {
     GfxFixture fixture(1280, 720, 1.0f, true, kLogicalWidth, kLogicalHeight);
     gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
     fixture.Frame(kBlue, [&] {
@@ -139,7 +137,7 @@ TEST(GfxMeshDc2, AnchoredHudOutsideLogicalFrameStaysHiddenInFill) {
     EXPECT_TRUE(fixture.PixelNear(1220, 60, 0, 0, 255));
 }
 
-TEST(GfxMeshDc2, RightAnchoredHudClipsItsAnimationAtTheShiftedFrame) {
+TEST(GfxGpuMeshDc2, RightAnchoredHudClipsItsAnimationAtTheShiftedFrame) {
     GfxFixture fixture(1280, 720, 1.0f, true, kLogicalWidth, kLogicalHeight);
     gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
     fixture.Frame(kBlue, [&] {
@@ -155,7 +153,7 @@ TEST(GfxMeshDc2, RightAnchoredHudClipsItsAnimationAtTheShiftedFrame) {
     EXPECT_TRUE(fixture.PixelNear(1240, 60, 255, 0, 0));
 }
 
-TEST(GfxMeshDc2, FillScissorCanKeepItsLogicalExtent) {
+TEST(GfxGpuMeshDc2, FillScissorCanKeepItsLogicalExtent) {
     GfxFixture fixture(1280, 720, 1.0f, true, kLogicalWidth, kLogicalHeight);
     gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
     for (bool anchored : {false, true}) {

@@ -145,8 +145,13 @@ fn lock_stage(path: &Path) -> CoreResult<StageGuard> {
 
 pub fn acquire_stage(root: &Path, metadata: &Value) -> CoreResult<StageGuard> {
     fs::create_dir_all(root)?;
-    for entry in fs::read_dir(root)? {
-        let path = entry?.path();
+    // Directory order is unspecified (APFS differs from ext4 and NTFS); try
+    // matching stages in name order so reuse does not depend on the host.
+    let mut paths = fs::read_dir(root)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort();
+    for path in paths {
         if !path.is_dir()
             || !path
                 .file_name()

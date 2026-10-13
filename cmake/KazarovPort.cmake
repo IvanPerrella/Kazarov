@@ -105,6 +105,9 @@ function(kz_port_host_library target)
     # The game's replacement units include "gfx/gfx.hpp", so the include root is part of this library's interface.
     target_link_libraries(${target} PUBLIC kz_port_headers)
     target_compile_options(${target} PRIVATE -Wall -ffunction-sections -fdata-sections)
+    # arm64 clang fuses a*b+c into one rounding and x86-64 has no FMA in its baseline. The logical-to-pixel
+    # mapping floors such sums, so a fused one lands a whole pixel off on arm64 alone.
+    target_compile_options(${target} PRIVATE -ffp-contract=off)
 endfunction()
 
 function(kz_port_sce_sources out_var)

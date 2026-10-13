@@ -92,7 +92,7 @@ std::vector<gfx::MeshHandle> FillMeshSlots() {
 
 } // namespace
 
-TEST(GfxMeshDc2, DoomedMeshDrawIsRecorded) {
+TEST(GfxGpuMeshDc2, DoomedMeshDrawIsRecorded) {
     GfxFixture      fixture(kWidth, kHeight);
     gfx::MeshHandle mesh = gfx::CreateMesh(RedTriangle(), kTriangle);
     ASSERT_NE(mesh, gfx::kNullMesh);
@@ -115,7 +115,7 @@ TEST(GfxMeshDc2, DoomedMeshDrawIsRecorded) {
     EXPECT_GT(RedPixels(fixture), 0);
 }
 
-TEST(GfxMeshDc2, DoomedTextureCopyIsRecorded) {
+TEST(GfxGpuMeshDc2, DoomedTextureCopyIsRecorded) {
     GfxFixture         fixture(kWidth, kHeight);
     gfx::TextureHandle a = gfx::CreateTexture(gfx::TextureDesc{4, 4});
     gfx::TextureHandle b = gfx::CreateTexture(gfx::TextureDesc{4, 4});
@@ -137,7 +137,7 @@ TEST(GfxMeshDc2, DoomedTextureCopyIsRecorded) {
     gfx::DestroyTexture(a);
 }
 
-TEST(GfxMeshDc2, DoomedTextureUpdateIsRecorded) {
+TEST(GfxGpuMeshDc2, DoomedTextureUpdateIsRecorded) {
     GfxFixture         fixture(kWidth, kHeight);
     gfx::TextureHandle texture = gfx::CreateTexture(gfx::TextureDesc{2, 2});
     ASSERT_NE(texture, gfx::kNullTexture);
@@ -153,7 +153,7 @@ TEST(GfxMeshDc2, DoomedTextureUpdateIsRecorded) {
     list.reset();
 }
 
-TEST(GfxMeshDc2, DoomedResourcesCannotEscapeTheirRecording) {
+TEST(GfxGpuMeshDc2, DoomedResourcesCannotEscapeTheirRecording) {
     GfxFixture fixture(kWidth, kHeight);
     const auto texture = gfx::CreateTexture(gfx::TextureDesc{2, 2});
     const auto mesh = gfx::CreateMesh(RedTriangle(), kTriangle);
@@ -183,7 +183,7 @@ TEST(GfxMeshDc2, DoomedResourcesCannotEscapeTheirRecording) {
     EXPECT_TRUE(gfx::RenderList(*other, 1.0f, canonical));
 }
 
-TEST(GfxMeshDc2, DoomedTextureBindingsCannotEscapeTheirRecording) {
+TEST(GfxGpuMeshDc2, DoomedTextureBindingsCannotEscapeTheirRecording) {
     GfxFixture fixture(kWidth, kHeight);
     const auto texture = gfx::CreateTexture(gfx::TextureDesc{2, 2});
     const auto indexed = gfx::CreateTexture(gfx::TextureDesc{2, 2, gfx::TextureFormat::Index8});
@@ -225,9 +225,9 @@ TEST(GfxMeshDc2, DoomedTextureBindingsCannotEscapeTheirRecording) {
 }
 
 // All three presentation paths share recording validation, including its bookkeeping.
-class GfxPresentationOwnership : public ::testing::TestWithParam<int> {};
+class GfxGpuPresentationOwnership : public ::testing::TestWithParam<int> {};
 
-TEST_P(GfxPresentationOwnership, DoomedBindingsStayInTheirOwningRecording) {
+TEST_P(GfxGpuPresentationOwnership, DoomedBindingsStayInTheirOwningRecording) {
     GfxFixture fixture(kWidth, kHeight);
     const auto texture = gfx::CreateTexture(gfx::TextureDesc{2, 2});
     const auto indexed = gfx::CreateTexture(gfx::TextureDesc{2, 2, gfx::TextureFormat::Index8});
@@ -296,9 +296,9 @@ TEST_P(GfxPresentationOwnership, DoomedBindingsStayInTheirOwningRecording) {
     gfx::DestroyTexture(live_palette);
 }
 
-INSTANTIATE_TEST_SUITE_P(Keyed2DBillboardAndDepthOfField, GfxPresentationOwnership, ::testing::Values(0, 1, 2));
+INSTANTIATE_TEST_SUITE_P(Keyed2DBillboardAndDepthOfField, GfxGpuPresentationOwnership, ::testing::Values(0, 1, 2));
 
-TEST(GfxMeshDc2, SecondDestroyOfDoomedHandleIsHarmless) {
+TEST(GfxGpuMeshDc2, SecondDestroyOfDoomedHandleIsHarmless) {
     GfxFixture         fixture(kWidth, kHeight);
     gfx::TextureHandle texture = gfx::CreateTexture(gfx::TextureDesc{4, 4});
     gfx::MeshHandle    mesh = gfx::CreateMesh(RedTriangle(), kTriangle);
@@ -319,7 +319,7 @@ TEST(GfxMeshDc2, SecondDestroyOfDoomedHandleIsHarmless) {
     fixture.Frame(kClear, [] {});
 }
 
-TEST(GfxMeshDc2, CreateAtTheSlotLimitRetiresDestroyedSlots) {
+TEST(GfxGpuMeshDc2, CreateAtTheSlotLimitRetiresDestroyedSlots) {
     GfxFixture                      fixture(kWidth, kHeight, 1.0f, SmallTables());
     std::vector<gfx::TextureHandle> handles = FillTextureSlots();
     ASSERT_LT(handles.size(), kSafetyCap) << "the slot table never reported full";
@@ -338,7 +338,7 @@ TEST(GfxMeshDc2, CreateAtTheSlotLimitRetiresDestroyedSlots) {
     }
 }
 
-TEST(GfxMeshDc2, DestroyedSlotsReturnAfterTwoFrames) {
+TEST(GfxGpuMeshDc2, DestroyedSlotsReturnAfterTwoFrames) {
     GfxFixture                      fixture(kWidth, kHeight, 1.0f, SmallTables());
     std::vector<gfx::TextureHandle> handles = FillTextureSlots();
     ASSERT_LT(handles.size(), kSafetyCap) << "the slot table never reported full";
@@ -359,7 +359,7 @@ TEST(GfxMeshDc2, DestroyedSlotsReturnAfterTwoFrames) {
     }
 }
 
-TEST(GfxMeshDc2, CreateMeshAtTheSlotLimitRetiresDestroyedSlots) {
+TEST(GfxGpuMeshDc2, CreateMeshAtTheSlotLimitRetiresDestroyedSlots) {
     GfxFixture                   fixture(kWidth, kHeight, 1.0f, SmallTables());
     std::vector<gfx::MeshHandle> handles = FillMeshSlots();
     ASSERT_LT(handles.size(), kSafetyCap) << "the mesh table never reported full";

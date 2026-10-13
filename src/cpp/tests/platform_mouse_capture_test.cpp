@@ -9,7 +9,8 @@ TEST(MouseCaptureState, ReleasedPointerCannotReclaimCursorUntilRecapture) {
     MouseStop();
     int release[] = {SDL_SCANCODE_F12};
     MouseConfigure(true, release);
-    SDL_Event event{};
+    SDL_Event event;
+    SDL_zero(event);
     event.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
     event.button.button = SDL_BUTTON_LEFT;
     ASSERT_TRUE(MouseHandleEvent(event));
@@ -123,7 +124,8 @@ TEST_F(MouseCapture, ExplicitWindowedReleaseSurvivesRefocus) {
     MouseSetPointerCursor(true);
     ASSERT_TRUE(MouseInputLive());
     ASSERT_FALSE(SDL_CursorVisible());
-    SDL_Event event{};
+    SDL_Event event;
+    SDL_zero(event);
     event.type = SDL_EVENT_KEY_DOWN;
     event.key.scancode = SDL_SCANCODE_ESCAPE;
     ASSERT_FALSE(MouseHandleEvent(event));
