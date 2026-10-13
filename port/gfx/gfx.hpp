@@ -539,6 +539,7 @@ bool InvertAffineTransform(const float matrix[16], float inverse[16]);
 
 // Optional replacement for a screen-space composite whose texture is redrawn under the display
 // camera. Recording copies these vertices and state; canonical rendering keeps the original draw.
+// Replacement vertices are in target space and do not inherit the original draw's UI anchor.
 struct Presentation2D {
     std::span<const Vertex2D> vertices;
     DrawState state;

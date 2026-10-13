@@ -339,8 +339,9 @@ renders one.
 - **Composite bounds.** A recorded `Draw2D` can supply `Presentation2D` replacement vertices and state for a
   screen-space composite of a model image that is redrawn during presentation. The
   replacement is copied at recording time and is used only by display replay; the
-  canonical and immediate draw retain the original vertices and state. A matching
-  `Clear` can supply a presentation rectangle so stale scratch-image pixels outside
+  canonical and immediate draw retain the original vertices and state. The
+  replacement uses target-space coordinates without the original draw's UI anchor side.
+  A `Clear` can supply a presentation rectangle so stale scratch-image pixels outside
   the canonical object's bounds cannot leak into the enlarged composite. Callers
   must preserve texture-to-screen mapping and reject transparent fragments when an
   enlarged composite writes depth. This is separate from keyed 2D interpolation.

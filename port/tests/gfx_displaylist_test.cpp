@@ -1136,3 +1136,38 @@ TEST(GfxMisc, PresentationCompositeDoesNotWriteTransparentDepth) {
     EXPECT_EQ(fixture.pixels, canonical);
     gfx::DestroyTexture(texture);
 }
+
+TEST(GfxMeshDc2, PresentationReplacementDoesNotInheritUiAnchor) {
+    for (const auto [width, height] : {std::pair{128, 72}, std::pair{72, 128}}) {
+        GfxFixture fixture(width, height);
+        gfx::SetFrameLayout({gfx::AspectMode::Fill, 1.0f});
+        const auto extent = gfx::VisibleLogicalRect(gfx::kMainTarget);
+        const auto replacement = Quad(extent.x, extent.y, extent.w, extent.h, {128, 0, 0, 128});
+        auto record = [&](bool anchored, bool substitute) {
+            gfx::BeginRecording();
+            gfx::Clear(true, kClear.data(), true, 0);
+            gfx::UiAnchorScope anchor(anchored ? gfx::UiAnchor::Side(1, -1, true) : gfx::UiAnchor{});
+            const auto original = Quad(560, 100, 40, 100, {128, 0, 0, 128});
+            gfx::DrawState state;
+            const gfx::Presentation2D presentation{replacement, state};
+            gfx::Draw2D(gfx::Primitive::Quads, substitute ? original : replacement, {}, state,
+                        substitute ? &presentation : nullptr);
+            return gfx::EndRecording();
+        };
+        auto read = [&](const gfx::DisplayList &list, bool canonical) {
+            EXPECT_TRUE(gfx::RenderList(list, 0.5f, {.canonical = canonical, .present = !canonical}));
+            EXPECT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+            return fixture.pixels;
+        };
+        auto anchored = record(true, true);
+        const auto &draw = std::get<gfx::detail::Draw2DEntry>(anchored->entries.back());
+        ASSERT_EQ(draw.side.x, 1);
+        ASSERT_EQ(draw.side.y, -1);
+        const auto canonical = read(*anchored, true);
+        auto reference = record(false, false);
+        const auto expected = read(*reference, true);
+        EXPECT_NE(canonical, expected);
+        EXPECT_EQ(read(*anchored, false), expected) << width << 'x' << height;
+        EXPECT_EQ(read(*anchored, true), canonical);
+    }
+}

@@ -1106,9 +1106,12 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                 if constexpr (std::is_same_v<T, Draw2DEntry>) {
                     const std::vector<Vertex2D> *vertices = &e.vertices;
                     const DrawState *state = &e.state;
+                    UiSide side = e.side;
                     if (!canonical && !e.presentation_vertices.empty()) {
                         vertices = &e.presentation_vertices;
                         state = &e.presentation_state;
+                        // Composite replacements are in target space, independent of the original UI box.
+                        side = {};
                     } else if (overrides != nullptr) {
                         if (auto it = overrides->sprites.find(&e); it != overrides->sprites.end()) {
                             vertices = &it->second;
@@ -1118,7 +1121,7 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                         g.interpolation_tint = overrides && overrides->sprites.contains(&e) ? 4 : (e.state.depth_test == DepthTest::Always || e.state.screen_space) ? 3
                                                                                                                                                                     : 2;
                     }
-                    Draw2DSided(e.primitive, *vertices, GrabbedBinding(e.binding, canonical), *state, e.side);
+                    Draw2DSided(e.primitive, *vertices, GrabbedBinding(e.binding, canonical), *state, side);
                 } else if constexpr (std::is_same_v<T, MeshEntry>) {
                     if (tint && !canonical && CurrentRenderTarget() == kMainTarget) {
                         g.interpolation_tint = MeshTint(e, list, overrides);
