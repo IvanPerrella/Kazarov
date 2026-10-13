@@ -363,7 +363,8 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
     if (family >= kFamilyMesh && filter == Filter::Linear && g.anisotropy_level > 0) {
         push.sampler_slot = kBaseSamplerCount + (g.anisotropy_level - 1) * 4 + (push.sampler_slot & 3);
     }
-    push.flags = static_cast<uint32_t>(blend.transform) << kPushTransformShift;
+    push.flags = (static_cast<uint32_t>(blend.transform) << kPushTransformShift) |
+                 (g.interpolation_tint << 8);
     if (state.fog) {
         push.flags |= kPushFog;
     }

@@ -696,6 +696,8 @@ struct RenderOptions {
     // Display renders: the list is the host's own 2D, as an overlay always is, so the full-frame
     // rule carries none of it past the logical frame.
     bool host = false;
+    // Presentation-only interpolation diagnostic; also enabled by KZ_INTERPOLATION_TINT=1.
+    bool interpolation_tint = false;
 };
 
 // False when nothing was rendered: the list belongs to another renderer, a frame is open, or a

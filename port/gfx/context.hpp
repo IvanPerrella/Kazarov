@@ -328,6 +328,7 @@ struct Context {
     bool                         replaying = false;
     bool                         display_pass = false;
     // Errors are reported by the canonical render; display renders of the same list stay quiet.
+    uint32_t interpolation_tint = 0; // display replay only, packed into push flags bits 8-10
     bool  quiet = false;
     // The list being replayed is the host's own 2D, which the full-frame rule leaves as drawn.
     bool  host_draws = false;

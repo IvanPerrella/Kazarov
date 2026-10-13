@@ -561,3 +561,51 @@ TEST(GfxMeshDc2, MirroredInstancesAtSameOriginKeepHandedness) {
     EXPECT_EQ(after->cache.match[1], 1);
     gfx::DestroyMesh(mesh);
 }
+
+// Tint changes presentation RGB only, including draws with no pose predecessor or transform.
+TEST(GfxMeshDc2, InterpolationTintClassifiesGeometryAndPreservesCanonical) {
+    GfxFixture fixture(kWidth, kHeight);
+    const std::vector<gfx::Vertex3D> vertices = {
+        Vert({-1, -1, 0.5f}, {0, 0, 1}), Vert({3, -1, 0.5f}, {0, 0, 1}),
+        Vert({-1, 3, 0.5f}, {0, 0, 1})};
+    auto record = [&](gfx::InterpKey key, bool transformed, float camera) {
+        gfx::BeginRecording();
+        gfx::Clear(true, kClear.data(), true, 0);
+        gfx::SetInterpKey(key);
+        auto transform = gfx::IdentityMeshTransform();
+        transform.view[12] = camera;
+        gfx::MeshConstants constants = {};
+        std::memcpy(constants.mvp, transform.view, sizeof constants.mvp);
+        constants.diffuse[0] = constants.diffuse[1] = constants.diffuse[2] = constants.diffuse[3] = 1;
+        gfx::DrawMeshImmediate(vertices, kTriangle, constants, {}, {}, transformed ? &transform : nullptr);
+        return gfx::EndRecording();
+    };
+    auto before = record(71, true, 0);
+    auto matched = record(71, true, 0.1f);
+    auto unmatched = record(72, true, 0.1f);
+    auto newest = record(0, false, 0.1f);
+    auto check = [&](const gfx::DisplayListRef &list, int r, int g, int b) {
+        ASSERT_TRUE(gfx::RenderList(*list, 1, {.canonical = true}));
+        ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+        auto canonical = fixture.pixels;
+        ASSERT_TRUE(gfx::RenderList(*list, 0, {.canonical = true, .interpolation_tint = true}));
+        ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+        EXPECT_EQ(fixture.pixels, canonical);
+        ASSERT_TRUE(gfx::RenderList(*list, 0.5f, {.previous = before.get(), .present = true,
+                                               .interpolation_tint = true}));
+        ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+        EXPECT_TRUE(fixture.PixelNear(kWidth / 2, kHeight / 2, r, g, b, 3));
+        // No diagnostic state leaks into the next ordinary display replay.
+        ASSERT_TRUE(gfx::RenderList(*list, 1, {.present = true}));
+        ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+        EXPECT_EQ(fixture.pixels, canonical);
+    };
+    check(matched, 46, 230, 46);
+    check(unmatched, 46, 230, 230);
+    check(newest, 230, 46, 46);
+    gfx::BeginRecording();
+    gfx::Clear(true, kClear.data(), true, 0);
+    gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 640, 480, {255, 255, 255, 128}), {}, {});
+    auto ui = gfx::EndRecording();
+    check(ui, 71, 92, 255);
+}

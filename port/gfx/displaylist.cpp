@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -918,7 +920,96 @@ TextureBinding GrabbedBinding(const TextureBinding &binding, bool canonical) {
     return out;
 }
 
-void Replay(const DisplayList &list, bool canonical, const Overrides *overrides, bool host = false) {
+// Geometry status is deliberately separate from tick-exact fog, colour and texture inputs.
+uint32_t MeshTint(const MeshEntry &mesh, const DisplayList &list, const Overrides *overrides) {
+    if (overrides == nullptr || !list.records[mesh.record].has_transform) {
+        return 2; // newest only
+    }
+    if (list.cache.match[mesh.record] >= 0) {
+        return 1; // matched, including unchanged geometry under the display camera
+    }
+    return overrides->index[mesh.record] >= 0 || overrides->prog0_index[mesh.record] >= 0 ? 5 : 2;
+}
+
+const char *MeshReason(const MeshEntry &mesh, const DisplayList &list, const DisplayList *previous,
+                       const Overrides *overrides) {
+    const MeshRecord &record = list.records[mesh.record];
+    if (!record.has_transform) return "no_transform";
+    if (overrides == nullptr) return list.cut ? "list_cut" : "no_interpolation_pair";
+    if (record.no_interpolation) return "excluded_pose";
+    if (record.key == 0) return "no_key";
+    if (list.cache.match[mesh.record] >= 0) return "matched";
+    for (const MeshRecord &old : previous->records) {
+        if (old.key != record.key) continue;
+        if (Moved(old.model, record.model) > record.teleport_distance) return "teleport_or_instance_cut";
+        if (old.occurrence == record.occurrence) return "surface_or_instance_cut";
+    }
+    return "unmatched";
+}
+
+void TraceInterpolation(const DisplayList &list, const DisplayList *previous, const Overrides *overrides,
+                        float alpha) {
+    const char *path = std::getenv("KZ_INTERPOLATION_TRACE");
+    if (path == nullptr || *path == '\0' || alpha != 0.0f) return;
+    FILE *file = std::fopen(path, "a");
+    if (file == nullptr) return;
+    std::fprintf(file, "frame,%llu,previous,%llu,cameras,%zu,cut,%d,camera_cut,%d\n",
+                 static_cast<unsigned long long>(list.serial),
+                 static_cast<unsigned long long>(previous ? previous->serial : 0),
+                 list.cameras.size(), list.cut, list.camera_cut);
+    std::fprintf(file, "entry,kind,status,reason,key,occurrence,match,camera,mesh,texture,palette,blend,depth,fog,fog_changed,material_changed,projection_changed,local_changed,prog0_flags,x,y,z,x0,y0,x1,y1\n");
+    for (size_t i = 0; i < list.entries.size(); ++i) {
+        if (const MeshEntry *mesh = std::get_if<MeshEntry>(&list.entries[i])) {
+            const MeshRecord &r = list.records[mesh->record];
+            int32_t match = overrides ? list.cache.match[mesh->record] : -1;
+            bool fog = false, material = false, projection = false, local = false;
+            if (match >= 0 && previous) {
+                const MeshRecord &old = previous->records[match];
+                const auto &a = std::get<MeshEntry>(previous->entries[old.entry]);
+                projection = r.projection != old.projection;
+                local = r.local != old.local || r.middle != old.middle;
+                fog = std::memcmp(a.state.fog_color, mesh->state.fog_color, 3) != 0;
+                if (a.prog0 >= 0 && mesh->prog0 >= 0) {
+                    const auto &p = previous->prog0_blocks[a.prog0];
+                    const auto &q = list.prog0_blocks[mesh->prog0];
+                    fog = fog || std::memcmp(p.fog, q.fog, sizeof p.fog) != 0;
+                    material = std::memcmp(p.object_color, q.object_color, sizeof p.object_color) != 0 ||
+                               std::memcmp(p.ambient, q.ambient, sizeof p.ambient) != 0 ||
+                               std::memcmp(p.diffuse, q.diffuse, sizeof p.diffuse) != 0;
+                } else {
+                    fog = fog || std::memcmp(a.constants.fog, mesh->constants.fog, sizeof a.constants.fog) != 0;
+                    material = std::memcmp(a.constants.diffuse, mesh->constants.diffuse, sizeof a.constants.diffuse) != 0;
+                }
+            }
+            std::fprintf(file, "%zu,%s,%u,%s,%llu,%u,%d,%u,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%u,%.6g,%.6g,%.6g,,,,\n",
+                         i, mesh->prog0 >= 0 ? "prog0" : "mesh", MeshTint(*mesh, list, overrides),
+                         MeshReason(*mesh, list, previous, overrides), static_cast<unsigned long long>(r.key),
+                         r.occurrence, match, r.camera, mesh->mesh, mesh->binding.texture, mesh->binding.palette,
+                         mesh->state.blend, static_cast<int>(mesh->state.depth_test), mesh->state.fog,
+                         fog, material, projection, local,
+                         mesh->prog0 >= 0 ? list.prog0_blocks[mesh->prog0].flags : 0,
+                         r.model[12], r.model[13], r.model[14]);
+        } else if (const Draw2DEntry *sprite = std::get_if<Draw2DEntry>(&list.entries[i])) {
+            bool carried = overrides && overrides->sprites.contains(sprite);
+            uint32_t status = carried ? 4 : sprite->state.depth_test == DepthTest::Always ? 3 : 2;
+            float x0 = INFINITY, y0 = INFINITY, x1 = -INFINITY, y1 = -INFINITY;
+            for (const auto &v : sprite->vertices) {
+                x0 = std::min(x0, v.x); y0 = std::min(y0, v.y);
+                x1 = std::max(x1, v.x); y1 = std::max(y1, v.y);
+            }
+            std::fprintf(file, "%zu,2d,%u,%s,0,0,-1,%d,0,%u,%u,%d,%d,%d,0,0,0,0,0,0,0,0,%.6g,%.6g,%.6g,%.6g\n",
+                         i, status, carried ? "reprojected_corners" : status == 3 ? "flat_2d" :
+                         sprite->scene < 0 ? "missing_sprite_scene" : "newest_sprite_corners",
+                         sprite->scene, sprite->binding.texture, sprite->binding.palette,
+                         sprite->state.blend, static_cast<int>(sprite->state.depth_test), sprite->state.fog,
+                         x0, y0, x1, y1);
+        }
+    }
+    std::fclose(file);
+}
+
+void Replay(const DisplayList &list, bool canonical, const Overrides *overrides, bool host = false,
+            bool tint = false) {
     g.replaying = true;
     g.quiet = !canonical;
     g.host_draws = host;
@@ -926,6 +1017,7 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
         ResetGrabTwins();
     }
     for (const Entry &entry : list.entries) {
+        g.interpolation_tint = 0;
         std::visit(
             [&](const auto &e) {
                 using T = std::decay_t<decltype(e)>;
@@ -936,8 +1028,13 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                             vertices = &it->second;
                         }
                     }
+                    if (tint && !canonical) {
+                        g.interpolation_tint = overrides && overrides->sprites.contains(&e) ? 4 :
+                                               e.state.depth_test == DepthTest::Always ? 3 : 2;
+                    }
                     Draw2DSided(e.primitive, *vertices, GrabbedBinding(e.binding, canonical), e.state, e.side);
                 } else if constexpr (std::is_same_v<T, MeshEntry>) {
+                    if (tint && !canonical) g.interpolation_tint = MeshTint(e, list, overrides);
                     const MeshConstants *constants = &e.constants;
                     if (overrides != nullptr && overrides->index[e.record] >= 0) {
                         constants = &overrides->constants[overrides->index[e.record]];
@@ -1005,6 +1102,7 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
             UpdateMeshVertices(update->mesh, update->first, update->vertices);
         }
     }
+    g.interpolation_tint = 0;
     g.replaying = false;
     g.quiet = false;
     g.host_draws = false;
@@ -1288,10 +1386,13 @@ bool RenderList(const DisplayList &list, float alpha, const RenderOptions &optio
     if (!OpenListFrame(false, options.present, list.needs_base)) {
         return false;
     }
-    Replay(list, false, interpolate ? &overrides : nullptr, options.host);
+    const char *setting = std::getenv("KZ_INTERPOLATION_TINT");
+    bool tint = options.interpolation_tint || (setting && std::strcmp(setting, "1") == 0);
+    if (tint) TraceInterpolation(list, options.previous, interpolate ? &overrides : nullptr, alpha);
+    Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint);
     if (options.overlay != nullptr && options.overlay->instance == g.renderer_instance) {
         SetRenderTarget(kMainTarget);
-        Replay(*options.overlay, false, nullptr, true);
+        Replay(*options.overlay, false, nullptr, true, tint);
     }
     CloseListFrame(false, options.present);
     return true;

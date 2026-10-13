@@ -134,6 +134,16 @@ void main() {
         discard;
     }
 
+    // Keep the original coverage, alpha test and blending. Only presentation RGB is tinted.
+    uint status = (pc.flags >> 8) & 7u;
+    if (status != 0u) {
+        vec3 tint = status == 1u ? vec3(0.1, 1.0, 0.1) :
+                    status == 2u ? vec3(1.0, 0.1, 0.1) :
+                    status == 3u ? vec3(0.1, 0.2, 1.0) :
+                    status == 4u ? vec3(1.0, 1.0, 0.1) : vec3(0.1, 1.0, 1.0);
+        color.rgb = mix(color.rgb, tint, 0.8);
+    }
+
     float factor    = (pc.flags & kFactorFix) != 0u ? float((pc.alpha >> 16) & 0xFFu) / 128.0 : color.a;
     uint  transform = (pc.flags >> kTransformShift) & 3u;
     vec3  rgb       = transform == 1u ? color.rgb * (1.0 + factor) : transform == 2u ? vec3(factor) : color.rgb;
