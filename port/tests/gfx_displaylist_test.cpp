@@ -1171,3 +1171,35 @@ TEST(GfxMeshDc2, PresentationReplacementDoesNotInheritUiAnchor) {
         EXPECT_EQ(read(*anchored, true), canonical);
     }
 }
+
+TEST(GfxMisc, HostReplacementSuppressesOnlyTheTaggedMainDisplayGroup) {
+    GfxOptions settings;
+    settings.offscreen = true;
+    settings.logical_width = 64;
+    settings.logical_height = 48;
+    GfxFixture fixture(64, 48, 1, settings);
+    gfx::BeginRecording();
+    gfx::Clear(true, kClear.data(), true, 0);
+    gfx::SetInterp2D({77});
+    gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 32, 48, {255, 0, 0, 255}), {}, {});
+    gfx::SetInterp2D({78});
+    gfx::Draw2D(gfx::Primitive::Quads, Quad(32, 0, 32, 48, {0, 0, 255, 255}), {}, {});
+    const auto scene = gfx::EndRecording();
+    ASSERT_TRUE(gfx::RenderList(*scene, 1, {.canonical = true, .suppressed_2d_key = 77}));
+    std::vector<uint8_t> canonical, display;
+    uint32_t             w = 0, h = 0;
+    ASSERT_TRUE(gfx::ReadbackFrame(canonical, w, h));
+    gfx::BeginRecording();
+    gfx::SetInterp2D({77});
+    gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 16, 16, {0, 255, 0, 255}), {}, {});
+    const auto overlay = gfx::EndRecording();
+    ASSERT_TRUE(gfx::RenderList(*scene, 1, {.present = true, .overlay = overlay.get(), .suppressed_2d_key = 77}));
+    ASSERT_TRUE(gfx::ReadbackFrame(display, w, h));
+    const auto pixel = [&](int x, int y, int c) { return display[(y * w + x) * 4 + c]; };
+    EXPECT_EQ(pixel(8, 8, 1), 255);   // host overlay is not suppressed by its identical key
+    EXPECT_EQ(pixel(8, 32, 0), 0);    // original hand is hidden
+    EXPECT_EQ(pixel(48, 32, 2), 255); // unclaimed selection highlight is retained
+    ASSERT_TRUE(gfx::PresentCanonical());
+    ASSERT_TRUE(gfx::ReadbackFrame(display, w, h));
+    EXPECT_EQ(display, canonical);
+}

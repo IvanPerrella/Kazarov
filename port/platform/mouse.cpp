@@ -19,6 +19,12 @@ std::uint32_t g_swallowed = 0;
 float         g_dx = 0.0f;
 float         g_dy = 0.0f;
 float         g_wheel = 0.0f;
+bool          g_pointer_cursor = false;
+
+void UpdateCursor(bool focused, bool client) {
+    if (MousePointerCursorHidden(g_pointer_cursor || g_captured, focused, client)) SDL_HideCursor();
+    else SDL_ShowCursor();
+}
 
 void SetCaptured(bool captured) {
     if (SDL_Window *window = WindowHandle()) {
@@ -28,6 +34,7 @@ void SetCaptured(bool captured) {
         }
     }
     g_captured = captured;
+    MouseSetPointerCursor(g_pointer_cursor);
 }
 
 bool Live() { return g_captured || !g_capture_enabled; }
@@ -83,6 +90,7 @@ void MouseStart() {
 }
 
 void MouseStop() {
+    MouseSetPointerCursor(false);
     if (g_captured) {
         SetCaptured(false);
     }
@@ -98,6 +106,7 @@ bool MouseHandleEvent(const SDL_Event &event) {
     switch (event.type) {
         case SDL_EVENT_WINDOW_FOCUS_GAINED:
         case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+            MouseSetPointerCursor(g_pointer_cursor);
             // Fullscreen startup can finish and gain focus after MouseStart. SDL releases
             // relative mode on focus loss; restore it when the game becomes active again.
             if (g_capture_enabled && (!g_released || Fullscreen())) {
@@ -109,6 +118,7 @@ bool MouseHandleEvent(const SDL_Event &event) {
             }
             return false;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
+            UpdateCursor(false, false);
             if (g_captured) {
                 SetCaptured(false);
             }
@@ -116,6 +126,12 @@ bool MouseHandleEvent(const SDL_Event &event) {
             g_dx = 0.0f;
             g_dy = 0.0f;
             g_wheel = 0.0f;
+            return false;
+        case SDL_EVENT_WINDOW_MOUSE_ENTER:
+            MouseSetPointerCursor(g_pointer_cursor);
+            return false;
+        case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+            UpdateCursor(true, false);
             return false;
         case SDL_EVENT_MOUSE_MOTION:
             if (Live()) {
@@ -177,4 +193,21 @@ void MouseTakeMotion(float &dx, float &dy) {
     dy = g_dy;
     g_dx = 0.0f;
     g_dy = 0.0f;
+}
+
+void MousePeekMotion(float &dx, float &dy) {
+    dx = g_dx;
+    dy = g_dy;
+}
+
+bool MousePointerCursorHidden(bool pointer, bool focused, bool client) {
+    return pointer && focused && client;
+}
+
+void MouseSetPointerCursor(bool pointer) {
+    g_pointer_cursor = pointer;
+    if (auto *window = WindowHandle()) {
+        const auto flags = SDL_GetWindowFlags(window);
+        UpdateCursor(flags & SDL_WINDOW_INPUT_FOCUS, flags & SDL_WINDOW_MOUSE_FOCUS);
+    }
 }

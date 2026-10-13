@@ -29,5 +29,12 @@ std::uint32_t MouseButtons();
 // y grows downward.
 void MouseTakeMotion(float &dx, float &dy);
 
+// A display overlay can follow pending motion without consuming the logic tick's input.
+void MousePeekMotion(float &dx, float &dy);
+
+// Hide the native cursor only while the game's pointer owns the focused client area.
+bool MousePointerCursorHidden(bool pointer, bool focused, bool client);
+void MouseSetPointerCursor(bool pointer);
+
 // The wheel's turn since the previous call, in notches; positive away from the user.
 float MouseTakeWheel();

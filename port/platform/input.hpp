@@ -180,6 +180,10 @@ bool InputDeveloperMenu();
 // Takes the pointer's motion and wheel since the last call, live and scripted.
 InputMenuMouse InputTakeMenuMouse();
 
+// Pending live/touch motion only; scripts remain sampled once per logic tick.
+// Does not drain motion, wheel, buttons or tap edges.
+void InputPeekMenuMouseMotion(float &dx, float &dy);
+
 // The family of button symbols that matches the device last used: keyboard and mouse after a key,
 // a mouse button or the mouse moved, otherwise the first gamepad's make (PS4 before one has been
 // touched; Xbox for a pad of unknown make).
