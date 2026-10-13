@@ -363,13 +363,25 @@ def overridden(text, overrides, renames=None, defined=(), long_is_64=False, priv
     """The (start, definition) of each definition at file scope of a name in overrides, given the
     macros the port defines."""
     found = list(definitions(text, overrides, renames, long_is_64, private_variables, private_functions))
+    declarations = [(start, definition) for start, definition in
+                    definitions(text, overrides, renames, long_is_64, False, True, True)
+                    if definition.declaration]
+    # A definition without a storage specifier inherits an earlier static prototype's linkage.
+    inherited = {canonical(definition.name, long_is_64) for start, definition in found
+                 if not definition.variable and any(
+                     earlier < start and prototype.static and
+                     canonical(prototype.name, long_is_64) == canonical(definition.name, long_is_64)
+                     for earlier, prototype in declarations)}
+    if not private_functions:
+        found = [(start, definition) for start, definition in found
+                 if definition.variable or canonical(definition.name, long_is_64) not in inherited]
     if private_functions:
-        private = {definition.name for _, definition in found if definition.static and not definition.variable}
+        private = inherited | {canonical(definition.name, long_is_64) for _, definition in found
+                               if definition.static and not definition.variable}
         if private:
             # A prior static prototype establishes internal linkage even after the body is replaced.
-            found.extend((start, definition) for start, definition in
-                         definitions(text, private, renames, long_is_64, False, True, True)
-                         if definition.declaration)
+            found.extend((start, definition) for start, definition in declarations
+                         if canonical(definition.name, long_is_64) in private)
             found.sort(key=lambda entry: entry[0])
     if found:
         check_compiled(mask(text), found, set(defined))

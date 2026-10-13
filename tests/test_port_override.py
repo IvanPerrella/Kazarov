@@ -17,13 +17,14 @@ MARKER = 'g_retail_marker'
 
 
 @pytest.mark.parametrize('prototype', ['static int F(int);', 'static int F(int);\nstatic int F(int);'])
-def test_private_callback_with_forward_declarations_links_external_override(tmp_path, prototype):
+@pytest.mark.parametrize('storage', ['static ', ''])
+def test_private_callback_with_forward_declarations_links_external_override(tmp_path, prototype, storage):
     compiler = os.environ.get('CXX') or shutil.which('clang++') or shutil.which('g++')
     if not compiler:
         pytest.skip('a C++ compiler is required for the linkage regression')
     overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
     write(overrides, 'F(int)\n')
-    write(ps2 / 'a.cpp', prototype + '\nstatic int F(int x) { return x + 7; }\n'
+    write(ps2 / 'a.cpp', prototype + f'\n{storage}int F(int x) {{ return x + 7; }}\n'
           'static int F(float x) { return 9; }\n'
           'static int (*table[])(int) = {F};\n'
           'int main() { return table[0](3) == 42 && F(0.0f) == 9 ? 0 : 1; }\n')
@@ -37,6 +38,19 @@ def test_private_callback_with_forward_declarations_links_external_override(tmp_
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'static int F(float x)' in copied
     assert subprocess.run([str(executable)], capture_output=True).returncode == 0
+
+
+def test_static_prototype_keeps_inherited_linkage_override_opt_in(tmp_path):
+    overrides, ps2, stubs = scenario(tmp_path, 'int x', 'int x')
+    write(overrides, 'F(int)\n')
+    source = 'static int F(int);\nint F(int x) { return x + 7; }\n'
+    write(ps2 / 'a.cpp', source)
+    assert check(tmp_path, overrides, ps2, stubs).returncode != 0
+    assert source in strip(tmp_path, overrides, ps2)
+    assert check(tmp_path, overrides, ps2, stubs, '--private-functions').returncode == 0
+    copied = strip(tmp_path, overrides, ps2, '--private-functions')
+    assert 'static int F' not in copied
+    assert 'return x + 7' not in copied
 
 
 def test_private_variable_override_is_opt_in(tmp_path):
