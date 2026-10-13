@@ -237,7 +237,7 @@ def canonical(name, long_is_64):
 class Definition:
     """A definition at file scope: where it ends, the name it links under, what the port keeps of it."""
 
-    def __init__(self, text, flat, renames=None):
+    def __init__(self, text, flat, renames=None, function_declarations=False):
         """text starts at the definition and flat is its flattened form; raises if neither a
         function with its body nor a variable starts there."""
         paren, init, i = 0, None, 0
@@ -269,7 +269,11 @@ class Definition:
         c_linkage = any(C_LINKAGE.match(text, word.start()) for word in re.finditer(r"\bextern\b", head))
         declaration = text[: len(flat[:end].rstrip())].lstrip(" \t")
         opening = head.find("(")
-        if flat[i] == ";":
+        self.declaration = (flat[i] == ";" and opening >= 0 and init is None
+                            and FUNCTION_POINTER.match(head) is None)
+        if self.declaration and not function_declarations:
+            raise Error("a declaration, or a variable with constructor arguments")
+        if flat[i] == ";" and not self.declaration:
             if grouped(flat[:i]):
                 raise GroupedError("one name per PORT_OVERRIDE declaration, and no comma outside brackets; "
                                  "use a type alias or split it")
@@ -285,7 +289,8 @@ class Definition:
             self.length = i + 1
             self.replacement = declaration + ";" if c_linkage else "extern " + declaration + ";"
             return
-        self.length = closing(flat, i) + 1
+        self.variable = False
+        self.length = i + 1 if self.declaration else closing(flat, i) + 1
         name = NAME.search(head[:opening].rstrip())
         if name is None:
             raise Error("no name")
@@ -358,12 +363,21 @@ def overridden(text, overrides, renames=None, defined=(), long_is_64=False, priv
     """The (start, definition) of each definition at file scope of a name in overrides, given the
     macros the port defines."""
     found = list(definitions(text, overrides, renames, long_is_64, private_variables, private_functions))
+    if private_functions:
+        private = {definition.name for _, definition in found if definition.static and not definition.variable}
+        if private:
+            # A prior static prototype establishes internal linkage even after the body is replaced.
+            found.extend((start, definition) for start, definition in
+                         definitions(text, private, renames, long_is_64, False, True, True)
+                         if definition.declaration)
+            found.sort(key=lambda entry: entry[0])
     if found:
         check_compiled(mask(text), found, set(defined))
     return found
 
 
-def definitions(text, overrides, renames=None, long_is_64=False, private_variables=False, private_functions=False):
+def definitions(text, overrides, renames=None, long_is_64=False, private_variables=False, private_functions=False,
+                function_declarations=False):
     """Yields (start, definition) for each definition at file scope of a name in overrides."""
     # A spliced line could join a name the scan below would not see.
     for number, (line, directive) in enumerate(directive_lines(text), 1):
@@ -405,7 +419,7 @@ def definitions(text, overrides, renames=None, long_is_64=False, private_variabl
         if any(directive is not None for _, directive in head):
             raise Error(f"{number}: {CONDITIONAL}")
         try:
-            definition = Definition(text[start:], flat[start:], renames)
+            definition = Definition(text[start:], flat[start:], renames, function_declarations)
         except ConditionalError as error:
             raise Error(f"{number}: {error}") from None
         except Error:
