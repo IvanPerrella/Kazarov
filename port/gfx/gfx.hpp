@@ -542,7 +542,7 @@ bool InvertAffineTransform(const float matrix[16], float inverse[16]);
 // Replacement vertices are in target space and do not inherit the original draw's UI anchor.
 struct Presentation2D {
     std::span<const Vertex2D> vertices;
-    DrawState state;
+    DrawState                 state;
 };
 
 void Draw2D(Primitive primitive, std::span<const Vertex2D> vertices, const TextureBinding &texture,
@@ -694,7 +694,10 @@ private:
 
 // Not inside a frame BeginFrame opened.
 // Game and host overlay lists keep independent reservation histories; neither owns prior commands.
-enum class RecordingKind { Game, Overlay };
+enum class RecordingKind {
+    Game,
+    Overlay
+};
 void           BeginRecording(RecordingKind kind = RecordingKind::Game);
 DisplayListRef EndRecording();
 bool           Recording();

@@ -21,12 +21,12 @@ TEST(GfxMeshDc2, InterpolatedOutlineEscapesNewestPartCrop) {
     GfxFixture fixture(64, 48, 1.0f, options);
     const auto target = gfx::CreateRenderTarget(64, 48, true, true);
     ASSERT_NE(target, gfx::kNullTexture);
-    const gfx::LogicalRect full{0, 0, 64, 48};
-    const uint8_t clear[4] = {0, 0, 0, 0};
+    const gfx::LogicalRect           full{0, 0, 64, 48};
+    const uint8_t                    clear[4] = {0, 0, 0, 0};
     const std::vector<gfx::Vertex3D> triangle = {
         {{-0.2f, -0.2f, 0.5f}}, {{0.2f, -0.2f, 0.5f}}, {{0, 0.2f, 0.5f}}};
     const std::vector<uint32_t> indices = {0, 1, 2};
-    auto record = [&](float camera, bool tagged) {
+    auto                        record = [&](float camera, bool tagged) {
         auto transform = gfx::IdentityMeshTransform();
         transform.view[12] = camera;
         gfx::MeshConstants constants{};
@@ -37,7 +37,7 @@ TEST(GfxMeshDc2, InterpolatedOutlineEscapesNewestPartCrop) {
             block.object_color[i] = i == 3 ? 128 : 200;
             block.diffuse[i] = 1;
         }
-        const float x = 32 + camera * 32;
+        const float            x = 32 + camera * 32;
         const gfx::LogicalRect crop{x - 8, 18, 16, 12};
         gfx::BeginRecording();
         gfx::Clear(true, clear, true, 0);
@@ -56,7 +56,7 @@ TEST(GfxMeshDc2, InterpolatedOutlineEscapesNewestPartCrop) {
         gfx::TextureBinding binding;
         binding.texture = target;
         gfx::DrawState state;
-        auto display_quad = quad;
+        auto           display_quad = quad;
         for (int i = 0; i < 4; ++i) {
             auto &v = display_quad[i];
             v.x = v.u = (i == 1 || i == 2) ? full.w : 0;
@@ -73,17 +73,17 @@ TEST(GfxMeshDc2, InterpolatedOutlineEscapesNewestPartCrop) {
         EXPECT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
         return fixture.pixels;
     };
-    auto before = record(-0.5f, true);
-    auto after = record(0.5f, true);
-    auto untagged = record(0.5f, false);
+    auto       before = record(-0.5f, true);
+    auto       after = record(0.5f, true);
+    auto       untagged = record(0.5f, false);
     const auto newest = render(*untagged, 1, {.canonical = true});
     EXPECT_EQ(render(*after, 1, {.canonical = true}), newest);
     // Compare every display pixel against an independently recorded camera position.
     // This exercises the Prog0 path used by outlined character parts.
     for (int phase = 0; phase < 8; ++phase) {
         const float alpha = phase / 8.0f;
-        auto expected = record(-0.5f + alpha, false);
-        auto reference = render(*expected, 1, {.canonical = true});
+        auto        expected = record(-0.5f + alpha, false);
+        auto        reference = render(*expected, 1, {.canonical = true});
         render(*after, 1, {.canonical = true});
         EXPECT_EQ(render(*after, alpha, {.previous = before.get()}), reference) << alpha;
         EXPECT_EQ(render(*after, alpha, {.canonical = true}), newest);
@@ -172,7 +172,7 @@ Coverage ReadCoverage(GfxFixture &fixture) {
 } // namespace
 
 TEST(GfxDisplayList, RecordingReservesPriorSizesWithoutRetainingCommands) {
-    GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+    GfxFixture          fixture(kWidth, kHeight, 1.0f, Prog0Options());
     gfx::Prog0Constants constants = {};
     constants.flags = gfx::kProg0Unlit;
     gfx::BeginRecording();
@@ -213,7 +213,7 @@ TEST(GfxDisplayList, RecordingReservesPriorSizesWithoutRetainingCommands) {
 
 TEST(GfxDisplayList, RecordingReservationToleratesSmallGrowthAndResetsWithRenderer) {
     {
-        GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+        GfxFixture          fixture(kWidth, kHeight, 1.0f, Prog0Options());
         gfx::Prog0Constants constants = {};
         gfx::BeginRecording();
         for (int i = 0; i < 129; ++i) {
@@ -242,7 +242,7 @@ TEST(GfxDisplayList, RecordingReservationToleratesSmallGrowthAndResetsWithRender
 }
 
 TEST(GfxDisplayList, RecordingOverlayKeepsSeparateCapacityHistory) {
-    GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+    GfxFixture          fixture(kWidth, kHeight, 1.0f, Prog0Options());
     gfx::Prog0Constants constants{};
     gfx::BeginRecording();
     for (int i = 0; i < 129; ++i) {
@@ -1019,9 +1019,9 @@ TEST(GfxMisc, PresentationCompositeKeepsMovingMeshAndClearsReusedTarget) {
     GfxFixture fixture(64, 48, 1.0f, true, 64, 48);
     const auto target = gfx::NamedRenderTarget("moving-composite", 64, 48, true, true);
     ASSERT_NE(target, gfx::kNullTexture);
-    const uint8_t transparent[4] = {0, 0, 0, 0};
-    const uint8_t stale[4] = {0, 255, 0, 128};
-    const gfx::LogicalRect full{0, 0, 64, 48};
+    const uint8_t                    transparent[4] = {0, 0, 0, 0};
+    const uint8_t                    stale[4] = {0, 255, 0, 128};
+    const gfx::LogicalRect           full{0, 0, 64, 48};
     const std::vector<gfx::Vertex3D> vertices = {
         Vert({-0.2f, -0.2f, 0.5f}, {0, 0, 1}),
         Vert({0.2f, -0.2f, 0.5f}, {0, 0, 1}),
@@ -1047,7 +1047,10 @@ TEST(GfxMisc, PresentationCompositeKeepsMovingMeshAndClearsReusedTarget) {
         auto quad = Quad(box.x, box.y, box.w, box.h, {128, 128, 128, 128});
         auto display_quad = Quad(0, 0, 64, 48, {128, 128, 128, 128});
         for (auto *q : {&quad, &display_quad}) {
-            for (auto &v : *q) { v.u = v.x; v.v = v.y; }
+            for (auto &v : *q) {
+                v.u = v.x;
+                v.v = v.y;
+            }
         }
         gfx::DrawState state;
         state.blend = true;
@@ -1069,25 +1072,32 @@ TEST(GfxMisc, PresentationCompositeKeepsMovingMeshAndClearsReusedTarget) {
     };
     auto before = record(-0.375f, true);
     read(*before, 1, {.canonical = true});
-    auto after = record(0.375f, true);
+    auto       after = record(0.375f, true);
     const auto canonical = read(*after, 1, {.canonical = true});
-    auto unmodified = record(0.375f, false);
+    auto       unmodified = record(0.375f, false);
     EXPECT_EQ(read(*unmodified, 1, {.canonical = true}), canonical);
     for (int phase = 0; phase < 8; ++phase) {
         const float alpha = phase / 8.0f;
-        const auto actual = read(*after, alpha, {.previous = before.get()});
-        int red = 0, green = 0;
-        double x_sum = 0;
+        const auto  actual = read(*after, alpha, {.previous = before.get()});
+        int         red = 0, green = 0;
+        double      x_sum = 0;
         for (uint32_t y = 0; y < fixture.height; ++y) {
             for (uint32_t x = 0; x < fixture.width; ++x) {
                 const auto pixel = fixture.Pixel(x, y);
-                if (pixel[0] > 100) { ++red; x_sum += x; }
-                if (pixel[1] > 100) { ++green; }
+                if (pixel[0] > 100) {
+                    ++red;
+                    x_sum += x;
+                }
+                if (pixel[1] > 100) {
+                    ++green;
+                }
             }
         }
         EXPECT_GT(red, 45) << phase;
         EXPECT_EQ(green, 0) << phase;
-        if (red > 0) EXPECT_NEAR(x_sum / red, 19.5 + 24 * alpha, 0.6) << phase;
+        if (red > 0) {
+            EXPECT_NEAR(x_sum / red, 19.5 + 24 * alpha, 0.6) << phase;
+        }
         EXPECT_EQ(read(*after, 1, {.canonical = true}), canonical) << phase;
     }
 }
@@ -1138,17 +1148,20 @@ TEST(GfxMisc, PresentationCompositeDoesNotWriteTransparentDepth) {
 }
 
 TEST(GfxMeshDc2, PresentationReplacementDoesNotInheritUiAnchor) {
-    for (const auto [width, height] : {std::pair{128, 72}, std::pair{72, 128}}) {
+    for (const auto [width, height] : {
+             std::pair{128, 72 },
+             std::pair{72,  128}
+    }) {
         GfxFixture fixture(width, height);
         gfx::SetFrameLayout({gfx::AspectMode::Fill, 1.0f});
         const auto extent = gfx::VisibleLogicalRect(gfx::kMainTarget);
         const auto replacement = Quad(extent.x, extent.y, extent.w, extent.h, {128, 0, 0, 128});
-        auto record = [&](bool anchored, bool substitute) {
+        auto       record = [&](bool anchored, bool substitute) {
             gfx::BeginRecording();
             gfx::Clear(true, kClear.data(), true, 0);
-            gfx::UiAnchorScope anchor(anchored ? gfx::UiAnchor::Side(1, -1, true) : gfx::UiAnchor{});
-            const auto original = Quad(560, 100, 40, 100, {128, 0, 0, 128});
-            gfx::DrawState state;
+            gfx::UiAnchorScope        anchor(anchored ? gfx::UiAnchor::Side(1, -1, true) : gfx::UiAnchor{});
+            const auto                original = Quad(560, 100, 40, 100, {128, 0, 0, 128});
+            gfx::DrawState            state;
             const gfx::Presentation2D presentation{replacement, state};
             gfx::Draw2D(gfx::Primitive::Quads, substitute ? original : replacement, {}, state,
                         substitute ? &presentation : nullptr);
@@ -1159,12 +1172,12 @@ TEST(GfxMeshDc2, PresentationReplacementDoesNotInheritUiAnchor) {
             EXPECT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
             return fixture.pixels;
         };
-        auto anchored = record(true, true);
+        auto        anchored = record(true, true);
         const auto &draw = std::get<gfx::detail::Draw2DEntry>(anchored->entries.back());
         ASSERT_EQ(draw.side.x, 1);
         ASSERT_EQ(draw.side.y, -1);
         const auto canonical = read(*anchored, true);
-        auto reference = record(false, false);
+        auto       reference = record(false, false);
         const auto expected = read(*reference, true);
         EXPECT_NE(canonical, expected);
         EXPECT_EQ(read(*anchored, false), expected) << width << 'x' << height;

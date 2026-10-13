@@ -38,17 +38,19 @@ bool CanRecordBinding(const TextureBinding &binding) {
     }
     return true;
 }
+
 // Consecutive game frames usually record similar numbers of draws. Reserve their
 // large arrays once instead of repeatedly copying commands and bone blocks as
 // each vector grows. Only sizes survive; commands and resource ownership do not.
 struct RecordingSizes {
     uint64_t instance = 0;
-    size_t entries = 0;
-    size_t records = 0;
-    size_t prog0 = 0;
+    size_t   entries = 0;
+    size_t   records = 0;
+    size_t   prog0 = 0;
 };
+
 std::array<RecordingSizes, 2> g_recording_sizes;
-size_t g_recording_kind = 0;
+size_t                        g_recording_kind = 0;
 
 struct Quat {
     float x, y, z, w;
@@ -1105,10 +1107,12 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                 using T = std::decay_t<decltype(e)>;
                 if constexpr (std::is_same_v<T, Draw2DEntry>) {
                     if (!canonical && suppressed_2d_key != 0 && e.target == kMainTarget &&
-                        e.interpolation.key == suppressed_2d_key) return;
+                        e.interpolation.key == suppressed_2d_key) {
+                        return;
+                    }
                     const std::vector<Vertex2D> *vertices = &e.vertices;
-                    const DrawState *state = &e.state;
-                    UiSide side = e.side;
+                    const DrawState             *state = &e.state;
+                    UiSide                       side = e.side;
                     if (!canonical && !e.presentation_vertices.empty()) {
                         vertices = &e.presentation_vertices;
                         state = &e.presentation_state;
@@ -1161,7 +1165,8 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                     } else {
                         const LogicalRect *rect = !canonical && e.has_presentation_rect
                                                       ? &e.presentation_rect
-                                                      : e.has_rect ? &e.rect : nullptr;
+                                                  : e.has_rect ? &e.rect
+                                                               : nullptr;
                         Clear(e.color, e.rgba, e.depth, e.z, rect);
                     }
                 } else if constexpr (std::is_same_v<T, TargetEntry>) {
@@ -1539,7 +1544,7 @@ DisplayListRef EndRecording() {
         // Derive it from size, so a smaller scene does not retain a high-water mark.
         auto capacity = [](size_t size) { return size == 0 ? size_t{0} : std::bit_ceil(size); };
         g_recording_sizes[g_recording_kind] = {list->instance, capacity(list->entries.size()), capacity(list->records.size()),
-                             capacity(list->prog0_blocks.size())};
+                                               capacity(list->prog0_blocks.size())};
     }
     return list;
 }

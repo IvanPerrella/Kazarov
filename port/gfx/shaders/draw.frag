@@ -137,10 +137,10 @@ void main() {
     // Keep the original coverage, alpha test and blending. Only presentation RGB is tinted.
     uint status = (pc.flags >> 8) & 7u;
     if (status != 0u) {
-        vec3 tint = status == 1u ? vec3(0.1, 1.0, 0.1) :
-                    status == 2u ? vec3(1.0, 0.1, 0.1) :
-                    status == 3u ? vec3(0.1, 0.2, 1.0) :
-                    status == 4u ? vec3(1.0, 1.0, 0.1) : vec3(0.1, 1.0, 1.0);
+        vec3 tint = status == 1u ? vec3(0.1, 1.0, 0.1) : status == 2u ? vec3(1.0, 0.1, 0.1)
+                                                     : status == 3u   ? vec3(0.1, 0.2, 1.0)
+                                                     : status == 4u   ? vec3(1.0, 1.0, 0.1)
+                                                                      : vec3(0.1, 1.0, 1.0);
         color.rgb = mix(color.rgb, tint, 0.8);
     }
 

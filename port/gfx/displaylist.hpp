@@ -31,11 +31,11 @@ struct Draw2DEntry {
     UiSide                side;
     // DisplayList::scenes: the scene a draw that tests depth (a 3D sprite) stands in, or -1.
     int32_t scene = -1;
-    Interp2D      interpolation;
-    uint32_t      occurrence = 0;
-    TextureHandle target = kMainTarget;
+    Interp2D              interpolation;
+    uint32_t              occurrence = 0;
+    TextureHandle         target = kMainTarget;
     std::vector<Vertex2D> presentation_vertices;
-    DrawState presentation_state;
+    DrawState             presentation_state;
 };
 
 // The projection and camera the meshes around a 3D sprite were drawn with, and where the target's
@@ -70,7 +70,7 @@ struct ClearEntry {
     uint8_t     stencil_value = 0;
     bool        has_rect = false;
     LogicalRect rect = {};
-    bool has_presentation_rect = false;
+    bool        has_presentation_rect = false;
     LogicalRect presentation_rect = {};
 };
 

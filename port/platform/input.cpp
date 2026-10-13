@@ -988,7 +988,9 @@ const InputMouseLook &InputGetMouseLook() { return g_mouse_look; }
 
 void InputPeekMenuMouseMotion(float &dx, float &dy) {
     dx = dy = 0;
-    if (!g_menu_mouse) return;
+    if (!g_menu_mouse) {
+        return;
+    }
     MousePeekMotion(dx, dy);
     dx += g_menu_dx + g_touch_dx;
     dy += g_menu_dy + g_touch_dy;

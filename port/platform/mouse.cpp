@@ -22,8 +22,11 @@ float         g_wheel = 0.0f;
 bool          g_pointer_cursor = false;
 
 void UpdateCursor(bool focused, bool client) {
-    if (MousePointerCursorHidden(g_pointer_cursor || g_captured, focused, client)) SDL_HideCursor();
-    else SDL_ShowCursor();
+    if (MousePointerCursorHidden(g_pointer_cursor || g_captured, focused, client)) {
+        SDL_HideCursor();
+    } else {
+        SDL_ShowCursor();
+    }
 }
 
 void SetCaptured(bool captured) {
