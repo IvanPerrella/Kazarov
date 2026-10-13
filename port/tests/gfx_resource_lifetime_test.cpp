@@ -148,6 +148,36 @@ TEST(GfxMeshDc2, DoomedTextureUpdateIsRecorded) {
     list.reset();
 }
 
+TEST(GfxMeshDc2, DoomedResourcesCannotEscapeTheirRecording) {
+    GfxFixture fixture(kWidth, kHeight);
+    const auto texture = gfx::CreateTexture(gfx::TextureDesc{2, 2});
+    const auto mesh = gfx::CreateMesh(RedTriangle(), kTriangle);
+    ASSERT_NE(texture, gfx::kNullTexture);
+    ASSERT_NE(mesh, gfx::kNullMesh);
+    const uint8_t texel[] = {0, 255, 0, 255};
+
+    gfx::BeginRecording();
+    gfx::DestroyTexture(texture);
+    gfx::DestroyMesh(mesh);
+    EXPECT_TRUE(gfx::UpdateTexture(texture, 0, 0, 0, 1, 1, texel));
+    gfx::DrawMesh(mesh, 0, 3, PlainConstants(), {}, gfx::DrawState{});
+    auto owner = gfx::EndRecording();
+    ASSERT_EQ(gfx::ListStats(*owner).mesh_draws, 1u);
+
+    gfx::BeginRecording();
+    EXPECT_FALSE(gfx::UpdateTexture(texture, 0, 0, 0, 1, 1, texel));
+    gfx::DrawMesh(mesh, 0, 3, PlainConstants(), {}, gfx::DrawState{});
+    auto other = gfx::EndRecording();
+    EXPECT_EQ(gfx::ListStats(*other).mesh_draws, 0u);
+    EXPECT_EQ(gfx::ListStats(*other).stateful, 0u);
+
+    gfx::RenderOptions canonical;
+    canonical.canonical = true;
+    EXPECT_TRUE(gfx::RenderList(*owner, 1.0f, canonical));
+    owner.reset();
+    EXPECT_TRUE(gfx::RenderList(*other, 1.0f, canonical));
+}
+
 TEST(GfxMeshDc2, SecondDestroyOfDoomedHandleIsHarmless) {
     GfxFixture      fixture(kWidth, kHeight);
     gfx::TextureHandle texture = gfx::CreateTexture(gfx::TextureDesc{4, 4});

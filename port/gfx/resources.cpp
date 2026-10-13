@@ -346,7 +346,7 @@ Texture *LookupTexture(TextureHandle handle) {
     }
     Texture &texture = g.textures[slot];
     if (!texture.live || texture.generation != handle >> kSlotBits ||
-        (texture.doomed && !g.replaying && !RecordingCalls())) {
+        (texture.doomed && !g.replaying && texture.doomed != g.list.get())) {
         return nullptr;
     }
     return &texture;
@@ -359,7 +359,7 @@ Mesh *LookupMesh(MeshHandle handle) {
     }
     Mesh &mesh = g.meshes[slot];
     if (!mesh.live || mesh.generation != handle >> kSlotBits ||
-        (mesh.doomed && !g.replaying && !RecordingCalls())) {
+        (mesh.doomed && !g.replaying && mesh.doomed != g.list.get())) {
         return nullptr;
     }
     return &mesh;
@@ -482,7 +482,7 @@ void DestroyDoomedTexture(TextureHandle handle) {
     Image image = texture.image;
     Image depth = texture.depth;
     texture.live = false;
-    texture.doomed = false;
+    texture.doomed = nullptr;
     texture.image = {};
     texture.depth = {};
     DeferDestroy([slot, image, depth]() mutable {
@@ -504,7 +504,7 @@ void DestroyDoomedMesh(MeshHandle handle) {
     }
     Buffer buffer = mesh.buffer;
     mesh.live = false;
-    mesh.doomed = false;
+    mesh.doomed = nullptr;
     mesh.buffer = {};
     DeferDestroy([slot, buffer]() mutable {
         DestroyBuffer(buffer);
@@ -636,7 +636,7 @@ void DestroyTexture(TextureHandle handle) {
         if (g.record_target == handle) {
             SetRenderTarget(kMainTarget);
         }
-        texture->doomed = true;
+        texture->doomed = g.list.get();
         RecordDoomedTexture(handle);
         return;
     }
@@ -805,7 +805,7 @@ void DestroyMesh(MeshHandle handle) {
         return;
     }
     if (RecordingCalls()) {
-        mesh->doomed = true;
+        mesh->doomed = g.list.get();
         RecordDoomedMesh(handle);
         return;
     }

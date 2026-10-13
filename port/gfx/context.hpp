@@ -100,8 +100,8 @@ struct Texture {
     uint32_t    logical_height = 0;
     // The frame serial in which the draw command buffer last touched the image.
     uint64_t last_draw_use = 0;
-    // Destroyed while a list that may draw it was recorded: dead to the API, alive to replays.
-    bool doomed = false;
+    // The recording that owns destruction: only it may record further uses, but replays stay live.
+    const DisplayList *doomed = nullptr;
 };
 
 struct Mesh {
@@ -111,7 +111,7 @@ struct Mesh {
     uint32_t vertex_count = 0;
     uint32_t index_count = 0;
     uint64_t last_draw_use = 0;
-    bool     doomed = false;
+    const DisplayList *doomed = nullptr;
 };
 
 struct TransientChunk {
