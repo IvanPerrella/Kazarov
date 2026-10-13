@@ -91,6 +91,76 @@ Coverage ReadCoverage(GfxFixture &fixture) {
 
 } // namespace
 
+TEST(GfxDisplayList, RecordingReservesPriorSizesWithoutRetainingCommands) {
+    GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+    gfx::Prog0Constants constants = {};
+    constants.flags = gfx::kProg0Unlit;
+    gfx::BeginRecording();
+    gfx::SetInterpKey(17);
+    for (int i = 0; i < 129; ++i) {
+        constants.diffuse[0] = static_cast<float>(i);
+        gfx::detail::RecordMesh({}, nullptr, &constants);
+    }
+    gfx::CutInterpolation();
+    auto first = gfx::EndRecording();
+    ASSERT_EQ(first->prog0_blocks.size(), 129u);
+
+    gfx::BeginRecording();
+    auto empty = gfx::EndRecording();
+    EXPECT_GE(empty->entries.capacity(), first->entries.size());
+    EXPECT_GE(empty->records.capacity(), first->records.size());
+    EXPECT_GE(empty->prog0_blocks.capacity(), first->prog0_blocks.size());
+    EXPECT_TRUE(empty->entries.empty());
+    EXPECT_TRUE(empty->records.empty());
+    EXPECT_TRUE(empty->prog0_blocks.empty());
+    EXPECT_TRUE(empty->occurrences.empty());
+    EXPECT_FALSE(empty->cut);
+    EXPECT_FALSE(empty->camera_cut);
+    EXPECT_EQ(gfx::CurrentInterpKey(), 0u);
+    // Reservation must leave a still-live previous list and its owned constants intact.
+    for (int i = 0; i < 129; ++i) {
+        EXPECT_EQ(first->prog0_blocks[i].diffuse[0], static_cast<float>(i));
+        EXPECT_EQ(std::get<gfx::detail::MeshEntry>(first->entries[i]).prog0, i);
+    }
+
+    // The hint follows actual size, not a permanent high-water allocation after a scene change.
+    gfx::BeginRecording();
+    auto after_empty = gfx::EndRecording();
+    EXPECT_EQ(after_empty->entries.capacity(), 0u);
+    EXPECT_EQ(after_empty->records.capacity(), 0u);
+    EXPECT_EQ(after_empty->prog0_blocks.capacity(), 0u);
+}
+
+TEST(GfxDisplayList, RecordingReservationToleratesSmallGrowthAndResetsWithRenderer) {
+    {
+        GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+        gfx::Prog0Constants constants = {};
+        gfx::BeginRecording();
+        for (int i = 0; i < 129; ++i) {
+            gfx::detail::RecordMesh({}, nullptr, &constants);
+        }
+        auto first = gfx::EndRecording();
+        gfx::BeginRecording();
+        for (int i = 0; i < 130; ++i) {
+            gfx::detail::RecordMesh({}, nullptr, &constants);
+        }
+        auto second = gfx::EndRecording();
+        EXPECT_EQ(second->entries.capacity(), first->entries.capacity());
+        EXPECT_EQ(second->records.capacity(), first->records.capacity());
+        EXPECT_EQ(second->prog0_blocks.capacity(), first->prog0_blocks.capacity());
+        EXPECT_EQ(second->prog0_blocks.size(), 130u);
+        EXPECT_EQ(first->prog0_blocks.size(), 129u);
+    }
+    {
+        GfxFixture fixture(kWidth, kHeight, 1.0f, Prog0Options());
+        gfx::BeginRecording();
+        auto empty = gfx::EndRecording();
+        EXPECT_EQ(empty->entries.capacity(), 0u);
+        EXPECT_EQ(empty->records.capacity(), 0u);
+        EXPECT_EQ(empty->prog0_blocks.capacity(), 0u);
+    }
+}
+
 TEST(GfxDisplayList, BonesBlendPerBoneAtHalf) {
     gfx::Prog0Constants before = {};
     gfx::Prog0Constants after = {};
