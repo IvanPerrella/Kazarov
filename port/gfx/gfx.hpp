@@ -537,8 +537,15 @@ MeshTransform IdentityMeshTransform();
 // is singular.
 bool InvertAffineTransform(const float matrix[16], float inverse[16]);
 
+// Optional replacement for a screen-space composite whose texture is redrawn under the display
+// camera. Recording copies these vertices and state; canonical rendering keeps the original draw.
+struct Presentation2D {
+    std::span<const Vertex2D> vertices;
+    DrawState state;
+};
+
 void Draw2D(Primitive primitive, std::span<const Vertex2D> vertices, const TextureBinding &texture,
-            const DrawState &state);
+            const DrawState &state, const Presentation2D *presentation = nullptr);
 void DrawMesh(MeshHandle mesh, uint32_t first_index, uint32_t index_count, const MeshConstants &constants,
               const TextureBinding &texture, const DrawState &state,
               const MeshTransform *transform = nullptr);
@@ -604,8 +611,9 @@ private:
 // on a frame target the main target's horizontal extent.
 LogicalRect VisibleLogicalRect(TextureHandle target);
 // Clears the current target within rect (logical; null: all of it). color is GS bytes.
+// A presentation rectangle replaces only the recorded display clear's region.
 void Clear(bool clear_color, const uint8_t color[4], bool clear_depth, float depth,
-           const LogicalRect *rect = nullptr);
+           const LogicalRect *rect = nullptr, const LogicalRect *presentation_rect = nullptr);
 // Clears the stencil of the current target's depth buffer within rect (logical; null: all of it).
 void ClearStencil(uint8_t value, const LogicalRect *rect = nullptr);
 bool CopyTexture(TextureHandle src, Rect src_rect, TextureHandle dst, int32_t dst_x, int32_t dst_y);

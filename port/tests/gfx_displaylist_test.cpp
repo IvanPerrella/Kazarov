@@ -909,3 +909,125 @@ TEST(GfxDisplayList, WorldSpriteRejectsReuseTeleportAndIncompatibleViews) {
     reject(after, scene, near_crossing);
     reject(after, scene, gfx::detail::Mat4{});
 }
+
+TEST(GfxMisc, PresentationCompositeKeepsMovingMeshAndClearsReusedTarget) {
+    GfxFixture fixture(64, 48, 1.0f, true, 64, 48);
+    const auto target = gfx::NamedRenderTarget("moving-composite", 64, 48, true, true);
+    ASSERT_NE(target, gfx::kNullTexture);
+    const uint8_t transparent[4] = {0, 0, 0, 0};
+    const uint8_t stale[4] = {0, 255, 0, 128};
+    const gfx::LogicalRect full{0, 0, 64, 48};
+    const std::vector<gfx::Vertex3D> vertices = {
+        Vert({-0.2f, -0.2f, 0.5f}, {0, 0, 1}),
+        Vert({0.2f, -0.2f, 0.5f}, {0, 0, 1}),
+        Vert({0, 0.2f, 0.5f}, {0, 0, 1})};
+    auto record = [&](float x, bool replacement) {
+        gfx::BeginRecording();
+        gfx::SetRenderTarget(gfx::kMainTarget);
+        gfx::Clear(true, kClear.data(), true, 0);
+        gfx::SetRenderTarget(target);
+        // A shared scratch image can contain another object's pixels outside the tick's box.
+        gfx::Clear(true, stale, false, 0);
+        const gfx::LogicalRect box{(x + 0.8f) * 32 - 1, 18, 15, 12};
+        gfx::Clear(true, transparent, false, 0, &box, replacement ? &full : nullptr);
+        gfx::MeshConstants constants{};
+        Identity(constants.mvp);
+        constants.mvp[12] = x;
+        constants.diffuse[0] = constants.diffuse[3] = 1;
+        auto transform = gfx::IdentityMeshTransform();
+        transform.model[12] = x;
+        gfx::SetInterpKey(1);
+        gfx::DrawMeshImmediate(vertices, kTriangle, constants, {}, {}, &transform);
+        gfx::SetRenderTarget(gfx::kMainTarget);
+        auto quad = Quad(box.x, box.y, box.w, box.h, {128, 128, 128, 128});
+        auto display_quad = Quad(0, 0, 64, 48, {128, 128, 128, 128});
+        for (auto *q : {&quad, &display_quad}) {
+            for (auto &v : *q) { v.u = v.x; v.v = v.y; }
+        }
+        gfx::DrawState state;
+        state.blend = true;
+        gfx::Presentation2D presentation{display_quad, state};
+        presentation.state.alpha_test = true;
+        presentation.state.alpha_func = gfx::AlphaFunc::Greater;
+        gfx::TextureBinding binding;
+        binding.texture = target;
+        binding.filter = gfx::Filter::Nearest;
+        gfx::Draw2D(gfx::Primitive::Quads, quad, binding, state,
+                    replacement ? &presentation : nullptr);
+        return gfx::EndRecording();
+    };
+    auto read = [&](const gfx::DisplayList &list, float alpha, gfx::RenderOptions options) {
+        options.present = !options.canonical;
+        EXPECT_TRUE(gfx::RenderList(list, alpha, options));
+        EXPECT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+        return fixture.pixels;
+    };
+    auto before = record(-0.375f, true);
+    read(*before, 1, {.canonical = true});
+    auto after = record(0.375f, true);
+    const auto canonical = read(*after, 1, {.canonical = true});
+    auto unmodified = record(0.375f, false);
+    EXPECT_EQ(read(*unmodified, 1, {.canonical = true}), canonical);
+    for (int phase = 0; phase < 8; ++phase) {
+        const float alpha = phase / 8.0f;
+        const auto actual = read(*after, alpha, {.previous = before.get()});
+        int red = 0, green = 0;
+        double x_sum = 0;
+        for (uint32_t y = 0; y < fixture.height; ++y) {
+            for (uint32_t x = 0; x < fixture.width; ++x) {
+                const auto pixel = fixture.Pixel(x, y);
+                if (pixel[0] > 100) { ++red; x_sum += x; }
+                if (pixel[1] > 100) { ++green; }
+            }
+        }
+        EXPECT_GT(red, 45) << phase;
+        EXPECT_EQ(green, 0) << phase;
+        if (red > 0) EXPECT_NEAR(x_sum / red, 19.5 + 24 * alpha, 0.6) << phase;
+        EXPECT_EQ(read(*after, 1, {.canonical = true}), canonical) << phase;
+    }
+}
+
+TEST(GfxMisc, PresentationCompositeDoesNotWriteTransparentDepth) {
+    GfxFixture fixture(64, 48, 1.0f, true, 64, 48);
+    const auto texture = gfx::CreateTexture({2, 1});
+    ASSERT_NE(texture, gfx::kNullTexture);
+    const uint8_t pixels[] = {255, 0, 0, 128, 0, 0, 0, 0};
+    ASSERT_TRUE(gfx::UpdateTexture(texture, 0, 0, 0, 2, 1, pixels));
+    gfx::BeginRecording();
+    gfx::Clear(true, kClear.data(), true, 0);
+    auto quad = Quad(0, 0, 16, 48, {128, 128, 128, 128}, 0, 0, 0, 0, 0.8f);
+    auto display_quad = Quad(0, 0, 64, 48, {128, 128, 128, 128}, 0, 0, 0, 0, 0.8f);
+    for (auto *q : {&quad, &display_quad}) {
+        (*q)[0].u = (*q)[3].u = 0;
+        (*q)[1].u = (*q)[2].u = 2;
+        (*q)[0].v = (*q)[1].v = 0;
+        (*q)[2].v = (*q)[3].v = 1;
+    }
+    gfx::DrawState state;
+    state.blend = true;
+    state.depth_write = true;
+    gfx::Presentation2D presentation{display_quad, state};
+    presentation.state.alpha_test = true;
+    presentation.state.alpha_func = gfx::AlphaFunc::Greater;
+    gfx::TextureBinding binding;
+    binding.texture = texture;
+    binding.filter = gfx::Filter::Nearest;
+    gfx::Draw2D(gfx::Primitive::Quads, quad, binding, state, &presentation);
+    gfx::DrawState behind;
+    behind.depth_test = gfx::DepthTest::Greater;
+    gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 0, 64, 48, {0, 255, 0, 128}, 0, 0, 0, 0, 0.5f), {}, behind);
+    const auto list = gfx::EndRecording();
+    ASSERT_TRUE(gfx::RenderList(*list, 1, {.canonical = true}));
+    ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+    const auto canonical = fixture.pixels;
+    ASSERT_TRUE(gfx::RenderList(*list, 0.5f, {.present = true}));
+    ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+    EXPECT_GT(fixture.Pixel(24, 24)[0], 100);
+    EXPECT_EQ(fixture.Pixel(24, 24)[1], 0);
+    EXPECT_GT(fixture.Pixel(48, 24)[1], 200);
+    EXPECT_EQ(fixture.Pixel(48, 24)[0], 0);
+    ASSERT_TRUE(gfx::RenderList(*list, 1, {.canonical = true}));
+    ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+    EXPECT_EQ(fixture.pixels, canonical);
+    gfx::DestroyTexture(texture);
+}

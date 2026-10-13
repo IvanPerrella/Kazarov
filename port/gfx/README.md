@@ -336,6 +336,14 @@ renders one.
   loading screen took the window). `options.overlay` names a second list whose drawing entries run
   after the first's, uninterpolated, on `kMainTarget`, before the present: the host's FPS counter,
   which so never reaches a canonical image.
+- **Composite bounds.** A recorded `Draw2D` can supply `Presentation2D` replacement vertices and state for a
+  screen-space composite of a model image that is redrawn during presentation. The
+  replacement is copied at recording time and is used only by display replay; the
+  canonical and immediate draw retain the original vertices and state. A matching
+  `Clear` can supply a presentation rectangle so stale scratch-image pixels outside
+  the canonical object's bounds cannot leak into the enlarged composite. Callers
+  must preserve texture-to-screen mapping and reject transparent fragments when an
+  enlarged composite writes depth. This is separate from keyed 2D interpolation.
 - **Interpolation.** A mesh draw may carry a `MeshTransform` (projection, view, middle, model,
   local: `mvp` is their product) and is tagged with the current `InterpKey` (`SetInterpKey`). A
   display render at `alpha` < 1 with `options.previous` matches each tagged draw with the previous

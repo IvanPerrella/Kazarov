@@ -34,6 +34,8 @@ struct Draw2DEntry {
     Interp2D      interpolation;
     uint32_t      occurrence = 0;
     TextureHandle target = kMainTarget;
+    std::vector<Vertex2D> presentation_vertices;
+    DrawState presentation_state;
 };
 
 // The projection and camera the meshes around a 3D sprite were drawn with, and where the target's
@@ -68,6 +70,8 @@ struct ClearEntry {
     uint8_t     stencil_value = 0;
     bool        has_rect = false;
     LogicalRect rect = {};
+    bool has_presentation_rect = false;
+    LogicalRect presentation_rect = {};
 };
 
 struct TargetEntry {
@@ -166,7 +170,7 @@ namespace detail {
 // draw.cpp
 // Draw2D with the sides its anchor chose.
 void Draw2DSided(Primitive primitive, std::span<const Vertex2D> vertices, const TextureBinding &binding,
-                 const DrawState &state, UiSide side);
+                 const DrawState &state, UiSide side, const Presentation2D *presentation = nullptr);
 
 // displaylist.cpp
 void RecordEntry(Entry &&entry);
