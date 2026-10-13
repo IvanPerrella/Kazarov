@@ -421,6 +421,9 @@ renders one.
   pose matching when their texture or palette binding changes. Materials and other draw state
   remain newest. A place that comes into view starts where it is instead of sliding in from a
   neighbour's.
+  A non-instanced model pairs occurrences within each surface binding and index range,
+  consuming each predecessor once. Removing, inserting or reordering other surfaces does
+  not prevent its later parts from interpolating. Identical repeated passes keep their order.
 - **Faces that depend on the view.** A display render replays a draw under a camera the tick did
   not have, so anything the recorder decided from the tick's eye can be wrong in it. What turns
   towards or away from the eye must be left to `DrawState::cull`: the shadow volumes are recorded

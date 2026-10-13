@@ -483,20 +483,20 @@ void BuildMatches(const DisplayList &list, const DisplayList &previous) {
             MatchInstanced(list, previous, draws, it->second, cache.match);
             continue;
         }
-        // One model: its strips and passes come in the same order every tick.
+        // Pair occurrences within each surface, not the entire model. A culled or inserted
+        // part must not shift every later part away from its own predecessor.
+        std::vector<bool> claimed(it->second.records.size(), false);
         for (int32_t index : draws.records) {
             const MeshRecord &record = list.records[index];
-            if (record.no_interpolation) {
-                continue;
-            }
-            for (int32_t candidate : it->second.records) {
+            for (size_t face = 0; face < it->second.records.size(); ++face) {
+                const int32_t     candidate = it->second.records[face];
                 const MeshRecord &earlier = previous.records[candidate];
-                if (earlier.occurrence != record.occurrence) {
+                if (claimed[face] || !SameSurface(std::get<MeshEntry>(list.entries[record.entry]),
+                                                  std::get<MeshEntry>(previous.entries[earlier.entry]))) {
                     continue;
                 }
-                if (!(Moved(earlier.model, record.model) > record.teleport_distance) &&
-                    SameSurface(std::get<MeshEntry>(list.entries[record.entry]),
-                                std::get<MeshEntry>(previous.entries[earlier.entry]))) {
+                claimed[face] = true;
+                if (!record.no_interpolation && !(Moved(earlier.model, record.model) > record.teleport_distance)) {
                     cache.match[index] = candidate;
                     cache.blend[index] =
                         record.blend_vertices && earlier.blend_vertices &&
