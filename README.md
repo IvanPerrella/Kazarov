@@ -194,7 +194,7 @@ Built locally from the Kazarov root, with `docker build --platform linux/amd64 -
 
 ## FFmpeg
 
-Kazarov ships no FFmpeg code. `tools/ffmpeg/kz-ffmpeg` (launcher `scripts/build/kz-ffmpeg`) builds FFmpeg 7.1.1 from the pinned ffmpeg.org tarball, checked against its SHA-256, with only the `mpeg2video` decoder and the `mpegvideo` parser:
+Kazarov ships no FFmpeg code. `tools/ffmpeg/kz-ffmpeg` (launcher `scripts/build/kz-ffmpeg`) builds FFmpeg 9.0.2 from the pinned ffmpeg.org tarball, checked against its SHA-256, with only the `mpeg2video` decoder and the `mpegvideo` parser:
 
 ```
 --disable-everything --disable-programs --disable-doc --disable-network --disable-autodetect

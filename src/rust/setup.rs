@@ -86,13 +86,14 @@ impl Setup {
 }
 
 impl eframe::App for Setup {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.poll();
         let busy = self.worker.is_some();
         if busy && ctx.input(|input| input.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("Set up game data");
             ui.add_space(10.0);
             ui.label("Choose the folder containing your disc files, or enter a disc image path.");
