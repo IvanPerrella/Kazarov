@@ -227,16 +227,46 @@ vec3 SceneDirect(uint flags, uint scene) {
         ? vec3(0.62, 0.78, 0.90) : vec3(1.0);
 }
 
+float WetFloorNoise(vec2 point) {
+    vec2 cell = floor(point), local = fract(point);
+    local = local * local * (3.0 - 2.0 * local);
+    float a = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
+    float b = fract(sin(dot(cell + vec2(1.0, 0.0), vec2(127.1, 311.7))) * 43758.5453);
+    float c = fract(sin(dot(cell + vec2(0.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
+    float d = fract(sin(dot(cell + vec2(1.0, 1.0), vec2(127.1, 311.7))) * 43758.5453);
+    return mix(mix(a, b, local.x), mix(c, d, local.x), local.y);
+}
+
+float WetFloorCoverage(vec3 world_position, uint scene, uint profile, uint flags,
+                       vec3 plane, vec4 orm) {
+    if (scene != kSceneShipwreck || profile != kProfileWoodFloor ||
+        (flags & (kMeshWetSurface | kMeshEnvironment)) !=
+            (kMeshWetSurface | kMeshEnvironment) || orm.b > 0.1) return 0.0;
+    float upward = smoothstep(0.50, 0.82, plane.y);
+    vec2 position = world_position.xz * 0.11;
+    position += 0.65 * vec2(WetFloorNoise(position + vec2(19.0, 7.0)) - 0.5,
+                            WetFloorNoise(position + vec2(3.0, 23.0)) - 0.5);
+    float world_island = smoothstep(0.42, 0.60, WetFloorNoise(position));
+    return clamp(orm.a, 0.0, 1.0) * world_island * upward;
+}
+
 MaterialSurface EvaluateMaterial(vec3 albedo, vec3 diffuse, vec3 legacy_specular,
-                                 vec4 orm, float response_coverage, uint flags, uint profile, vec3 plane) {
+                                 vec4 orm, float response_coverage, uint flags, uint profile,
+                                 uint scene, vec3 plane, float floor_film) {
     MaterialSurface surface;
     surface.ao = clamp(orm.r, 0.0, 1.0);
     surface.roughness = clamp(orm.g, 0.24, 0.98);
     surface.metalness = clamp(orm.b, 0.0, 1.0);
-    surface.wetness = (flags & kMeshWetSurface) != 0u
-        ? clamp(orm.a, 0.0, 1.0) * smoothstep(0.30, 0.70, plane.y) : 0.0;
+    bool wet_floor = scene == kSceneShipwreck && profile == kProfileWoodFloor &&
+        (flags & (kMeshWetSurface | kMeshEnvironment)) ==
+            (kMeshWetSurface | kMeshEnvironment) && plane.y > 0.5 && surface.metalness < 0.1;
+    surface.wetness = wet_floor ? floor_film :
+        (flags & kMeshWetSurface) != 0u
+            ? clamp(orm.a, 0.0, 1.0) * smoothstep(0.30, 0.70, plane.y) : 0.0;
     float matte = (flags & kMeshMatte) != 0u ? 1.0 - surface.metalness : 0.0;
     bool wood = WoodProfile(profile);
+    if (wet_floor)
+        surface.roughness = mix(0.85, 0.35, floor_film);
     surface.roughness = mix(surface.roughness, max(surface.roughness, 0.85), matte);
     // Alpha zero is reserved for excluded flat/effect regions; smooth physical planes use
     // a flat normal RGB with positive alpha. Filtering gives their boundary continuous coverage.
@@ -247,14 +277,22 @@ MaterialSurface EvaluateMaterial(vec3 albedo, vec3 diffuse, vec3 legacy_specular
         ? smoothstep(0.30, 0.70, plane.y) * (1.0 - surface.metalness) : 0.0;
     surface.albedo = wood ? DampWoodAlbedo(albedo, wood_moisture)
         : albedo * mix(1.0, 0.82, surface.wetness);
+    if (wet_floor) {
+        float pool = smoothstep(0.20, 0.95, floor_film);
+        surface.albedo *= mix(1.0, 0.72, pool);
+    }
     vec3 base = diffuse * surface.albedo;
     vec3 dielectric = mix(clamp(legacy_specular, vec3(0.04), vec3(0.10)), vec3(0.01), matte);
-    dielectric = mix(dielectric, vec3(wood ? 0.030 : 0.04), surface.wetness);
+    dielectric = mix(dielectric, vec3(wet_floor ? 0.025 : wood ? 0.030 : 0.04), surface.wetness);
     surface.f0 = mix(dielectric, clamp(base, vec3(0.02), vec3(0.95)), surface.metalness);
     surface.directional_specular = mix(1.0, 0.12, matte) * surface.response_coverage;
     surface.local_specular = surface.directional_specular;
-    if (wood && (flags & kMeshWetSurface) != 0u) {
-        // Dry gaps retain a low broad return; only smoother wet fibres catch a stronger glint.
+    if (wet_floor) {
+        // Film islands catch a small directional sheen without a coherent mirror image.
+        float upward = smoothstep(0.30, 0.70, plane.y) * (1.0 - surface.metalness);
+        surface.directional_specular *= mix(1.0, 0.07 + 0.38 * surface.wetness, upward);
+        surface.local_specular *= mix(1.0, 0.20 + 0.36 * surface.wetness, upward);
+    } else if (wood && (flags & kMeshWetSurface) != 0u) {
         float ridge = pow(1.0 - smoothstep(0.48, 0.72, surface.roughness), 2.0);
         float upward = smoothstep(0.30, 0.70, plane.y) * (1.0 - surface.metalness);
         surface.directional_specular *= mix(1.0, 0.06 + 0.22 * ridge * surface.wetness, upward);
@@ -267,6 +305,16 @@ MaterialSurface EvaluateMaterial(vec3 albedo, vec3 diffuse, vec3 legacy_specular
         surface.local_specular = 0.0;
     }
     return surface;
+}
+
+vec3 WetFloorGrazingFallback(MaterialSurface surface, vec3 normal, vec3 view,
+                             uint scene, uint profile, uint flags) {
+    if (scene != kSceneShipwreck || profile != kProfileWoodFloor ||
+        (flags & (kMeshWetSurface | kMeshEnvironment)) !=
+            (kMeshWetSurface | kMeshEnvironment)) return vec3(0.0);
+    float grazing = pow(1.0 - max(dot(normal, view), 0.0), 3.0);
+    return surface.wetness * surface.wetness * surface.ao * grazing *
+           vec3(0.015, 0.030, 0.035);
 }
 
 vec3 MaterialSpecular(MaterialSurface surface, vec3 normal, vec3 view, vec3 light,
@@ -286,12 +334,14 @@ vec3 MaterialSpecular(MaterialSurface surface, vec3 normal, vec3 view, vec3 ligh
 }
 
 vec3 ApplyMaterialNormal(vec3 n, vec3 tangent, vec3 bitangent, vec4 normal_sample,
-                         float strength, uint flags, uint profile) {
+                         float strength, uint flags, uint profile, uint scene, float floor_film) {
     if (profile == kProfileFlat || profile == kProfileEffect) return n;
     vec3 mapped = normal_sample.xyz * 2.0 - 1.0;
     mapped.xy *= clamp(strength, 0.0, 1.0) * clamp(normal_sample.a, 0.0, 1.0);
     if (profile == kProfileWoodFloor && (flags & kMeshWetSurface) != 0u)
-        mapped.xy *= mix(1.0, 2.0, smoothstep(0.30, 0.70, n.y));
+        mapped.xy *= scene == kSceneShipwreck && (flags & kMeshEnvironment) != 0u
+            ? mix(1.0, 0.22, floor_film)
+            : mix(1.0, 2.0, smoothstep(0.30, 0.70, n.y));
     vec3 result = normalize(normalize(tangent) * mapped.x + normalize(bitangent) * mapped.y +
                             n * max(mapped.z, 0.05));
     return normalize(mix(n, result, smoothstep(0.35, 0.75, dot(n, result))));
@@ -524,6 +574,8 @@ vec3 TraceHitRadiance(vec3 origin, vec3 direction, float distance_limit, uint ki
     vec4 normal_sample = material.material_maps.x != 0u
         ? SampleMaterialMapHit(material.material_maps.x, material_uv, map_lod)
         : vec4(0.5, 0.5, 1.0, 1.0);
+    float floor_film = WetFloorCoverage(hit_position, material.material_maps.w,
+        material.material_maps.z, material.flags, geometric_normal, orm);
     if (material.material_maps.x != 0u && material.material_parameters.x > 0.0) {
         mat4x3 object_to_world = rayQueryGetIntersectionObjectToWorldEXT(query, true);
         vec3 pa = object_to_world * vec4(a.position.xyz, 1.0);
@@ -549,13 +601,17 @@ vec3 TraceHitRadiance(vec3 origin, vec3 direction, float distance_limit, uint ki
             if (dot(tangent, tangent) > 0.000001 && dot(bitangent, bitangent) > 0.000001) {
                 normal = ApplyMaterialNormal(normal, tangent, bitangent,
                     normal_sample,
-                    material.material_parameters.x, material.flags, material.material_maps.z);
+                    material.material_parameters.x, material.flags, material.material_maps.z,
+                    material.material_maps.w,
+                    floor_film);
             }
         }
     }
     MaterialSurface surface = EvaluateMaterial(texel,
         SrgbToLinear(clamp(material.diffuse.rgb, 0.0, 1.0)), material.specular.rgb,
-        orm, normal_sample.a, material.flags, material.material_maps.z, geometric_normal);
+        orm, normal_sample.a, material.flags, material.material_maps.z, material.material_maps.w,
+        geometric_normal,
+        floor_film);
     texel = surface.albedo;
     float metalness = surface.metalness;
     vec3 f0 = surface.f0;
@@ -575,6 +631,9 @@ vec3 TraceHitRadiance(vec3 origin, vec3 direction, float distance_limit, uint ki
         result += f0 * metalness * 0.012 * surface.ao;
         if ((material.flags & kMeshMatte) != 0u) result += texel * (1.0 - metalness) * 0.07;
         vec3 view = -direction;
+        if (!RayEffect(4u))
+            result += WetFloorGrazingFallback(surface, normal, view, material.material_maps.w,
+                                              material.material_maps.z, material.flags);
         for (uint i = 0u; i < min(material.light_count, 4u); i++) {
             vec3 light = normalize(-material.light_direction[i].xyz);
             float ndl = max(dot(normal, light), 0.0);
@@ -654,10 +713,87 @@ vec3 RayIndirectLighting(vec3 position, vec3 normal, vec3 reflection_normal, vec
            bounce_radiance * 0.045;
 }
 
+vec3 WetFloorRoughReflection(vec3 position, vec3 plane, vec3 view,
+                             MaterialSurface surface, float ambient_visibility,
+                             uint scene, uint profile, uint flags) {
+    if (!RayEffect(4u) || scene != kSceneShipwreck || profile != kProfileWoodFloor ||
+        (flags & (kMeshWetSurface | kMeshEnvironment)) !=
+            (kMeshWetSurface | kMeshEnvironment) || surface.wetness <= 0.65) return vec3(0.0);
+    vec3 normal = normalize(plane);
+    vec3 reflected = normalize(reflect(-view, normal));
+    if (dot(reflected, normal) <= 0.0) return vec3(0.0);
+    vec3 axis = abs(reflected.y) < 0.95 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(axis, reflected));
+    vec3 bitangent = cross(reflected, tangent);
+    float spread = clamp(surface.roughness * surface.roughness * 2.8, 0.30, 0.55);
+    vec3 radiance = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        vec3 offset = i < 2 ? tangent : bitangent;
+        if ((i & 1) != 0) offset = -offset;
+        vec3 direction = normalize(reflected + spread * offset);
+        if (dot(direction, normal) > 0.0) {
+            radiance += TraceHitRadiance(position + normal * 0.5, direction,
+                                         1024.0, 2u, surface.roughness);
+        }
+    }
+    radiance *= 0.25;
+    float ndv = max(dot(normal, view), 0.0);
+    vec3 fresnel = surface.f0 + (vec3(1.0) - surface.f0) * pow(1.0 - ndv, 5.0);
+    float coverage = smoothstep(0.65, 0.95, surface.wetness);
+    radiance += vec3(0.005, 0.00875, 0.01125) * ambient_visibility;
+    return radiance * fresnel * coverage * surface.ao;
+}
+
+vec3 MaterialSpecular(MaterialSurface surface, vec3 normal, vec3 view, vec3 light,
+                      out vec3 fresnel);
+
+vec3 WetFloorLampReflection(vec3 position, vec3 plane, vec3 view,
+                            MaterialSurface surface, uint scene, uint profile, uint flags) {
+    if (!RayEffect(16u) || scene != kSceneShipwreck || profile != kProfileWoodFloor ||
+        (flags & (kMeshWetSurface | kMeshEnvironment)) !=
+            (kMeshWetSurface | kMeshEnvironment) || surface.wetness <= 0.65) return vec3(0.0);
+    float coverage = smoothstep(0.65, 0.95, surface.wetness);
+    vec3 normal = normalize(plane);
+    vec3 total = vec3(0.0);
+    vec3 strongest = vec3(0.0);
+    float strongest_energy = 0.0;
+    vec3 strongest_direction = vec3(0.0);
+    float strongest_distance = 0.0;
+    for (uint i = 0u; i < min(u_local_lights.count.x, 8u); ++i) {
+        vec3 delta = u_local_lights.position_radius[i].xyz - position;
+        float distance = length(delta);
+        float radius = u_local_lights.position_radius[i].w * 2.4;
+        if (distance < 1.0 || distance >= radius) continue;
+        vec3 light = delta / distance;
+        float ndl = max(dot(normal, light), 0.0);
+        if (ndl <= 0.0) continue;
+        float edge = max(1.0 - distance * distance / (radius * radius), 0.0);
+        float falloff = edge * edge / (1.0 + distance * distance / 2500.0);
+        vec3 fresnel;
+        vec3 specular = MaterialSpecular(surface, normal, view, light, fresnel);
+        vec3 response = specular * ndl * falloff *
+            u_local_lights.color_intensity[i].rgb * u_local_lights.color_intensity[i].w * 0.55;
+        total += response;
+        float energy = dot(response, vec3(0.2126, 0.7152, 0.0722));
+        if (energy > strongest_energy) {
+            strongest = response;
+            strongest_energy = energy;
+            strongest_direction = light;
+            strongest_distance = distance;
+        }
+    }
+    // Match the local-light path's partial shadow while querying only its strongest source.
+    if (strongest_energy > 0.0001)
+        total -= 0.8 * strongest * TraceSceneOcclusion(
+            position + normal * 0.8, strongest_direction,
+            max(strongest_distance - 1.5, 1.0), 4u);
+    return total * coverage * surface.ao;
+}
+
 #endif
 
 vec3 MaterialDetailNormal(vec3 world_normal, vec3 world_position, vec2 uv,
-                          uint mesh_flags);
+                          uint mesh_flags, float floor_film);
 
 vec3 MaterialLighting(float roughness, vec3 n) {
     vec3 v = normalize(mc.camera_position.xyz - v_world_position);
@@ -715,7 +851,8 @@ vec3 MaterialLighting(float roughness, vec3 n) {
 // The enhanced display target stores scene radiance. Decode the game's colour inputs before
 // evaluating the BRDF, and apply the base texture only to diffuse/ambient energy. Multiplying
 // the whole lighting result by the texture would tint dielectric highlights with painted albedo.
-vec3 MaterialLightingLinear(MaterialSurface surface, vec3 n) {
+vec3 MaterialLightingLinear(MaterialSurface surface, vec3 n,
+                            out float ambient_visibility) {
     vec3 v = normalize(mc.camera_position.xyz - v_world_position);
     bool character_matte = (v_mesh_flags & kMeshMatte) != 0u;
     vec3 ambient_irradiance = SceneAmbient(v_mesh_flags, mc.material_maps.w);
@@ -728,9 +865,15 @@ vec3 MaterialLightingLinear(MaterialSurface surface, vec3 n) {
         base *= SrgbToLinear(clamp(v_vertex_color * kModulate, 0.0, 1.0));
     }
     vec3 f0 = surface.f0;
+    ambient_visibility = 1.0;
     vec3 color = SrgbToLinear(clamp(mc.ambient.rgb, 0.0, 1.0)) *
                  SrgbToLinear(clamp(mc.ambient_material.rgb, 0.0, 1.0)) *
                  texture_albedo * ambient_irradiance * (1.0 - metalness) * ao;
+#ifdef RAY_QUERY_AO
+    if (!RayEffect(4u))
+#endif
+        color += WetFloorGrazingFallback(surface, n, v, mc.material_maps.w,
+                                         mc.material_maps.z, v_mesh_flags);
     // Conductors have no painted diffuse ambient; a tiny coloured environment response
     // keeps a dark blade legible away from a direct light without inventing white fill.
     color += f0 * metalness * 0.012 * ao;
@@ -738,8 +881,10 @@ vec3 MaterialLightingLinear(MaterialSurface surface, vec3 n) {
     // visible under Shipwreck's cool, weak ambient without inventing a glossy white highlight.
     if (character_matte) color += texture_albedo * (1.0 - metalness) * 0.07;
 #ifdef RAY_QUERY_AO
-    if (RayEffect(1u)) color *= mix(character_matte ? 0.80 : 0.64, 1.0,
-                                   RayAmbientVisibility(v_world_position, n));
+    if (RayEffect(1u)) {
+        ambient_visibility = RayAmbientVisibility(v_world_position, n);
+        color *= mix(character_matte ? 0.80 : 0.64, 1.0, ambient_visibility);
+    }
     uint shadow_light = 0u;
     float strongest = 0.0;
     for (uint i = 0u; i < min(mc.light_count, 4u); i++) {
@@ -807,7 +952,13 @@ vec3 MaterialLightingLinear(MaterialSurface surface, vec3 n) {
             vec3 specular = MaterialSpecular(surface, n, v, l, fresnel);
             vec3 radiance = u_local_lights.color_intensity[i].rgb *
                             u_local_lights.color_intensity[i].w * 0.55;
-            specular *= surface.local_specular;
+            bool wet_floor_lamp = mc.material_maps.w == kSceneShipwreck &&
+                mc.material_maps.z == kProfileWoodFloor &&
+                (v_mesh_flags & (kMeshWetSurface | kMeshEnvironment)) ==
+                    (kMeshWetSurface | kMeshEnvironment);
+            float lamp_film = wet_floor_lamp
+                ? smoothstep(0.65, 0.95, surface.wetness) : 0.0;
+            specular *= surface.local_specular * (1.0 - lamp_film);
             color += ((1.0 - metalness) * (1.0 - fresnel) * base / kPi + specular) * ndl *
                      radiance * falloff * visibility;
         }
@@ -1000,24 +1151,27 @@ void main() {
         ? normalize(v_world_normal) : vec3(0.0, 1.0, 0.0);
     vec2 material_uv = MaterialMapUv(shading_normal, v_world_position, v_uv,
                                      kTextureMode == 0);
+    vec4 orm = mc.material_maps.y != 0u
+        ? SampleMaterialMap(mc.material_maps.y, material_uv)
+        : vec4(1.0, mc.material_roughness, 0.0, 0.0);
+    float floor_film = WetFloorCoverage(v_world_position, mc.material_maps.w,
+        mc.material_maps.z, v_mesh_flags, shading_normal, orm);
     if ((enhanced_mesh || (kHdrOutput && (v_mesh_flags & kMeshEnvironment) != 0u)) &&
         (kTextureMode != 0 || mc.material_maps.x != 0u) &&
         (v_mesh_flags & kMeshShadow) == 0u &&
         normal_length_squared > 0.000001) {
         shading_normal = MaterialDetailNormal(v_world_normal, v_world_position, v_uv,
-                                               v_mesh_flags);
+                                               v_mesh_flags, floor_film);
     }
     MaterialSurface surface;
     if (enhanced_mesh) {
-        vec4 orm = mc.material_maps.y != 0u
-            ? SampleMaterialMap(mc.material_maps.y, material_uv)
-            : vec4(1.0, mc.material_roughness, 0.0, 0.0);
         surface = EvaluateMaterial(kTextureMode == 0 ? vec3(1.0) :
             SrgbToLinear(clamp(texel.rgb, 0.0, 1.0)),
             SrgbToLinear(clamp(mc.diffuse.rgb, 0.0, 1.0)), mc.specular.rgb,
             orm, mc.material_maps.x != 0u ? SampleMaterialMap(mc.material_maps.x, material_uv).a : 1.0,
-            v_mesh_flags, mc.material_maps.z,
-            normal_length_squared > 0.000001 ? normalize(v_world_normal) : vec3(0.0, 1.0, 0.0));
+            v_mesh_flags, mc.material_maps.z, mc.material_maps.w,
+            normal_length_squared > 0.000001 ? normalize(v_world_normal) : vec3(0.0, 1.0, 0.0),
+            floor_film);
         roughness = surface.roughness;
         material_ao = surface.ao;
         metalness = surface.metalness;
@@ -1033,9 +1187,10 @@ void main() {
     }
     if (kAlphaTest && !AlphaPasses(color.a)) discard;
 
+    float ambient_visibility = 1.0;
     bool linear_rgb = kHdrOutput && enhanced_mesh;
     if (linear_rgb) {
-        color.rgb = MaterialLightingLinear(surface, shading_normal);
+        color.rgb = MaterialLightingLinear(surface, shading_normal, ambient_visibility);
     }
 
 #ifdef RAY_QUERY_AO
@@ -1072,7 +1227,10 @@ void main() {
         // Rough wood has no coherent mirror image. Wet stone patches and authored metal
         // retain secondary radiance with their own mapped roughness and normal.
         bool wet_face = surface.wetness > 0.15;
-        bool rough_wet_timber = wet_face && WoodProfile(mc.material_maps.z);
+        bool rough_wet_timber = (wet_face && WoodProfile(mc.material_maps.z)) ||
+            (mc.material_maps.w == kSceneShipwreck && mc.material_maps.z == kProfileWoodFloor &&
+             (v_mesh_flags & (kMeshWetSurface | kMeshEnvironment)) ==
+                 (kMeshWetSurface | kMeshEnvironment));
         bool authored_specular = metalness > 0.4 ||
             ((v_mesh_flags & kMeshMatte) == 0u &&
              max(max(mc.specular.r, mc.specular.g), mc.specular.b) > 0.12);
@@ -1084,6 +1242,10 @@ void main() {
                 ((wet_face && roughness < 0.66) || authored_specular),
             rough_wet_timber, surface.wetness);
         color.rgb += indirect;
+        color.rgb += WetFloorRoughReflection(v_world_position, reflection_normal, view,
+            surface, ambient_visibility, mc.material_maps.w, mc.material_maps.z, v_mesh_flags);
+        color.rgb += WetFloorLampReflection(v_world_position, reflection_normal, view,
+            surface, mc.material_maps.w, mc.material_maps.z, v_mesh_flags);
     }
 #endif
 

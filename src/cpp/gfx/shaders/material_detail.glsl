@@ -1,5 +1,5 @@
 vec3 MaterialDetailNormal(vec3 world_normal, vec3 world_position, vec2 uv,
-                          uint mesh_flags) {
+                          uint mesh_flags, float floor_film) {
     vec3 n = normalize(world_normal);
     if (mc.material_maps.x == 0u ||
         mc.material_maps.z == kProfileFlat || mc.material_maps.z == kProfileEffect ||
@@ -24,5 +24,5 @@ vec3 MaterialDetailNormal(vec3 world_normal, vec3 world_position, vec2 uv,
 
     return ApplyMaterialNormal(n, tangent, bitangent,
         SampleMaterialMap(mc.material_maps.x, detail_uv), mc.normal_detail_strength,
-        mesh_flags, mc.material_maps.z);
+        mesh_flags, mc.material_maps.z, mc.material_maps.w, floor_film);
 }
