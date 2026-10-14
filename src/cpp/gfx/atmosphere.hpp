@@ -32,5 +32,20 @@ bool AtmosphereEnabled();
 
 // Returns source unchanged when the current scene has no atmosphere.
 Image &AtmosphereApply(VkCommandBuffer cmd, Image &source, Image &depth);
+/**
+ * Draws queued world emissives into the fogged HDR image before bloom.
+ * The original GS fog applies when the atmosphere pass was skipped.
+ */
+void AtmosphereCompositeEmissives(Image &target, bool atmosphere_applied);
+/**
+ * Clears queued world emissives at the start of a new scene recording.
+ */
+void AtmosphereResetEmissives();
+/**
+ * Returns the current display camera's volume transmittance to a sprite vertex.
+ * Coordinates are render target pixels and reverse-Z depth.
+ */
+float AtmosphereSpriteTransmittance(float pixel_x, float pixel_y, float depth,
+                                   uint32_t width, uint32_t height);
 
 } // namespace gfx::detail

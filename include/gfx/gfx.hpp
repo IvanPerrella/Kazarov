@@ -414,6 +414,8 @@ struct DrawState {
     uint8_t   alpha_ref = 0;
     CullMode  cull = CullMode::None;
     bool      fog = false;
+    // Stable additive world sprites may composite after depth fog using their own distance.
+    bool      atmosphere_emissive = false;
     uint8_t   fog_color[3] = {0, 0, 0};
     // GS TEXA for textures without alpha: AEM makes black texels transparent, TA0 is the rest.
     bool        texa_aem = true;

@@ -15,6 +15,17 @@ namespace {
 
 constexpr uint32_t kSlotMask = 0xFFFF;
 
+struct DeferredEmissive {
+    Primitive primitive;
+    std::vector<Vertex2D> vertices;
+    TextureBinding binding;
+    DrawState state;
+    UiSide side;
+};
+std::vector<DeferredEmissive> deferred_emissives;
+Image *emissive_target = nullptr;
+bool replaying_emissives = false;
+
 struct Target {
     Image         *color = nullptr;
     Image         *depth = nullptr;
@@ -26,7 +37,7 @@ struct Target {
 Target ResolveTarget(TextureHandle handle) {
     Target target;
     if (handle == kMainTarget) {
-        target.color = &MainColorTarget();
+        target.color = emissive_target != nullptr ? emissive_target : &MainColorTarget();
         target.depth = &MainDepth();
         target.mapping = MainMapping(target.color->width, target.color->height);
         return target;
@@ -995,6 +1006,42 @@ void SetRenderTarget(TextureHandle handle) {
     g.target = handle;
 }
 
+namespace detail {
+
+void AtmosphereResetEmissives() { deferred_emissives.clear(); }
+
+void AtmosphereCompositeEmissives(Image &target, bool atmosphere_applied) {
+    if (deferred_emissives.empty()) return;
+    emissive_target = &target;
+    replaying_emissives = true;
+    ResetDrawState();
+    const LogicalMapping mapping = GetLogicalMapping(kMainTarget);
+    for (const DeferredEmissive &emissive : deferred_emissives) {
+        DrawState state = emissive.state;
+        std::vector<Vertex2D> vertices = emissive.vertices;
+        if (atmosphere_applied) {
+            state.fog = false;
+            for (Vertex2D &vertex : vertices) {
+                const float visibility = AtmosphereSpriteTransmittance(
+                    vertex.x * mapping.scale_x + mapping.offset_x,
+                    vertex.y * mapping.scale_y + mapping.offset_y, vertex.z,
+                    target.width, target.height);
+                vertex.color[3] = static_cast<uint8_t>(std::lround(vertex.color[3] * visibility));
+            }
+        }
+        Draw2DSided(emissive.primitive, vertices, emissive.binding, state, emissive.side, nullptr);
+    }
+    EndRendering();
+    ToRest(DrawCommands(), target);
+    ToRest(DrawCommands(), MainDepth());
+    emissive_target = nullptr;
+    replaying_emissives = false;
+    deferred_emissives.clear();
+    ResetDrawState();
+}
+
+} // namespace detail
+
 TextureHandle CurrentRenderTarget() { return RecordingCalls() ? g.record_target : g.target; }
 
 LogicalMapping GetLogicalMapping(TextureHandle handle) {
@@ -1047,6 +1094,12 @@ void Draw2DSided(Primitive primitive, std::span<const Vertex2D> vertices, const 
             entry.presentation_state = presentation->state;
         }
         RecordEntry(std::move(entry));
+        return;
+    }
+    if (!replaying_emissives && state.atmosphere_emissive && g.display_pass &&
+        g.target == kMainTarget && AtmosphereEnabled() && g.config.enhanced_hdr) {
+        deferred_emissives.push_back({primitive, std::vector<Vertex2D>(vertices.begin(), vertices.end()),
+                                      binding, state, side});
         return;
     }
     // Depth places a draw among the meshes, and an image of the frame lies where the frame does.

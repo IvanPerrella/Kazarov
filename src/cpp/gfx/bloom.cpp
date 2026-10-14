@@ -198,6 +198,7 @@ void BloomResize() {
 void BloomResetCapture() {
     bloom.scene_captured = false;
     bloom.hudless_valid[g.frame_slot] = false;
+    AtmosphereResetEmissives();
 }
 
 void BloomCaptureScene() {
@@ -211,6 +212,7 @@ void BloomCaptureScene() {
         // so text and icons retain their original SDR colours and sharp edges.
         bloom.scene_captured = false;
         Image &fogged = AtmosphereApply(cmd, source, MainDepth());
+        AtmosphereCompositeEmissives(fogged, &fogged != &source);
         Image &resolved = SuperResolvedScene(cmd, fogged);
         Image &mapped = BloomApply(cmd, resolved);
         Transition(cmd, mapped, TransferSrc());

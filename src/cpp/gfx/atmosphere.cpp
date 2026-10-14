@@ -42,6 +42,7 @@ struct FogState {
     bool fog_enabled = false;
     AtmosphereSettings settings;
     bool camera_valid = false;
+    bool sprite_camera_valid = false;
     bool reported_apply = false;
     bool deck_field_valid = false;
     FogDeckField deck_field;
@@ -209,9 +210,70 @@ void AtmosphereSetSettings(const AtmosphereSettings &settings) {
     fog.deck_field.effects[1] = settings.local_scattering_strength;
     std::copy_n(settings.local_scattering_limit, 3, fog.deck_field.local_limit);
     fog.fog_enabled = settings.enabled;
-    if (!fog.fog_enabled) fog.camera_valid = false;
+    if (!fog.fog_enabled) {
+        fog.camera_valid = false;
+        fog.sprite_camera_valid = false;
+    }
 }
 bool AtmosphereEnabled() { return fog.fog_enabled; }
+
+float AtmosphereSpriteTransmittance(float pixel_x, float pixel_y, float depth,
+                                   uint32_t width, uint32_t height) {
+    if (!fog.sprite_camera_valid || width == 0 || height == 0) return 1.0f;
+    const float clip[4] = {2.0f * pixel_x / width - 1.0f,
+                           2.0f * pixel_y / height - 1.0f, depth, 1.0f};
+    float world_h[4] = {};
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 4; ++column)
+            world_h[row] += fog.push.inverse_view_projection[column * 4 + row] * clip[column];
+    }
+    if (std::abs(world_h[3]) < 0.000001f) return 1.0f;
+    float path[3] = {};
+    for (int axis = 0; axis < 3; ++axis)
+        path[axis] = world_h[axis] / world_h[3] - fog.push.camera_position[axis];
+    const float distance = std::sqrt(path[0] * path[0] + path[1] * path[1] + path[2] * path[2]);
+    if (distance < 0.001f) return 1.0f;
+
+    auto smooth = [](float low, float high, float value) {
+        const float t = std::clamp((value - low) / std::max(high - low, 0.001f), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+    auto cell = [](int x, int z) {
+        const int index = std::clamp(x, 0, 19) + 20 * std::clamp(z, 0, 19);
+        return fog.deck_field.heights[index / 4][index % 4];
+    };
+    auto deck_height = [&](float x, float z) {
+        const float size = std::max(fog.deck_field.effects[0], 0.001f);
+        const float cx = std::clamp(x / size, 0.0f, 19.0f);
+        const float cz = std::clamp(z / size, 0.0f, 19.0f);
+        const int ix = static_cast<int>(std::floor(cx));
+        const int iz = static_cast<int>(std::floor(cz));
+        const float fx = smooth(0.4f, 0.6f, cx - std::floor(cx));
+        const float fz = smooth(0.4f, 0.6f, cz - std::floor(cz));
+        const float south = std::lerp(cell(ix, iz), cell(ix + 1, iz), fx);
+        const float north = std::lerp(cell(ix, iz + 1), cell(ix + 1, iz + 1), fx);
+        return std::lerp(south, north, fz);
+    };
+    const float step = distance / 12.0f;
+    float optical_depth = 0.0f;
+    for (int i = 0; i < 12; ++i) {
+        const float along = (i + 0.5f) * step;
+        const float fraction = along / distance;
+        const float x = fog.push.camera_position[0] + path[0] * fraction;
+        const float y = fog.push.camera_position[1] + path[1] * fraction;
+        const float z = fog.push.camera_position[2] + path[2] * fraction;
+        float background = fog.deck_field.density[0] *
+            std::clamp(std::exp(-(y - fog.push.camera_position[1]) / 120.0f), 0.75f, 1.8f) *
+            smooth(fog.deck_field.density[1] - 20.0f, fog.deck_field.density[1] + 20.0f, along);
+        background += fog.deck_field.distance[0] *
+            smooth(fog.deck_field.distance[1], fog.deck_field.distance[2], along);
+        const float lower = fog.deck_field.density[2] *
+            std::exp(-std::max(y - deck_height(x, z), 0.0f) /
+                     std::max(fog.deck_field.density[3], 0.001f)) * smooth(10.0f, 30.0f, along);
+        optical_depth += (background + lower) * step;
+    }
+    return std::exp(-optical_depth);
+}
 
 void AtmosphereDestroyTarget() {
     if (!fog.initialized) return;
@@ -220,6 +282,7 @@ void AtmosphereDestroyTarget() {
         fog.depth_view = VK_NULL_HANDLE;
     }
     DestroyImage(fog.output);
+    fog.sprite_camera_valid = false;
     fog.camera_valid = false;
 }
 
@@ -510,6 +573,7 @@ Image &AtmosphereApply(VkCommandBuffer cmd, Image &source, Image &depth) {
                      AtmosphereLights().count[0]);
         fog.reported_apply = true;
     }
+    fog.sprite_camera_valid = true;
     fog.camera_valid = false;
     return fog.output;
 }
