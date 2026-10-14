@@ -40,7 +40,7 @@ struct HitVertex {
     float uv[4];
 };
 
-// Matches std430 RayHitMaterial in draw.frag. A hit carries the original mesh's flat material
+// Matches std430 RayHitMaterial in enhanced.frag. A hit carries the original mesh's flat material
 // and vertex colour, so off-screen surfaces still contribute radiance without frame history.
 struct HitMaterial {
     uint32_t vertex_base;
@@ -62,7 +62,9 @@ struct HitMaterial {
     uint32_t material_normal_slot;
     uint32_t material_orm_slot;
     uint32_t material_profile;
-    uint32_t material_pad;
+    uint32_t material_scene;
+    float material_parameters[4]; // normal strength, fallback roughness, reserved
+    float specular[4];
 };
 
 struct PendingDrawMaterial {
@@ -99,7 +101,9 @@ struct RayLightBlock {
 static_assert(sizeof(RayLightBlock) == 272);
 
 static_assert(sizeof(HitVertex) == 64);
-static_assert(sizeof(HitMaterial) == 272);
+static_assert(offsetof(HitMaterial, material_parameters) == 272);
+static_assert(offsetof(HitMaterial, specular) == 288);
+static_assert(sizeof(HitMaterial) == 304);
 
 bool g_enabled = false;
 bool g_provisioned = false;
@@ -677,6 +681,10 @@ HitMaterial MakeHitMaterial(const MeshConstants &constants, const TextureBinding
     HitMaterial material = {};
     material.flags = constants.flags;
     material.material_profile = constants.material_profile;
+    material.material_scene = constants.material_pad;
+    material.material_parameters[0] = constants.normal_detail_strength;
+    material.material_parameters[1] = constants.material_roughness;
+    std::memcpy(material.specular, constants.specular, sizeof(material.specular));
     // MeshConstants stores bindless slots. Resolve each live slot to its full handle so the
     // texture remains alive for secondary hits, including after the host changes its material.
     auto track_material_slot = [](uint32_t slot) -> uint32_t {

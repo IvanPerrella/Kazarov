@@ -27,8 +27,15 @@ static_assert(sizeof(FogPush) == 128);
 // keeps the 128-byte push constant and the ray-tracing light block unchanged.
 struct FogDeckField {
     float heights[100][4] = {};
+    float background_color[4] = {};
+    float lower_color[4] = {};
+    float clear_color[4] = {};
+    float density[4] = {};
+    float distance[4] = {};
+    float effects[4] = {};
+    float local_limit[4] = {};
 };
-static_assert(sizeof(FogDeckField) == 1600);
+static_assert(sizeof(FogDeckField) == 1712);
 
 struct FogState {
     bool initialized = false;
@@ -139,7 +146,7 @@ bool AtmosphereDepthSupported() {
 
 void AtmosphereSetDeckField(std::span<const float, 400> cell_heights) {
     static_assert(sizeof(cell_heights[0]) == sizeof(float));
-    std::memcpy(&fog.deck_field, cell_heights.data(), sizeof(FogDeckField));
+    std::memcpy(fog.deck_field.heights, cell_heights.data(), sizeof(fog.deck_field.heights));
     fog.deck_field_valid = true;
 }
 
@@ -187,6 +194,20 @@ const LocalLightBlock &AtmosphereLights() {
 }
 void AtmosphereSetSettings(const AtmosphereSettings &settings) {
     fog.settings = settings;
+    std::copy_n(settings.background_color, 3, fog.deck_field.background_color);
+    std::copy_n(settings.lower_color, 3, fog.deck_field.lower_color);
+    std::copy_n(settings.clear_color, 3, fog.deck_field.clear_color);
+    fog.deck_field.density[0] = settings.background_density;
+    fog.deck_field.density[1] = settings.clear_distance;
+    fog.deck_field.density[2] = settings.lower_density;
+    fog.deck_field.density[3] = settings.lower_height_falloff;
+    fog.deck_field.distance[0] = settings.far_density;
+    fog.deck_field.distance[1] = settings.far_start;
+    fog.deck_field.distance[2] = settings.far_end;
+    fog.deck_field.distance[3] = settings.uncovered_distance;
+    fog.deck_field.effects[0] = settings.deck_cell_size;
+    fog.deck_field.effects[1] = settings.local_scattering_strength;
+    std::copy_n(settings.local_scattering_limit, 3, fog.deck_field.local_limit);
     fog.fog_enabled = settings.enabled;
     if (!fog.fog_enabled) fog.camera_valid = false;
 }
