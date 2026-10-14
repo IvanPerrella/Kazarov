@@ -6,6 +6,10 @@
 #define PORT_INIT(...) = __VA_ARGS__
 #define PORT_RETURN(...) return __VA_ARGS__
 #define PORT_FIX(...) __VA_ARGS__
+#ifdef __cplusplus
+[[noreturn]] void Ps2Unimplemented(const char *function, const char *file, int line);
+#define PS2_UNIMPLEMENTED() Ps2Unimplemented(__func__, __FILE__, __LINE__)
+#endif
 #else
 #define PORT_INIT(...)
 #define PORT_RETURN(...)
