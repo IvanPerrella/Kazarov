@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -105,8 +106,10 @@ struct ReadDepthEntry {
     LogicalRect rect;
 };
 
+struct SceneEntry {};
+
 using Entry = std::variant<Draw2DEntry, MeshEntry, ClearEntry, TargetEntry, CopyEntry, UpdateTextureEntry,
-                           UpdateMeshEntry, ReadDepthEntry>;
+                           UpdateMeshEntry, ReadDepthEntry, SceneEntry>;
 
 struct MeshRecord {
     InterpKey key = 0;
@@ -148,6 +151,7 @@ struct DisplayList {
     std::unordered_map<TextureHandle, int32_t> target_scenes;
     std::vector<TextureHandle>      doomed_textures;
     std::vector<MeshHandle>         doomed_meshes;
+    std::unordered_set<TextureHandle> persistent_display_grabs;
     bool                            cut = false;
     bool                            camera_cut = false;
     // A draw reaches the main target before a clear covers its logical frame, so whatever the

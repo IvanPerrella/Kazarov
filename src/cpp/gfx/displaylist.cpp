@@ -10,6 +10,10 @@
 #include <unordered_set>
 
 #include "gfx/context.hpp"
+#include "bloom.hpp"
+#include "motion.hpp"
+#include "raytracing.hpp"
+#include "streamline.hpp"
 
 namespace gfx {
 
@@ -18,6 +22,17 @@ namespace detail {
 namespace {
 
 constexpr Mat4 kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+float Halton(uint32_t index, uint32_t base) {
+    float fraction = 1.0f;
+    float value = 0.0f;
+    while (index != 0) {
+        fraction /= static_cast<float>(base);
+        value += fraction * static_cast<float>(index % base);
+        index /= base;
+    }
+    return value;
+}
 
 // Validate bindings while their recording still owns them, before a later replay can outlive them.
 bool CanRecordBinding(const TextureBinding &binding) {
@@ -565,6 +580,20 @@ struct Overrides {
     std::vector<Prog0Constants>                                    prog0;
 };
 
+// Only images actually shown advance motion history. Canonical and host replays do not.
+struct MotionHistory {
+    uint64_t instance = 0;
+    uint64_t serial = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<Mat4> mvp;
+    std::vector<bool> rigid;
+    Mat4 world_to_clip = {};
+    bool camera_valid = false;
+};
+
+MotionHistory g_motion_history;
+
 bool Invert(const Mat4 &m, Mat4 &out) {
     double a[4][8];
     for (int r = 0; r < 4; r++) {
@@ -904,6 +933,147 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
     PosesBetween(list, previous, alpha, out);
 }
 
+void AttachMotionHistory(const DisplayList &list, const DisplayList *previous, Overrides &out,
+                         MotionHistory &shown) {
+    MotionSetCamera({});
+    const size_t count = list.records.size();
+    if (out.index.empty()) out.index.assign(count, -1);
+    if (out.vertex_index.empty()) out.vertex_index.assign(count, -1);
+    if (out.prog0_index.empty()) out.prog0_index.assign(count, -1);
+    shown = {};
+    shown.instance = list.instance;
+    shown.serial = list.serial;
+    shown.width = g.display_color.width;
+    shown.height = g.display_color.height;
+    shown.mvp.resize(count);
+    shown.rigid.resize(count);
+
+    bool continuous = g_motion_history.instance == list.instance &&
+                      g_motion_history.width == shown.width && g_motion_history.height == shown.height &&
+                      !list.cut && !list.camera_cut;
+    bool same_list = continuous && g_motion_history.serial == list.serial;
+    bool prior_tick = continuous && previous != nullptr && previous->instance == list.instance &&
+                      g_motion_history.serial == previous->serial;
+    if (prior_tick && list.cache.previous_serial != previous->serial) BuildMatches(list, *previous);
+
+    // Offset only the DLSS world raster. The recorded camera and
+    // both motion transforms remain unjittered, as required by Streamline.
+    float jitter_pixels[2] = {};
+    if (g.config.enhanced_hdr && g.config.dlss_quality != DlssQuality::Off &&
+        StreamlineSupportsSuperResolution() && g.display_color.width != 0 &&
+        g.display_color.height != 0) {
+        const uint32_t sample = g.streamline_frame_serial % 16u + 1u;
+        jitter_pixels[0] = Halton(sample, 2) - 0.5f;
+        jitter_pixels[1] = Halton(sample, 3) - 0.5f;
+    }
+    std::vector<bool> main_mesh(count, false);
+    TextureHandle current_target = kMainTarget;
+    for (const Entry &entry : list.entries) {
+        if (const TargetEntry *change = std::get_if<TargetEntry>(&entry)) current_target = change->target;
+        else if (const MeshEntry *mesh = std::get_if<MeshEntry>(&entry); mesh && mesh->record < count)
+            main_mesh[mesh->record] = current_target == kMainTarget;
+    }
+
+    std::unordered_set<MeshHandle> updated;
+    for (const Entry &entry : list.entries) {
+        if (const UpdateMeshEntry *e = std::get_if<UpdateMeshEntry>(&entry)) updated.insert(e->mesh);
+    }
+    for (size_t i = 0; i < count; i++) {
+        const MeshRecord &record = list.records[i];
+        const MeshEntry &mesh = std::get<MeshEntry>(list.entries[record.entry]);
+        const MeshConstants *source = out.index[i] >= 0 ? &out.constants[out.index[i]] : &mesh.constants;
+        Mat4 current = ToMat4(source->mvp);
+        shown.mvp[i] = current;
+        // Deformed vertices need their previous positions, not just the previous model matrix.
+        // Keep these invalid until a previous-position vertex stream is supplied.
+        bool skinned_prog0 = mesh.prog0 >= 0 &&
+                             (list.prog0_blocks[static_cast<size_t>(mesh.prog0)].flags & kProg0Skinned) != 0;
+        shown.rigid[i] = mesh.mesh != kNullMesh && !updated.contains(mesh.mesh) &&
+                         record.has_transform && !skinned_prog0;
+
+        int32_t prior = same_list ? static_cast<int32_t>(i) :
+                        prior_tick ? list.cache.match[i] : -1;
+        bool valid = shown.rigid[i] && prior >= 0 &&
+                     static_cast<size_t>(prior) < g_motion_history.mvp.size() &&
+                     g_motion_history.rigid[prior];
+        MeshConstants constants = *source;
+        if (main_mesh[i] && (constants.flags & kMeshShadow) == 0 && shown.width != 0 && shown.height != 0) {
+            constants.jitter_ndc[0] = 2.0f * jitter_pixels[0] / static_cast<float>(g.display_color.width);
+            constants.jitter_ndc[1] = 2.0f * jitter_pixels[1] / static_cast<float>(g.display_color.height);
+        }
+        const Mat4 &old = valid ? g_motion_history.mvp[prior] : current;
+        std::memcpy(constants.previous_mvp, old.data(), sizeof(constants.previous_mvp));
+        constants.motion_valid = valid ? 1u : 0u;
+        if (out.index[i] >= 0) {
+            out.constants[out.index[i]] = constants;
+        } else {
+            out.index[i] = static_cast<int32_t>(out.constants.size());
+            out.constants.push_back(constants);
+        }
+    }
+
+    // A depth sample can be reprojected by the camera transform even when no
+    // mesh motion draw covers its pixel. Select the first ordinary main-target
+    // world draw; shadows and offscreen texture passes have different cameras.
+    TextureHandle target = kMainTarget;
+    for (const Entry &entry : list.entries) {
+        if (const TargetEntry *change = std::get_if<TargetEntry>(&entry)) {
+            target = change->target;
+            continue;
+        }
+        const MeshEntry *mesh = std::get_if<MeshEntry>(&entry);
+        if (!mesh || target != kMainTarget || !mesh->state.depth_write ||
+            (mesh->constants.flags & kMeshShadow) != 0) continue;
+        const MeshRecord &record = list.records[mesh->record];
+        if (!record.has_transform) continue;
+        const MeshConstants &constants = out.constants[out.index[mesh->record]];
+        Mat4 inverse_model, inverse_clip, inverse_projection;
+        if (!Invert(ToMat4(constants.model_to_world), inverse_model) ||
+            !Invert(record.projection, inverse_projection)) continue;
+        shown.world_to_clip = Multiply(ToMat4(constants.mvp), inverse_model);
+        if (!Invert(shown.world_to_clip, inverse_clip)) continue;
+        shown.camera_valid = true;
+
+        StreamlineCamera camera{};
+        Mat4 clip_to_previous = continuous && g_motion_history.camera_valid
+                                    ? Multiply(g_motion_history.world_to_clip, inverse_clip)
+                                    : kIdentity;
+        Mat4 previous_to_clip;
+        if (!Invert(clip_to_previous, previous_to_clip)) previous_to_clip = kIdentity;
+        Mat4 view = Multiply(inverse_projection, shown.world_to_clip);
+        Mat4 eye_to_world;
+        if (!Invert(view, eye_to_world)) break;
+        auto row_major = [](float *dst, const Mat4 &src) {
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c) dst[r * 4 + c] = src[c * 4 + r];
+        };
+        row_major(camera.view_to_clip, record.projection);
+        row_major(camera.clip_to_view, inverse_projection);
+        row_major(camera.clip_to_prev_clip, clip_to_previous);
+        row_major(camera.prev_clip_to_clip, previous_to_clip);
+        for (int axis = 0; axis < 3; ++axis) {
+            camera.position[axis] = eye_to_world[12 + axis];
+            camera.right[axis] = eye_to_world[axis];
+            camera.up[axis] = eye_to_world[4 + axis];
+            camera.forward[axis] = eye_to_world[8 + axis];
+        }
+        const float a = record.projection[10], b = record.projection[14];
+        camera.near_plane = b / (1.0f - a);
+        camera.far_plane = -b / a;
+        camera.fov_radians = 2.0f * std::atan(1.0f / std::abs(record.projection[5]));
+        camera.aspect_ratio = std::abs(record.projection[5] / record.projection[0]);
+        camera.depth_inverted = true;
+        camera.jitter_x = jitter_pixels[0];
+        camera.jitter_y = jitter_pixels[1];
+        camera.reset = !continuous || !g_motion_history.camera_valid;
+        camera.valid = std::isfinite(camera.near_plane) && std::isfinite(camera.far_plane) &&
+                       camera.near_plane > 0.0f && camera.far_plane > camera.near_plane &&
+                       std::isfinite(camera.aspect_ratio) && camera.aspect_ratio > 0.0f;
+        MotionSetCamera(camera);
+        break;
+    }
+}
+
 // A grab of the frame (a copy or blit out of the main target) is taken by the canonical render at
 // the tick's camera. A display render draws the scene under another camera, so what it draws back
 // from the canonical grab (the depth of field's blurred bands, the water's refraction) stands
@@ -914,10 +1084,18 @@ struct GrabTwin {
     TextureHandle twin = kNullTexture;
     TextureInfo   shape = {};
     bool          active = false;
+    bool          persistent = false;
 };
 
 std::unordered_map<TextureHandle, GrabTwin> g_grab_twins;
 uint64_t                                    g_grab_instance = 0;
+
+void InvalidatePersistentGrab(TextureHandle texture) {
+    if (auto it = g_grab_twins.find(texture); it != g_grab_twins.end()) {
+        it->second.persistent = false;
+        it->second.active = false;
+    }
+}
 
 bool SameShape(const TextureInfo &a, const TextureInfo &b) {
     return a.width == b.width && a.height == b.height && a.pixel_width == b.pixel_width &&
@@ -933,7 +1111,7 @@ void ResetGrabTwins() {
         g_grab_instance = g.renderer_instance;
     }
     for (auto it = g_grab_twins.begin(); it != g_grab_twins.end();) {
-        it->second.active = false;
+        it->second.active = it->second.persistent && g.config.enhanced_hdr;
         if (!GetTextureInfo(it->first)) {
             DestroyTexture(it->second.twin);
             it = g_grab_twins.erase(it);
@@ -946,6 +1124,13 @@ void ResetGrabTwins() {
 // The twin this display render samples in place of texture, if it has grabbed into one.
 TextureHandle GrabbedTwin(TextureHandle texture) {
     auto it = g_grab_twins.find(texture);
+    if (it != g_grab_twins.end() && it->second.persistent) {
+        std::optional<TextureInfo> info = GetTextureInfo(texture);
+        if (!info || !SameShape(it->second.shape, *info)) {
+            it->second.persistent = false;
+            it->second.active = false;
+        }
+    }
     return it != g_grab_twins.end() && it->second.active ? it->second.twin : texture;
 }
 
@@ -979,7 +1164,11 @@ TextureHandle ActivateGrabTwin(TextureHandle dst) {
     return it->second.twin;
 }
 
-void GrabAgain(const CopyEntry &entry) {
+void GrabAgain(const CopyEntry &entry, const DisplayList &list) {
+    if (!g.config.enhanced_hdr && entry.src == kMainTarget &&
+        list.persistent_display_grabs.contains(entry.dst)) {
+        return;
+    }
     TextureHandle src = GrabbedTwin(entry.src);
     if (entry.src != kMainTarget && src == entry.src) {
         return;
@@ -995,6 +1184,9 @@ void GrabAgain(const CopyEntry &entry) {
         CopyTexture(src, entry.src_rect, dst, entry.dst_rect.x, entry.dst_rect.y);
     } else {
         BlitTexture(src, entry.src_rect, dst, entry.dst_rect, entry.filter);
+    }
+    if (entry.src == kMainTarget && list.persistent_display_grabs.contains(entry.dst)) {
+        g_grab_twins[entry.dst].persistent = true;
     }
 }
 
@@ -1128,8 +1320,10 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
     std::fclose(file);
 }
 
+void ReplayMotion(const DisplayList &list, const Overrides &overrides);
+
 void Replay(const DisplayList &list, bool canonical, const Overrides *overrides, bool host = false,
-            bool tint = false, InterpKey suppressed_2d_key = 0) {
+            bool tint = false, InterpKey suppressed_2d_key = 0, bool motion_capture = false) {
     g.replaying = true;
     g.quiet = !canonical;
     g.host_draws = host;
@@ -1210,14 +1404,23 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                     }
                 } else if constexpr (std::is_same_v<T, TargetEntry>) {
                     SetRenderTarget(canonical ? e.target : GrabbedTwin(e.target));
+                } else if constexpr (std::is_same_v<T, SceneEntry>) {
+                    if (motion_capture && overrides != nullptr && MotionImage() == nullptr) {
+                        ReplayMotion(list, *overrides);
+                    }
+                    BloomCaptureScene();
                 } else if (canonical) {
                     if constexpr (std::is_same_v<T, CopyEntry>) {
+                        if (!list.persistent_display_grabs.contains(e.dst)) {
+                            InvalidatePersistentGrab(e.dst);
+                        }
                         if (e.kind == CopyEntry::Copy) {
                             CopyTexture(e.src, e.src_rect, e.dst, e.dst_rect.x, e.dst_rect.y);
                         } else {
                             BlitTexture(e.src, e.src_rect, e.dst, e.dst_rect, e.filter);
                         }
                     } else if constexpr (std::is_same_v<T, UpdateTextureEntry>) {
+                        InvalidatePersistentGrab(e.texture);
                         UpdateTexture(e.texture, e.mip, e.x, e.y, e.w, e.h, e.pixels.data());
                     } else if constexpr (std::is_same_v<T, UpdateMeshEntry>) {
                         UpdateMeshVertices(e.mesh, e.first, e.vertices);
@@ -1225,7 +1428,7 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                         ReadDepth(e.id, e.rect.x, e.rect.y, e.rect.w, e.rect.h);
                     }
                 } else if constexpr (std::is_same_v<T, CopyEntry>) {
-                    GrabAgain(e);
+                    GrabAgain(e, list);
                 } else if constexpr (std::is_same_v<T, UpdateMeshEntry>) {
                     if (overrides != nullptr) {
                         if (auto pose = overrides->poses.find(&e); pose != overrides->poses.end()) {
@@ -1246,6 +1449,26 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
     g.replaying = false;
     g.quiet = false;
     g.host_draws = false;
+}
+
+void ReplayMotion(const DisplayList &list, const Overrides &overrides) {
+    if (!MotionBegin()) {
+        return;
+    }
+    TextureHandle target = kMainTarget;
+    for (const Entry &entry : list.entries) {
+        if (const TargetEntry *change = std::get_if<TargetEntry>(&entry)) {
+            target = change->target;
+        } else if (const MeshEntry *mesh = std::get_if<MeshEntry>(&entry); mesh != nullptr && target == kMainTarget) {
+            const MeshConstants &constants = overrides.index[mesh->record] >= 0
+                                                 ? overrides.constants[overrides.index[mesh->record]]
+                                                 : mesh->constants;
+            if (mesh->mesh != kNullMesh) {
+                MotionDraw(mesh->mesh, mesh->first_index, mesh->index_count, constants, mesh->state);
+            }
+        }
+    }
+    MotionEnd();
 }
 
 } // namespace
@@ -1603,6 +1826,25 @@ void CutCameraInterpolation() {
     }
 }
 
+void ResetMotionHistory() {
+    g_motion_history = {};
+    MotionDiscard();
+}
+
+void CaptureScene() {
+    if (g.list != nullptr && !g.replaying) {
+        detail::RecordEntry(SceneEntry{});
+    } else if (g.in_frame) {
+        BloomCaptureScene();
+    }
+}
+
+void CaptureMenuBackground(TextureHandle texture) {
+    if (g.list != nullptr && !g.replaying && texture != kNullTexture) {
+        g.list->persistent_display_grabs.insert(texture);
+    }
+}
+
 bool RenderList(const DisplayList &list, float alpha, const RenderOptions &options) {
     if (list.instance != g.renderer_instance || g.device == VK_NULL_HANDLE) {
         return false;
@@ -1629,17 +1871,61 @@ bool RenderList(const DisplayList &list, float alpha, const RenderOptions &optio
     if (!OpenListFrame(false, options.present, list.needs_base)) {
         return false;
     }
+    const uint32_t streamline_frame = g.streamline_frame_serial;
+    const bool reflex_frame = options.present && !options.host && !g.offscreen && StreamlineReflexActive();
+    if (reflex_frame) {
+        StreamlineReflexSleep(streamline_frame);
+        StreamlineMarkFrame(streamline_frame, StreamlineMarker::SimulationStart);
+    }
+    MotionHistory shown;
+    // A headless HDR display replay is still a presentation frame for history purposes.
+    bool track_motion = !options.host && (options.present || (g.offscreen && g.config.enhanced_hdr));
+    MotionDiscard();
+    if (track_motion) {
+        AttachMotionHistory(list, options.previous, overrides, shown);
+    }
+    if (RayBeginDisplayScene()) {
+        for (const Entry &entry : list.entries) {
+            const MeshEntry *mesh = std::get_if<MeshEntry>(&entry);
+            if (mesh == nullptr || mesh->mesh != kNullMesh) {
+                continue;
+            }
+            const MeshConstants *constants = &mesh->constants;
+            if ((interpolate || track_motion) && mesh->record < overrides.index.size() &&
+                overrides.index[mesh->record] >= 0) {
+                constants = &overrides.constants[overrides.index[mesh->record]];
+            }
+            const std::vector<Vertex3D> *vertices = &mesh->vertices;
+            if ((interpolate || track_motion) && mesh->record < overrides.vertex_index.size() &&
+                overrides.vertex_index[mesh->record] >= 0) {
+                vertices = &overrides.vertices[overrides.vertex_index[mesh->record]];
+            }
+            RayRecordDisplayImmediate(*vertices, mesh->indices, *constants, mesh->binding, mesh->state);
+        }
+        RayFinishDisplayScene(DrawCommands());
+    }
     const char *setting = std::getenv("KZ_INTERPOLATION_TINT");
     bool        tint = options.interpolation_tint || (setting && std::strcmp(setting, "1") == 0);
     if (tint) {
         TraceInterpolation(list, options.previous, interpolate ? &overrides : nullptr, alpha);
     }
-    Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint, options.suppressed_2d_key);
+    Replay(list, false, interpolate || track_motion ? &overrides : nullptr, options.host, tint,
+           options.suppressed_2d_key, track_motion);
     if (options.overlay != nullptr && options.overlay->instance == g.renderer_instance) {
         SetRenderTarget(kMainTarget);
         Replay(*options.overlay, false, nullptr, true, tint);
     }
+    if (reflex_frame) {
+        StreamlineMarkFrame(streamline_frame, StreamlineMarker::SimulationEnd);
+    }
     CloseListFrame(false, options.present);
+    if (options.present || (g.offscreen && g.config.enhanced_hdr)) {
+        if (track_motion) {
+            g_motion_history = std::move(shown);
+        } else {
+            ResetMotionHistory();
+        }
+    }
     return true;
 }
 

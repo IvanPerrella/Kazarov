@@ -1,6 +1,7 @@
 #include "platform/window.hpp"
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -16,6 +17,7 @@ namespace {
 SDL_Window                              *g_window = nullptr;
 bool                                     g_headless = false;
 bool                                     g_mode_event = false;
+bool                                     g_vulkan_loader_explicit = false;
 std::vector<void (*)(const SDL_Event &)> g_hooks;
 WindowIdentity                          g_identity;
 
@@ -58,7 +60,7 @@ Placement Place(const WindowConfig &config, SDL_DisplayID display) {
 
 void WindowSetIdentity(const WindowIdentity &identity) { g_identity = identity; }
 
-void WindowInit(const WindowConfig &config) {
+bool WindowInit(const WindowConfig &config) {
     SDL_SetAppMetadata(g_identity.title, nullptr, g_identity.app_id);
     g_headless = config.headless;
     if (config.headless) {
@@ -71,6 +73,14 @@ void WindowInit(const WindowConfig &config) {
     }
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         Fatal("SDL_Init");
+    }
+    bool loader_ok = true;
+    if (config.vulkan && config.vulkan_loader_path != nullptr) {
+        loader_ok = SDL_Vulkan_LoadLibrary(config.vulkan_loader_path);
+        g_vulkan_loader_explicit = loader_ok;
+        if (!loader_ok) {
+            std::fprintf(stderr, "window: selected Vulkan loader unavailable: %s\n", SDL_GetError());
+        }
     }
     // SDL3 backs a Vulkan window on macOS with a CAMetalLayer (VK_EXT_metal_surface) by itself.
     SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
@@ -106,6 +116,7 @@ void WindowInit(const WindowConfig &config) {
             SDL_DestroySurface(icon);
         }
     }
+    return loader_ok;
 }
 
 WindowModeResult WindowSetMode(const WindowConfig &config) {
@@ -161,6 +172,10 @@ bool WindowTakeModeEvent() {
 void WindowShutdown() {
     SDL_DestroyWindow(g_window);
     g_window = nullptr;
+    if (g_vulkan_loader_explicit) {
+        SDL_Vulkan_UnloadLibrary();
+        g_vulkan_loader_explicit = false;
+    }
     g_mode_event = false;
     g_hooks.clear();
     SDL_Quit();

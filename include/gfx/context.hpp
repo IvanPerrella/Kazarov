@@ -22,6 +22,7 @@ inline constexpr uint32_t kAnisotropyLevels = 4;
 inline constexpr uint32_t kSamplerCount = kBaseSamplerCount + kAnisotropyLevels * 4;
 inline constexpr uint32_t kMaxMeshes = 65535;
 inline constexpr VkFormat kColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+inline constexpr VkFormat kHdrFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 inline constexpr uint32_t kFirstUserSlot = 3;
 
 [[noreturn]] void Fatal(const char *format, ...) __attribute__((format(printf, 1, 2)));
@@ -40,7 +41,7 @@ struct Allocation {
 };
 
 Allocation AllocateMemory(const VkMemoryRequirements &requirements, VkMemoryPropertyFlags required,
-                          VkMemoryPropertyFlags preferred, bool linear);
+                          VkMemoryPropertyFlags preferred, bool linear, bool device_address = false);
 void       FreeMemory(Allocation &allocation);
 void       ShutdownMemory();
 
@@ -67,6 +68,7 @@ struct Image {
     Allocation         memory;
     VkFormat           format = VK_FORMAT_UNDEFINED;
     VkImageAspectFlags aspect = 0;
+    VkImageUsageFlags  usage = 0;
     uint32_t           width = 0;
     uint32_t           height = 0;
     uint32_t           mips = 1;
@@ -92,6 +94,8 @@ struct Texture {
     uint16_t    generation = 0;
     TextureDesc desc;
     Image       image;
+    Image       display_image;
+    uint32_t    display_slot = 0;
     Image       depth; // render targets that keep their own only
     bool        render_target = false;
     bool        shares_main_depth = false;
@@ -274,6 +278,7 @@ struct Context {
     std::array<Frame, kFramesInFlight> frames;
     uint32_t                           frame_slot = 0;
     uint64_t                           frame_serial = 1;
+    uint32_t                           streamline_frame_serial = 0;
     bool                               in_frame = false;
     uint32_t                           image_index = 0;
 
@@ -289,14 +294,17 @@ struct Context {
     VkDescriptorSetLayout        texture_set_layout = VK_NULL_HANDLE;
     VkDescriptorSetLayout        constants_set_layout = VK_NULL_HANDLE;
     VkDescriptorSetLayout        prog0_set_layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout        empty_set_layout = VK_NULL_HANDLE;
     VkDescriptorPool             texture_pool = VK_NULL_HANDLE;
     VkDescriptorPool             constants_pool = VK_NULL_HANDLE;
     VkDescriptorPool             prog0_descriptor_pool = VK_NULL_HANDLE;
     VkDescriptorSet              texture_set = VK_NULL_HANDLE;
     VkPipelineLayout             pipeline_layout = VK_NULL_HANDLE;
     VkPipelineLayout             prog0_pipeline_layout = VK_NULL_HANDLE;
+    VkPipelineLayout             ray_pipeline_layout = VK_NULL_HANDLE;
     VkPipelineCache              pipeline_cache = VK_NULL_HANDLE;
     std::vector<VkPipeline>      pipelines;
+    uint32_t                     hdr_pipeline_offset = 0;
     uint32_t                     blend_slot_count = 0;
     std::array<BlendMapping, 81> blend_map = {};
     double                       pipeline_seconds = 0.0;
@@ -333,10 +341,14 @@ struct Context {
     // The list being replayed is the host's own 2D, which the full-frame rule leaves as drawn.
     bool  host_draws = false;
     Image display_color;
+    Image display_ui;
     Image display_depth;
+    bool display_ui_active = false;
+    std::vector<LocalLight> local_lights;
     // The newest main_color image is a canonical render no immediate frame has followed.
     bool canonical_newest = false;
     bool presented_display = false;
+    bool presented_ui = false;
 
     uint32_t validation_messages = 0;
 };
@@ -381,6 +393,8 @@ void     ShutdownResources();
 Texture *LookupTexture(TextureHandle handle);
 Mesh    *LookupMesh(MeshHandle mesh);
 Image   *ColorImageOf(TextureHandle handle);
+Image   &TextureImage(Texture &texture);
+const Image &TextureImage(const Texture &texture);
 // Picks the command buffer an operation on these resources must go into: the upload command
 // buffer when the draw command buffer has not touched them this frame, so no rendering is broken.
 VkCommandBuffer CommandsForWrite(uint64_t &last_draw_use);

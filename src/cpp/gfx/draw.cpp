@@ -4,6 +4,8 @@
 
 #include "gfx/context.hpp"
 #include "gfx/displaylist.hpp"
+#include "atmosphere.hpp"
+#include "raytracing.hpp"
 
 namespace gfx {
 
@@ -31,7 +33,7 @@ Target ResolveTarget(TextureHandle handle) {
     }
     Texture *texture = LookupTexture(handle);
     if (texture != nullptr && texture->render_target) {
-        target.color = &texture->image;
+        target.color = &TextureImage(*texture);
         target.depth = texture->shares_main_depth ? &MainDepth() : &texture->depth;
         target.texture = texture;
         target.mapping = TextureMapping(*texture);
@@ -308,12 +310,14 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
                 return false;
             }
             texture->last_draw_use = g.frame_serial;
-            push.texture_slot = binding.texture & kSlotMask;
+            push.texture_slot = g.display_pass && texture->display_slot != 0
+                                    ? texture->display_slot : binding.texture & kSlotMask;
             if (family < kFamilyMesh) {
                 // Logical texels land on the image through its mapping, letterbox offset included.
                 LogicalMapping mapping = TextureMapping(*texture);
-                float          width = static_cast<float>(texture->image.width);
-                float          height = static_cast<float>(texture->image.height);
+                const Image   &image = TextureImage(*texture);
+                float          width = static_cast<float>(image.width);
+                float          height = static_cast<float>(image.height);
                 push.uv_xform[0] = mapping.scale_x / width;
                 push.uv_xform[1] = mapping.scale_y / height;
                 push.uv_xform[2] = mapping.offset_x / width;
@@ -343,6 +347,13 @@ bool Prepare(PipelineFamily family, VkPrimitiveTopology topology, const TextureB
     uint32_t     pipeline = !g.dynamic_color_write_mask && state.color_write_mask == 0
                                 ? NoColorPipelineIndex(family, mode, state.alpha_test)
                                 : PipelineIndex(family, blend.slot, mode, state.alpha_test);
+    if (g.display_pass && family == kFamilyMesh && RayScene() != VK_NULL_HANDLE) {
+        pipeline = RayPipelineIndex(pipeline);
+        RayBindScene(cmd);
+    }
+    if (target.color->format == kHdrFormat) {
+        pipeline += g.hdr_pipeline_offset;
+    }
     if (g.bound.pipeline != g.pipelines[pipeline]) {
         g.bound.pipeline = g.pipelines[pipeline];
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.bound.pipeline);
@@ -510,7 +521,7 @@ bool ResolveCopyRect(TextureHandle handle, const Rect &rect, uint32_t extend, Im
             Error("copy names texture %#x, which does not exist", handle);
             return false;
         }
-        image = &texture->image;
+        image = &TextureImage(*texture);
         mapping = TextureMapping(*texture);
     }
     auto x = [&](int32_t value) {
@@ -1103,6 +1114,9 @@ void DrawPrepared(Primitive primitive, std::span<const Vertex2D> vertices, const
     VkCommandBuffer cmd = DrawCommands();
     TransientSpan   data = AllocateTransient(vertices.size_bytes(), sizeof(float));
     std::memcpy(data.data, vertices.data(), vertices.size_bytes());
+    if (g.target == kMainTarget && MainColorTarget().format == kHdrFormat) {
+        BindConstants(g.pipeline_layout, MeshConstants{}, nullptr);
+    }
     BindVertices(data.buffer, data.offset);
 
     if (fan_as_list) {
@@ -1184,12 +1198,17 @@ void DrawIndexedMesh(MeshHandle handle, uint32_t first_index, uint32_t index_cou
         return;
     }
     mesh->last_draw_use = g.frame_serial;
+    if (family == kFamilyMesh) {
+        AtmosphereTrackCamera(constants);
+        RayRecordMesh(handle, first_index, index_count, constants, binding, state);
+    }
     VkCommandBuffer cmd = DrawCommands();
     BindConstants(PipelineLayoutOf(family), constants, family > kFamilyMesh ? prog0 : nullptr);
     BindVertices(mesh->buffer.buffer, 0);
     vkCmdBindIndexBuffer(cmd, mesh->buffer.buffer, mesh->vertex_count * sizeof(Vertex3D),
                          VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(cmd, index_count, 1, first_index, 0, 0);
+    if (family == kFamilyMesh) RayNoteMeshDraw(cmd);
 }
 
 } // namespace
@@ -1229,6 +1248,7 @@ void DrawImmediateMesh(std::span<const Vertex3D> vertices, std::span<const uint3
         return;
     }
     VkCommandBuffer cmd = DrawCommands();
+    if (family == kFamilyMesh) AtmosphereTrackCamera(constants);
     TransientSpan   vertex_data = AllocateTransient(vertices.size_bytes(), sizeof(float));
     std::memcpy(vertex_data.data, vertices.data(), vertices.size_bytes());
     TransientSpan index_data = AllocateTransient(indices.size_bytes(), sizeof(uint32_t));
@@ -1237,6 +1257,7 @@ void DrawImmediateMesh(std::span<const Vertex3D> vertices, std::span<const uint3
     BindVertices(vertex_data.buffer, vertex_data.offset);
     vkCmdBindIndexBuffer(cmd, index_data.buffer, index_data.offset, VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexed(cmd, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+    if (family == kFamilyMesh) RayNoteMeshDraw(cmd);
 }
 
 } // namespace

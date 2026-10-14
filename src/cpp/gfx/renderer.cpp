@@ -7,17 +7,62 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "gfx/context.hpp"
+#include "atmosphere.hpp"
+#include "bloom.hpp"
 #include "gfx/displaylist.hpp"
+#include "motion.hpp"
+#include "raytracing.hpp"
+#include "streamline.hpp"
 
 namespace gfx {
 
 namespace detail {
 
 Context g;
+bool g_fg_present_compatible = false;
+bool g_target_rebuild_pending = false;
+bool g_pipeline_rebuild_pending = false;
+std::optional<DlssQuality> g_pending_dlss_quality;
+std::optional<bool> g_pending_frame_generation;
+std::optional<bool> g_pending_enhanced_hdr;
+
+void ApplyPendingEnhancedHdr() {
+    if (g.in_frame || g.list != nullptr || g.device == VK_NULL_HANDLE || !g_pending_enhanced_hdr) return;
+    if (g.config.enhanced_hdr != *g_pending_enhanced_hdr) {
+        g.config.enhanced_hdr = *g_pending_enhanced_hdr;
+        g_target_rebuild_pending = true;
+        g_pipeline_rebuild_pending = true;
+        if (g.offscreen) g.resize_pending = true;
+        ResetMotionHistory();
+    }
+    g_pending_enhanced_hdr.reset();
+}
+
+void ApplyPendingRendererOptions() {
+    if (g.in_frame || g.list != nullptr || g.device == VK_NULL_HANDLE) return;
+    if (g_pending_dlss_quality) {
+        if (g.config.dlss_quality != *g_pending_dlss_quality) {
+            g.config.dlss_quality = *g_pending_dlss_quality;
+            g_target_rebuild_pending = true;
+            if (g.offscreen) g.resize_pending = true;
+            ResetMotionHistory();
+        }
+        g_pending_dlss_quality.reset();
+    }
+    if (g_pending_frame_generation) {
+        if (g.config.frame_generation != *g_pending_frame_generation) {
+            if (!*g_pending_frame_generation) StreamlineDisableFrameGeneration();
+            g.config.frame_generation = *g_pending_frame_generation;
+            g.resize_pending = true;
+        }
+        g_pending_frame_generation.reset();
+    }
+}
 
 void Fatal(const char *format, ...) {
     std::va_list args;
@@ -146,7 +191,7 @@ void CreateInstance() {
     info.ppEnabledLayerNames = layers.data();
     info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     info.ppEnabledExtensionNames = extensions.data();
-    Check(vkCreateInstance(&info, nullptr, &g.instance), "vkCreateInstance");
+    Check(StreamlineCreateInstance(&info, nullptr, &g.instance), "vkCreateInstance");
 
     if (validation) {
         auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
@@ -219,6 +264,9 @@ void PickPhysicalDevice() {
         } else if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
             score += 2;
         }
+        if (RayTracingSupported(device)) {
+            score += 8;
+        }
         if (score > best) {
             best = score;
             chosen = caps;
@@ -281,12 +329,27 @@ void CreateDevice() {
     g.depth_format = PickDepthFormat();
     g.dynamic_color_write_mask = g.config.dynamic_color_write_mask && SupportsDynamicColorWriteMask();
 
-    float                   priority = 1.0f;
+    uint32_t sdk_graphics_queues = 0, sdk_compute_queues = 0;
+    StreamlineQueueRequirements(sdk_graphics_queues, sdk_compute_queues);
+    uint32_t queue_family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(g.physical_device, &queue_family_count, nullptr);
+    std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
+    vkGetPhysicalDeviceQueueFamilyProperties(g.physical_device, &queue_family_count, queue_families.data());
+    const uint32_t wanted_queues = 1 + sdk_graphics_queues + sdk_compute_queues;
+    const uint32_t available_queues = queue_families[g.queue_family].queueCount;
+    const bool has_compute = (queue_families[g.queue_family].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
+    const uint32_t queue_count = wanted_queues <= available_queues && (has_compute || !sdk_compute_queues)
+                                     ? wanted_queues : 1;
+    if (queue_count != wanted_queues) {
+        std::fprintf(stderr, "Streamline: queue family cannot provide %u extra queues; using native Vulkan\n",
+                     wanted_queues - 1);
+    }
+    std::vector<float> priorities(queue_count, 1.0f);
     VkDeviceQueueCreateInfo queue = {};
     queue.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     queue.queueFamilyIndex = g.queue_family;
-    queue.queueCount = 1;
-    queue.pQueuePriorities = &priority;
+    queue.queueCount = queue_count;
+    queue.pQueuePriorities = priorities.data();
 
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT dynamic3 = {};
     dynamic3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT;
@@ -316,12 +379,29 @@ void CreateDevice() {
     features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     features12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
 
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+    VkPhysicalDeviceRayQueryFeaturesKHR ray_query = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+    bool ray_tracing_available = RayTracingSupported(g.physical_device);
+    if (ray_tracing_available) {
+        features12.bufferDeviceAddress = VK_TRUE;
+        features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        acceleration.accelerationStructure = VK_TRUE;
+        ray_query.rayQuery = VK_TRUE;
+        features13.pNext = &acceleration;
+        acceleration.pNext = &ray_query;
+        ray_query.pNext = g.dynamic_color_write_mask ? &dynamic3 : dynamic3.pNext;
+    } else if (g.config.ray_tracing) {
+        Error("ray tracing requested but this GPU lacks ray query, acceleration structures, or device addresses");
+    }
+
     VkPhysicalDeviceFeatures2 features = {};
     features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features.pNext = &features12;
     features.features.dualSrcBlend = VK_TRUE;
     features.features.shaderClipDistance = VK_TRUE;
     features.features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
+    features.features.fragmentStoresAndAtomics = ray_tracing_available ? VK_TRUE : VK_FALSE;
     VkPhysicalDeviceFeatures supported = {};
     vkGetPhysicalDeviceFeatures(g.physical_device, &supported);
     g.sampler_anisotropy = supported.samplerAnisotropy == VK_TRUE;
@@ -337,6 +417,12 @@ void CreateDevice() {
     if (g.portability_subset) {
         extensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
     }
+    if (ray_tracing_available) {
+        extensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        extensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+        extensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+    }
+    StreamlineAddDeviceRequirements(g.physical_device, extensions, features12, features13);
 
     VkDeviceCreateInfo info = {};
     info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -345,7 +431,9 @@ void CreateDevice() {
     info.pQueueCreateInfos = &queue;
     info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     info.ppEnabledExtensionNames = extensions.data();
-    Check(vkCreateDevice(g.physical_device, &info, nullptr, &g.device), "vkCreateDevice");
+    Check(StreamlineCreateDevice(g.physical_device, &info, nullptr, &g.device), "vkCreateDevice");
+    SetRayTracingProvisioned(ray_tracing_available);
+    SetRayTracingEnabled(g.config.ray_tracing);
     vkGetDeviceQueue(g.device, g.queue_family, 0, &g.queue);
     if (g.dynamic_color_write_mask) {
         g.cmd_set_color_write_mask = reinterpret_cast<PFN_vkCmdSetColorWriteMaskEXT>(
@@ -369,9 +457,6 @@ VkSurfaceFormatKHR PickSurfaceFormat() {
 }
 
 VkPresentModeKHR PickPresentMode() {
-    if (g.config.present_mode == PresentMode::Fifo) {
-        return VK_PRESENT_MODE_FIFO_KHR;
-    }
     uint32_t count = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g.physical_device, g.surface, &count, nullptr);
     std::vector<VkPresentModeKHR> modes(count);
@@ -379,6 +464,11 @@ VkPresentModeKHR PickPresentMode() {
     auto offered = [&](VkPresentModeKHR mode) {
         return std::find(modes.begin(), modes.end(), mode) != modes.end();
     };
+    if (g.config.frame_generation && StreamlineSupportsFrameGeneration() && StreamlineReflexActive() &&
+        offered(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
+        return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+    if (g.config.present_mode == PresentMode::Fifo) return VK_PRESENT_MODE_FIFO_KHR;
     if (g.config.present_mode == PresentMode::Immediate && offered(VK_PRESENT_MODE_IMMEDIATE_KHR)) {
         return VK_PRESENT_MODE_IMMEDIATE_KHR;
     }
@@ -439,19 +529,20 @@ bool CreateSwapchain() {
     info.preTransform = capabilities.currentTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     info.presentMode = PickPresentMode();
+    g_fg_present_compatible = info.presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR;
     info.clipped = VK_TRUE;
     info.oldSwapchain = old;
-    Check(vkCreateSwapchainKHR(g.device, &info, nullptr, &g.swapchain.handle), "vkCreateSwapchainKHR");
+    Check(StreamlineCreateSwapchain(g.device, &info, nullptr, &g.swapchain.handle), "vkCreateSwapchainKHR");
     if (old != VK_NULL_HANDLE) {
-        vkDestroySwapchainKHR(g.device, old, nullptr);
+        StreamlineDestroySwapchain(g.device, old, nullptr);
     }
 
     g.swapchain.format = format.format;
     g.swapchain.extent = extent;
     uint32_t count = 0;
-    vkGetSwapchainImagesKHR(g.device, g.swapchain.handle, &count, nullptr);
+    StreamlineGetSwapchainImages(g.device, g.swapchain.handle, &count, nullptr);
     g.swapchain.images.resize(count);
-    vkGetSwapchainImagesKHR(g.device, g.swapchain.handle, &count, g.swapchain.images.data());
+    StreamlineGetSwapchainImages(g.device, g.swapchain.handle, &count, g.swapchain.images.data());
     g.swapchain.render_finished.resize(count);
     for (uint32_t i = 0; i < count; i++) {
         VkSemaphoreCreateInfo semaphore = {};
@@ -472,13 +563,20 @@ bool ResizeOffscreen() {
         return false;
     }
     VkExtent2D extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
-    if (extent.width != g.swapchain.extent.width || extent.height != g.swapchain.extent.height) {
-        vkDeviceWaitIdle(g.device);
+    if (g_target_rebuild_pending || extent.width != g.swapchain.extent.width ||
+        extent.height != g.swapchain.extent.height) {
+        StreamlineDeviceWaitIdle(g.device);
+        if (g_pipeline_rebuild_pending) {
+            DestroyPipelines();
+            CreatePipelines();
+            g_pipeline_rebuild_pending = false;
+        }
         g.swapchain.extent = extent;
         DestroyMainTargets();
         CreateMainTargets();
         RecreateSharedTargets();
         RecreateRenderTargets();
+        g_target_rebuild_pending = false;
     }
     return true;
 }
@@ -486,12 +584,19 @@ bool ResizeOffscreen() {
 // The main targets follow the swapchain's size, losing their contents.
 void SyncMainTargets() {
     const Image &main = g.main_color[0];
-    if (main.width != g.swapchain.extent.width || main.height != g.swapchain.extent.height) {
-        vkDeviceWaitIdle(g.device);
+    if (g_target_rebuild_pending || main.width != g.swapchain.extent.width ||
+        main.height != g.swapchain.extent.height) {
+        StreamlineDeviceWaitIdle(g.device);
+        if (g_pipeline_rebuild_pending) {
+            DestroyPipelines();
+            CreatePipelines();
+            g_pipeline_rebuild_pending = false;
+        }
         DestroyMainTargets();
         CreateMainTargets();
         RecreateSharedTargets();
         RecreateRenderTargets();
+        g_target_rebuild_pending = false;
     }
 }
 
@@ -501,7 +606,7 @@ bool RecreateSwapchain(bool targets = true) {
     if (g.offscreen) {
         return ResizeOffscreen();
     }
-    vkDeviceWaitIdle(g.device);
+    StreamlineDeviceWaitIdle(g.device);
     DestroySwapchainResources();
     if (!CreateSwapchain()) {
         return false;
@@ -603,7 +708,9 @@ void Submit(bool with_draw, VkSemaphore wait, VkSemaphore signal) {
     submit.signalSemaphoreInfoCount = signal != VK_NULL_HANDLE ? 1 : 0;
     submit.pSignalSemaphoreInfos = &signal_info;
     Check(vkResetFences(g.device, 1, &frame.fence), "vkResetFences");
+    if (g.display_pass) StreamlineMarkFrame(g.streamline_frame_serial, StreamlineMarker::RenderSubmitStart);
     Check(vkQueueSubmit2(g.queue, 1, &submit, frame.fence), "vkQueueSubmit2");
+    if (g.display_pass) StreamlineMarkFrame(g.streamline_frame_serial, StreamlineMarker::RenderSubmitEnd);
     frame.pending = true;
 }
 
@@ -713,18 +820,42 @@ Image &PreviousMainColor() { return g.main_color[g.main_current ^ 1]; }
 void CreateMainTargets() {
     uint32_t width = g.swapchain.extent.width;
     uint32_t height = g.swapchain.extent.height;
+    uint32_t scene_width = width;
+    uint32_t scene_height = height;
+    if (g.config.enhanced_hdr && g.config.dlss_quality != DlssQuality::Off &&
+        StreamlineSupportsSuperResolution()) {
+        uint32_t optimal_width = 0;
+        uint32_t optimal_height = 0;
+        if (StreamlineOptimalRenderSize(g.config.dlss_quality, width, height,
+                                        optimal_width, optimal_height) &&
+            optimal_width > 0 && optimal_height > 0 &&
+            optimal_width <= width && optimal_height <= height) {
+            scene_width = optimal_width;
+            scene_height = optimal_height;
+        }
+    }
     for (Image &image : g.main_color) {
         image = CreateImage(width, height, 1, kColorFormat,
                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     }
-    g.display_color = CreateImage(width, height, 1, kColorFormat,
+    g.display_color = CreateImage(scene_width, scene_height, 1,
+                                  g.config.enhanced_hdr ? kHdrFormat : kColorFormat,
                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    if (g.config.enhanced_hdr) {
+        g.display_ui = CreateImage(width, height, 1, kColorFormat,
+                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    }
     for (Image *depth : {&g.main_depth, &g.display_depth}) {
-        *depth = CreateImage(width, height, 1, g.depth_format,
-                             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        VkImageUsageFlags usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if (depth == &g.display_depth && AtmosphereDepthSupported()) {
+            usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+        }
+        *depth = CreateImage(depth == &g.display_depth ? scene_width : width,
+                             depth == &g.display_depth ? scene_height : height, 1, g.depth_format, usage);
     }
 
     RunOneShot([](VkCommandBuffer cmd) {
@@ -732,7 +863,8 @@ void CreateMainTargets() {
         VkClearColorValue       black = {
             {0.0f, 0.0f, 0.0f, 1.0f}
         };
-        for (Image *image : {&g.main_color[0], &g.main_color[1], &g.display_color}) {
+        for (Image *image : {&g.main_color[0], &g.main_color[1], &g.display_color, &g.display_ui}) {
+            if (image->image == VK_NULL_HANDLE) continue;
             Transition(cmd, *image, TransferDst());
             vkCmdClearColorImage(cmd, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
             ToRest(cmd, *image);
@@ -760,18 +892,27 @@ void CreateMainTargets() {
     write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     write.pImageInfo = images;
     vkUpdateDescriptorSets(g.device, 1, &write, 0, nullptr);
+    BloomResize();
+    AtmosphereResize();
+    MotionResize();
 }
 
 void DestroyMainTargets() {
+    MotionDestroyTargets();
+    AtmosphereDestroyTarget();
+    BloomDestroyTargets();
     for (Image &image : g.main_color) {
         DestroyImage(image);
     }
     DestroyImage(g.main_depth);
     DestroyImage(g.display_color);
+    DestroyImage(g.display_ui);
     DestroyImage(g.display_depth);
 }
 
-Image &MainColorTarget() { return g.display_pass ? g.display_color : CurrentMainColor(); }
+Image &MainColorTarget() {
+    return g.display_pass ? (g.display_ui_active ? g.display_ui : g.display_color) : CurrentMainColor();
+}
 
 Image &MainDepth() { return g.display_pass ? g.display_depth : g.main_depth; }
 
@@ -791,9 +932,22 @@ float LogicalHeight() { return g.config.logical_height; }
 
 LogicalRect LogicalFrame() { return {0.0f, 0.0f, LogicalWidth(), LogicalHeight()}; }
 
+const char *PrepareStreamlineLoader(const RendererConfig &config) {
+    StreamlineInit(!config.offscreen, config.streamline_project_id, config.streamline_engine_version);
+    return StreamlineVulkanLoaderPath();
+}
+
+void AbortStreamlineLoader() { StreamlineShutdown(); }
+
 void RendererInit(SDL_Window *window, const RendererConfig &config) {
     static uint64_t instances = 0;
     g = {};
+    g_fg_present_compatible = false;
+    g_target_rebuild_pending = false;
+    g_pipeline_rebuild_pending = false;
+    g_pending_dlss_quality.reset();
+    g_pending_frame_generation.reset();
+    g_pending_enhanced_hdr.reset();
     g.renderer_instance = ++instances;
     g.window = window;
     g.config = config;
@@ -801,12 +955,15 @@ void RendererInit(SDL_Window *window, const RendererConfig &config) {
     g.mesh_slot_limit = config.mesh_slots == 0 ? kMaxMeshes : std::min(config.mesh_slots, kMaxMeshes);
     g.offscreen = config.offscreen;
     g.layout = config.layout;
+    StreamlineInit(!g.offscreen, config.streamline_project_id, config.streamline_engine_version);
     CreateInstance();
     if (!g.offscreen && !SDL_Vulkan_CreateSurface(window, g.instance, nullptr, &g.surface)) {
         Fatal("SDL_Vulkan_CreateSurface: %s", SDL_GetError());
     }
     PickPhysicalDevice();
+    StreamlineOnDevice(g.physical_device);
     CreateDevice();
+    InitRayTracing();
     CreateFrames();
     CreatePipelineLayout();
     InitResources();
@@ -825,6 +982,10 @@ void RendererInit(SDL_Window *window, const RendererConfig &config) {
             ? config.render_scale
             : std::max(1.0f, std::round(static_cast<float>(g.swapchain.extent.height) / g.config.logical_height));
     CreatePipelines();
+    BloomInit();
+    AtmosphereInit();
+    MotionInit();
+    MotionSetEnabled(StreamlineAvailable());
 }
 
 void RendererShutdown() {
@@ -832,12 +993,16 @@ void RendererShutdown() {
         return;
     }
     g.list.reset();
-    vkDeviceWaitIdle(g.device);
+    StreamlineDeviceWaitIdle(g.device);
     for (Frame &frame : g.frames) {
         RunDeletions(frame);
     }
+    MotionShutdown();
+    AtmosphereShutdown();
+    BloomShutdown();
     DestroyPipelines();
     ShutdownResources();
+    ShutdownRayTracing();
     for (Frame &frame : g.frames) {
         DestroyTransients(frame);
         DestroyBuffer(frame.depth_readback);
@@ -850,7 +1015,7 @@ void RendererShutdown() {
     DestroyMainTargets();
     DestroySwapchainResources();
     if (g.swapchain.handle != VK_NULL_HANDLE) {
-        vkDestroySwapchainKHR(g.device, g.swapchain.handle, nullptr);
+        StreamlineDestroySwapchain(g.device, g.swapchain.handle, nullptr);
     }
     vkDestroyDescriptorPool(g.device, g.texture_pool, nullptr);
     vkDestroyDescriptorPool(g.device, g.constants_pool, nullptr);
@@ -858,12 +1023,15 @@ void RendererShutdown() {
     vkDestroyDescriptorSetLayout(g.device, g.texture_set_layout, nullptr);
     vkDestroyDescriptorSetLayout(g.device, g.constants_set_layout, nullptr);
     vkDestroyDescriptorSetLayout(g.device, g.prog0_set_layout, nullptr);
+    vkDestroyDescriptorSetLayout(g.device, g.empty_set_layout, nullptr);
+    vkDestroyPipelineLayout(g.device, g.ray_pipeline_layout, nullptr);
     vkDestroyPipelineLayout(g.device, g.prog0_pipeline_layout, nullptr);
     vkDestroyPipelineLayout(g.device, g.pipeline_layout, nullptr);
     for (VkSampler sampler : g.samplers) {
         vkDestroySampler(g.device, sampler, nullptr);
     }
     ShutdownMemory();
+    StreamlineShutdown();
     vkDestroyDevice(g.device, nullptr);
     if (g.surface != VK_NULL_HANDLE) {
         SDL_Vulkan_DestroySurface(g.instance, g.surface, nullptr);
@@ -896,13 +1064,27 @@ void SetPresentMode(PresentMode mode) {
     }
 }
 
+void SetEnhancedHdr(bool enabled) { g_pending_enhanced_hdr = enabled; }
+
+void SetRayTracing(bool enabled) { QueueRayTracing(enabled); }
+
+bool RayTracingAvailable() { return RayTracingProvisioned(); }
+
+bool RayTracingEnabled() { return detail::RayTracingEnabled(); }
+
+void SetDlssQuality(DlssQuality quality) { g_pending_dlss_quality = quality; }
+
+void SetFrameGeneration(bool enabled) { g_pending_frame_generation = enabled; }
+
 namespace detail {
 namespace {
 
 bool OpenFrame() {
+    ApplyPendingRayTracing();
     BeginCommands(CurrentFrame().draw_cmd);
     g.in_frame = true;
     g.frame_serial++;
+    RayProfileBeginFrame(CurrentFrame().draw_cmd);
     g.target = kMainTarget;
     g.rendering = false;
     ResetDrawState();
@@ -924,7 +1106,7 @@ bool AcquireImage(bool targets) {
         SubmitUploadsAndWait();
         return false;
     }
-    VkResult result = vkAcquireNextImageKHR(g.device, g.swapchain.handle, UINT64_MAX,
+    VkResult result = StreamlineAcquireNextImage(g.device, g.swapchain.handle, UINT64_MAX,
                                             CurrentFrame().image_available, VK_NULL_HANDLE, &g.image_index);
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         // Recreating may submit pending uploads and move to the next slot.
@@ -932,7 +1114,7 @@ bool AcquireImage(bool targets) {
             SubmitUploadsAndWait();
             return false;
         }
-        result = vkAcquireNextImageKHR(g.device, g.swapchain.handle, UINT64_MAX,
+        result = StreamlineAcquireNextImage(g.device, g.swapchain.handle, UINT64_MAX,
                                        CurrentFrame().image_available, VK_NULL_HANDLE, &g.image_index);
     }
     if (result == VK_SUBOPTIMAL_KHR) {
@@ -948,24 +1130,60 @@ bool AcquireImage(bool targets) {
 // Ends the frame's draw commands with source blitted onto the acquired swapchain image, submits
 // and presents.
 void PresentImage(Frame &frame, VkCommandBuffer cmd, Image &source) {
+    Image &present_source = g.display_ui_active && &source == &g.display_ui ? source : BloomApply(cmd, source);
     VkImage swapchain = g.swapchain.images[g.image_index];
-    Transition(cmd, source, TransferSrc());
+    Transition(cmd, present_source, TransferSrc());
     // Chained to the acquire semaphore, which the submit waits on at the transfer stage.
     SwapchainBarrier(cmd, swapchain, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                      VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_NONE,
                      VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     VkImageBlit region = {};
     region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.srcOffsets[1] = {static_cast<int32_t>(source.width), static_cast<int32_t>(source.height), 1};
+    region.srcOffsets[1] = {static_cast<int32_t>(present_source.width), static_cast<int32_t>(present_source.height), 1};
     region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.dstOffsets[1] = {static_cast<int32_t>(g.swapchain.extent.width),
                             static_cast<int32_t>(g.swapchain.extent.height), 1};
-    vkCmdBlitImage(cmd, source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain,
+    vkCmdBlitImage(cmd, present_source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_NEAREST);
     SwapchainBarrier(cmd, swapchain, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                      VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE);
-    ToRest(cmd, source);
+    ToRest(cmd, present_source);
+    const Image *hudless = BloomHudlessColor();
+    const Image *motion = MotionImage();
+    const StreamlineCamera *camera = MotionCamera();
+    if (g.config.frame_generation && g_fg_present_compatible && g.display_pass &&
+        hudless && motion && camera && StreamlineReflexActive()) {
+        auto tagged = [](const Image &image) {
+            StreamlineImage result{};
+            result.image = image.image;
+            result.view = image.view;
+            result.memory = image.memory.memory;
+            result.layout = image.state.layout;
+            result.format = image.format;
+            result.usage = image.usage;
+            result.width = image.width;
+            result.height = image.height;
+            return result;
+        };
+        StreamlineFrame generated{};
+        generated.index = g.streamline_frame_serial;
+        generated.command_buffer = cmd;
+        generated.camera = *camera;
+        generated.depth = tagged(g.display_depth);
+        generated.motion = tagged(*motion);
+        generated.hudless_color = tagged(*hudless);
+        generated.output_color.format = g.swapchain.format;
+        generated.output_width = g.swapchain.extent.width;
+        generated.output_height = g.swapchain.extent.height;
+        generated.backbuffer_count = static_cast<uint32_t>(g.swapchain.images.size());
+        generated.dense_motion = true;
+        generated.clean_hudless = true;
+        generated.reflex_active = true;
+        if (!StreamlinePrepareFrameGeneration(generated)) StreamlineDisableFrameGeneration();
+    } else {
+        StreamlineDisableFrameGeneration();
+    }
     Check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
 
     VkSemaphore render_finished = g.swapchain.render_finished[g.image_index];
@@ -979,7 +1197,9 @@ void PresentImage(Frame &frame, VkCommandBuffer cmd, Image &source) {
     present.swapchainCount = 1;
     present.pSwapchains = &g.swapchain.handle;
     present.pImageIndices = &g.image_index;
-    VkResult result = vkQueuePresentKHR(g.queue, &present);
+    StreamlineMarkFrame(g.streamline_frame_serial, StreamlineMarker::PresentStart);
+    VkResult result = StreamlineQueuePresent(g.queue, &present);
+    StreamlineMarkFrame(g.streamline_frame_serial, StreamlineMarker::PresentEnd);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         g.resize_pending = true;
     } else {
@@ -999,6 +1219,8 @@ void SubmitWithoutPresent(VkCommandBuffer cmd, Image &main) {
 } // namespace
 
 void PrepareRecording() {
+    ApplyPendingRendererOptions();
+    ApplyPendingEnhancedHdr();
     if (g.resize_pending) {
         RecreateSwapchain();
     } else if (!g.offscreen) {
@@ -1007,10 +1229,13 @@ void PrepareRecording() {
 }
 
 bool OpenListFrame(bool canonical, bool present, bool base) {
+    ApplyPendingRendererOptions();
+    ApplyPendingEnhancedHdr();
     if (canonical) {
+        BloomResetCapture();
         // The game's state is drawn whether or not the window can show it: later ticks sample it.
         if (g.offscreen) {
-            if (g.resize_pending) {
+            if (g.resize_pending || g_target_rebuild_pending) {
                 ResizeOffscreen();
             }
         } else if (g.resize_pending || g.swapchain.handle == VK_NULL_HANDLE) {
@@ -1020,11 +1245,20 @@ bool OpenListFrame(bool canonical, bool present, bool base) {
         }
         return OpenFrame();
     }
+    if (g.offscreen) {
+        if ((g.resize_pending || g_target_rebuild_pending) && !ResizeOffscreen()) return false;
+    } else if (g.resize_pending || g.swapchain.handle == VK_NULL_HANDLE) {
+        if (!RecreateSwapchain()) return false;
+    } else if (g_target_rebuild_pending) {
+        SyncMainTargets();
+    }
     if (present && !g.offscreen && !AcquireImage(false)) {
         return false;
     }
     OpenFrame();
+    if (present && !g.offscreen) ++g.streamline_frame_serial;
     g.display_pass = true;
+    g.display_ui_active = false;
     if (base) {
         VkCommandBuffer cmd = DrawCommands();
         Image          &source = PreviousMainColor();
@@ -1050,27 +1284,36 @@ bool OpenListFrame(bool canonical, bool present, bool base) {
 }
 
 void CloseListFrame(bool canonical, bool present) {
+    if (!canonical && g.display_pass && g.config.enhanced_hdr && !g.display_ui_active) {
+        SetRenderTarget(kMainTarget);
+        BloomCaptureScene();
+    }
     Frame          &frame = CurrentFrame();
     VkCommandBuffer cmd = frame.draw_cmd;
     EndRendering();
     ReleaseTarget();
+    FinishRayScene(cmd);
     if (canonical) {
         RecordDepthQueries(cmd);
         SubmitWithoutPresent(cmd, CurrentMainColor());
         FinishFrame(frame);
         g.canonical_newest = true;
         g.presented_display = false;
+        g.presented_ui = false;
         return;
     }
     if (present && !g.offscreen) {
-        PresentImage(frame, cmd, g.display_color);
+        PresentImage(frame, cmd, MainColorTarget());
     } else {
-        SubmitWithoutPresent(cmd, g.display_color);
+        SubmitWithoutPresent(cmd, MainColorTarget());
     }
+    bool ui_output = g.display_ui_active;
     g.display_pass = false;
+    g.display_ui_active = false;
     g.target = kMainTarget;
-    if (present) {
+    if (present || g.offscreen) {
         g.presented_display = true;
+        g.presented_ui = ui_output;
     }
     AdvanceSlot();
 }
@@ -1078,21 +1321,27 @@ void CloseListFrame(bool canonical, bool present) {
 } // namespace detail
 
 bool BeginFrame() {
+    ApplyPendingRendererOptions();
+    ApplyPendingEnhancedHdr();
     if (g.in_frame || g.list != nullptr) {
         Error("BeginFrame inside a frame");
         return true;
     }
+    BloomResetCapture();
     if (g.offscreen) {
-        if (g.resize_pending && !ResizeOffscreen()) {
+        if ((g.resize_pending || g_target_rebuild_pending) && !ResizeOffscreen()) {
             SubmitUploadsAndWait();
             return false;
         }
         return OpenFrame();
     }
+    if (g_target_rebuild_pending && !g.resize_pending) SyncMainTargets();
     if (!AcquireImage(true)) {
         return false;
     }
-    return OpenFrame();
+    if (!OpenFrame()) return false;
+    ++g.streamline_frame_serial;
+    return true;
 }
 
 void EndFrame() {
@@ -1103,6 +1352,7 @@ void EndFrame() {
     VkCommandBuffer cmd = frame.draw_cmd;
     EndRendering();
     ReleaseTarget();
+    FinishRayScene(cmd);
     RecordDepthQueries(cmd);
     g.canonical_newest = false;
     g.presented_display = false;
@@ -1126,6 +1376,7 @@ bool PresentCanonical() {
         return false;
     }
     OpenFrame();
+    ++g.streamline_frame_serial;
     Frame &frame = CurrentFrame();
     PresentImage(frame, frame.draw_cmd, PreviousMainColor());
     g.target = kMainTarget;

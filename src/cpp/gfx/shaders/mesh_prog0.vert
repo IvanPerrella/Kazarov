@@ -39,6 +39,16 @@ layout(set = 1, binding = 0, std140) uniform MeshConstants {
     vec4 world_uv[2];
     uint flags;
     uint light_count;
+    float material_roughness;
+    float normal_detail_strength;
+    mat4 model_to_world;
+    vec4 camera_position;
+    vec4 camera_forward;
+    mat4 previous_mvp;
+    uint motion_valid;
+    vec2 jitter_ndc;
+    uint motion_pad;
+    uvec4 material_maps;
 }
 mc;
 

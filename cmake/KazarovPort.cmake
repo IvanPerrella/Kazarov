@@ -83,11 +83,50 @@ function(kz_port_host_library target)
         list(APPEND shader_headers ${header})
         if(NOT shaders_defined)
             add_custom_command(OUTPUT ${header}
-                COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.4 --quiet --vn ${shader_symbol}
+                COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.4 --quiet -I${KZ_PORT_ROOT}/gfx/shaders --vn ${shader_symbol}
                     --depfile ${header}.d -o ${header} ${shader}
                 DEPENDS ${shader}
                 DEPFILE ${header}.d
                 COMMENT "Compiling ${shader_name} to SPIR-V")
+        endif()
+    endforeach()
+
+    foreach(variant IN ITEMS mesh_enhanced draw2d_enhanced)
+        if(variant STREQUAL "mesh_enhanced")
+            set(source "${KZ_PORT_ROOT}/gfx/shaders/mesh.vert")
+        else()
+            set(source "${KZ_PORT_ROOT}/gfx/shaders/draw2d.vert")
+        endif()
+        set(header "${generated_dir}/shaders/${variant}.vert.spv.hpp")
+        list(APPEND shader_headers ${header})
+        if(NOT shaders_defined)
+            add_custom_command(OUTPUT ${header}
+                COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.4 --quiet -DENHANCED_OUTPUT=1
+                    --vn ${variant}_vert --depfile ${header}.d -o ${header} ${source}
+                DEPENDS ${source}
+                DEPFILE ${header}.d
+                COMMENT "Compiling ${variant} to SPIR-V")
+        endif()
+    endforeach()
+
+    # Ray-query variants share the enhanced material source. The set-3 ray resources do not
+    # overlap Prog0's set-2 uniform block.
+    foreach(variant IN ITEMS enhanced_ray enhanced_early_ray)
+        set(header "${generated_dir}/shaders/${variant}.frag.spv.hpp")
+        list(APPEND shader_headers ${header})
+        if(NOT shaders_defined)
+            set(flags -DRAY_QUERY_AO=1)
+            if(variant STREQUAL "enhanced_early_ray")
+                list(APPEND flags -DEARLY_RAY_OPAQUE=1)
+            endif()
+            add_custom_command(OUTPUT ${header}
+                COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.4 --quiet -I${KZ_PORT_ROOT}/gfx/shaders ${flags}
+                    --vn ${variant}_frag --depfile ${header}.d -o ${header}
+                    ${KZ_PORT_ROOT}/gfx/shaders/enhanced.frag
+                DEPENDS ${KZ_PORT_ROOT}/gfx/shaders/enhanced.frag
+                    ${KZ_PORT_ROOT}/gfx/shaders/material_detail.glsl
+                DEPFILE ${header}.d
+                COMMENT "Compiling ${variant} to SPIR-V")
         endif()
     endforeach()
 

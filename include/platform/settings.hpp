@@ -89,6 +89,7 @@ struct HostSettings {
 
 // The game's environment variables are <prefix>_<name>.
 void        SettingsSetEnvPrefix(std::string_view prefix);
+std::string SettingsEnvName(std::string_view name);
 const char *SettingsEnv(std::string_view name);   // std::getenv("<prefix>_<name>"), nullptr if unset or no prefix was set
 
 // Provided by the game: its settings, and a change that applies the host fields while keeping the

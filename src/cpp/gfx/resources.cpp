@@ -5,6 +5,7 @@
 
 #include "gfx/context.hpp"
 #include "gfx/displaylist.hpp"
+#include "raytracing.hpp"
 
 namespace gfx {
 
@@ -173,28 +174,29 @@ bool IsDepthFormat(VkFormat format) {
 bool FrameShaped(const Texture &texture) { return texture.frame && FillsWindow(); }
 
 LogicalMapping TextureMapping(const Texture &texture) {
+    const Image &active = TextureImage(texture);
     if (texture.shares_main_depth) {
-        return MainMapping(texture.image.width, texture.image.height);
+        return MainMapping(active.width, active.height);
     }
     if (FrameShaped(texture)) {
         // The logical width lies over the main target's logical frame, whose sides it keeps.
         LogicalMapping main = MainMapping(g.main_color[0].width, g.main_color[0].height);
         float          rows =
-            static_cast<float>(texture.image.height) / static_cast<float>(texture.logical_height);
+            static_cast<float>(active.height) / static_cast<float>(texture.logical_height);
         return LogicalMapping{main.scale_x * g.config.logical_width / static_cast<float>(texture.logical_width),
                               rows,
                               main.offset_x,
                               0.0f,
-                              texture.image.width,
-                              texture.image.height};
+                              active.width,
+                              active.height};
     }
-    return LogicalMapping{static_cast<float>(texture.image.width) / static_cast<float>(texture.logical_width),
-                          static_cast<float>(texture.image.height) /
+    return LogicalMapping{static_cast<float>(active.width) / static_cast<float>(texture.logical_width),
+                          static_cast<float>(active.height) /
                               static_cast<float>(texture.logical_height),
                           0.0f,
                           0.0f,
-                          texture.image.width,
-                          texture.image.height};
+                          active.width,
+                          active.height};
 }
 
 ImageState RestState(const Image &image) {
@@ -204,7 +206,8 @@ ImageState RestState(const Image &image) {
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT};
     }
-    return {VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+    return {VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
 }
 
@@ -220,6 +223,7 @@ ImageState TransferDst() {
 
 Image CreateImage(uint32_t width, uint32_t height, uint32_t mips, VkFormat format, VkImageUsageFlags usage) {
     Image image;
+    image.usage = usage;
     image.format = format;
     image.aspect = !IsDepthFormat(format)           ? VK_IMAGE_ASPECT_COLOR_BIT
                    : format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_ASPECT_DEPTH_BIT
@@ -330,6 +334,7 @@ void InitResources() {
 void ShutdownResources() {
     for (Texture &texture : g.textures) {
         DestroyImage(texture.image);
+        DestroyImage(texture.display_image);
         DestroyImage(texture.depth);
     }
     for (Mesh &mesh : g.meshes) {
@@ -350,6 +355,16 @@ Texture *LookupTexture(TextureHandle handle) {
         return nullptr;
     }
     return &texture;
+}
+
+Image &TextureImage(Texture &texture) {
+    return g.display_pass && texture.display_image.image != VK_NULL_HANDLE
+               ? texture.display_image : texture.image;
+}
+
+const Image &TextureImage(const Texture &texture) {
+    return g.display_pass && texture.display_image.image != VK_NULL_HANDLE
+               ? texture.display_image : texture.image;
 }
 
 Mesh *LookupMesh(MeshHandle handle) {
@@ -373,7 +388,7 @@ Image *ColorImageOf(TextureHandle handle) {
         return &PreviousFrameImage();
     }
     Texture *texture = LookupTexture(handle);
-    return texture ? &texture->image : nullptr;
+    return texture ? &TextureImage(*texture) : nullptr;
 }
 
 uint32_t SamplerIndex(Filter filter, Wrap wrap_u, Wrap wrap_v) {
@@ -446,6 +461,14 @@ void RecreateSharedTargets() {
     const Image &main = g.main_color[0];
     RunOneShot([&](VkCommandBuffer cmd) {
         for (uint32_t slot = kFirstUserSlot; slot < g.textures.size(); slot++) {
+            const bool needs_twin = g.textures[slot].live && g.textures[slot].shares_main_depth &&
+                                    (g.display_color.width != main.width ||
+                                     g.display_color.height != main.height);
+            uint32_t display_slot = g.textures[slot].display_slot;
+            if (needs_twin && display_slot == 0) {
+                display_slot = AllocateTextureSlot();
+                if (display_slot == 0) Fatal("out of texture slots for display target");
+            }
             Texture &texture = g.textures[slot];
             if (!texture.live || !texture.shares_main_depth) {
                 continue;
@@ -459,6 +482,21 @@ void RecreateSharedTargets() {
             DeferDestroy([old_image]() mutable { DestroyImage(old_image); });
             texture.image = image;
             WriteTextureDescriptor(slot, image.view);
+            Image old_display = texture.display_image;
+            if (needs_twin) {
+                texture.display_slot = display_slot;
+                texture.display_image = CreateTargetImage(g.display_color.width, g.display_color.height);
+                ClearImage(cmd, texture.display_image, VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+                WriteTextureDescriptor(display_slot, texture.display_image.view);
+            } else {
+                texture.display_slot = 0;
+                texture.display_image = {};
+                if (display_slot != 0) {
+                    WriteTextureDescriptor(display_slot, g.textures[0].image.view);
+                    g.free_texture_slots.push_back(display_slot);
+                }
+            }
+            DeferDestroy([old_display]() mutable { DestroyImage(old_display); });
         }
     });
 }
@@ -480,14 +518,23 @@ void DestroyDoomedTexture(TextureHandle handle) {
         g.target = kMainTarget;
     }
     Image image = texture.image;
+    Image display_image = texture.display_image;
+    uint32_t display_slot = texture.display_slot;
     Image depth = texture.depth;
     texture.live = false;
     texture.doomed = nullptr;
     texture.image = {};
+    texture.display_image = {};
+    texture.display_slot = 0;
     texture.depth = {};
-    DeferDestroy([slot, image, depth]() mutable {
+    DeferDestroy([slot, image, display_image, display_slot, depth]() mutable {
         WriteTextureDescriptor(slot, g.textures[0].image.view);
+        if (display_slot != 0) {
+            WriteTextureDescriptor(display_slot, g.textures[0].image.view);
+            g.free_texture_slots.push_back(display_slot);
+        }
         DestroyImage(image);
+        DestroyImage(display_image);
         DestroyImage(depth);
         g.free_texture_slots.push_back(slot);
     });
@@ -502,6 +549,7 @@ void DestroyDoomedMesh(MeshHandle handle) {
     if (!mesh.live || mesh.generation != handle >> kSlotBits) {
         return;
     }
+    RayMeshDestroyed(handle);
     Buffer buffer = mesh.buffer;
     mesh.live = false;
     mesh.doomed = nullptr;
@@ -575,6 +623,11 @@ TextureHandle CreateRenderTarget(uint32_t logical_width, uint32_t logical_height
         Error("out of texture slots (%u)", g.texture_slot_limit);
         return kNullTexture;
     }
+    const bool needs_twin = share_main_depth &&
+                            (g.display_color.width != g.main_color[0].width ||
+                             g.display_color.height != g.main_color[0].height);
+    uint32_t display_slot = needs_twin ? AllocateTextureSlot() : 0;
+    if (needs_twin && display_slot == 0) Fatal("out of texture slots for display target");
     Texture &texture = g.textures[slot];
     texture.live = true;
     texture.generation = NextGeneration(texture.generation);
@@ -586,11 +639,19 @@ TextureHandle CreateRenderTarget(uint32_t logical_width, uint32_t logical_height
     texture.logical_height = logical_height;
     texture.last_draw_use = 0;
     texture.image = CreateTargetImage(width, height);
+    if (needs_twin) {
+        texture.display_slot = display_slot;
+        texture.display_image = CreateTargetImage(g.display_color.width, g.display_color.height);
+    }
     VkCommandBuffer cmd = UploadCommands();
     ClearImage(cmd, texture.image,
                VkClearColorValue{
                    {0.0f, 0.0f, 0.0f, 1.0f}
     });
+    if (needs_twin) {
+        ClearImage(cmd, texture.display_image, VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+        WriteTextureDescriptor(display_slot, texture.display_image.view);
+    }
     if (!share_main_depth) {
         texture.depth = CreateTargetDepth(width, height);
         ClearDepth(cmd, texture.depth);
@@ -775,11 +836,13 @@ MeshHandle CreateMesh(std::span<const Vertex3D> vertices, std::span<const uint32
     mesh.last_draw_use = 0;
     mesh.buffer = CreateBuffer(vertex_bytes + index_bytes,
                                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT | RayMeshBufferUsage(),
                                false);
     UploadToBuffer(mesh, 0, vertices.data(), vertex_bytes);
     UploadToBuffer(mesh, vertex_bytes, indices.data(), index_bytes);
-    return MakeHandle(mesh.generation, slot);
+    MeshHandle handle = MakeHandle(mesh.generation, slot);
+    RayMeshCreated(handle, vertices, indices);
+    return handle;
 }
 
 bool UpdateMeshVertices(MeshHandle handle, uint32_t first, std::span<const Vertex3D> vertices) {
@@ -796,6 +859,7 @@ bool UpdateMeshVertices(MeshHandle handle, uint32_t first, std::span<const Verte
         return true;
     }
     UploadToBuffer(*mesh, first * sizeof(Vertex3D), vertices.data(), vertices.size_bytes());
+    RayMeshUpdated(handle, first, vertices);
     return true;
 }
 

@@ -27,6 +27,7 @@ struct Block {
 struct Pool {
     uint32_t           type;
     bool               linear;
+    bool               device_address;
     std::vector<Block> blocks;
 };
 
@@ -52,11 +53,16 @@ bool IsHostVisible(uint32_t type) {
     return (g.memory_properties.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
 }
 
-VkDeviceMemory AllocateRaw(VkDeviceSize size, uint32_t type, uint8_t **mapped) {
+VkDeviceMemory AllocateRaw(VkDeviceSize size, uint32_t type, bool device_address, uint8_t **mapped) {
     VkMemoryAllocateInfo info = {};
     info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     info.allocationSize = size;
     info.memoryTypeIndex = type;
+    VkMemoryAllocateFlagsInfo flags = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+    if (device_address) {
+        flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        info.pNext = &flags;
+    }
     VkDeviceMemory memory = VK_NULL_HANDLE;
     Check(vkAllocateMemory(g.device, &info, nullptr, &memory), "vkAllocateMemory");
     *mapped = nullptr;
@@ -108,24 +114,25 @@ void ReturnToBlock(Block &block, VkDeviceSize offset, VkDeviceSize size) {
 } // namespace
 
 Allocation AllocateMemory(const VkMemoryRequirements &requirements, VkMemoryPropertyFlags required,
-                          VkMemoryPropertyFlags preferred, bool linear) {
+                          VkMemoryPropertyFlags preferred, bool linear, bool device_address) {
     uint32_t   type = FindMemoryType(requirements.memoryTypeBits, required, preferred);
     Allocation allocation;
     allocation.size = requirements.size;
 
     if (requirements.size >= kDedicatedThreshold) {
-        allocation.memory = AllocateRaw(requirements.size, type, &allocation.mapped);
+        allocation.memory = AllocateRaw(requirements.size, type, device_address, &allocation.mapped);
         return allocation;
     }
 
     uint32_t pool_index = 0;
     for (; pool_index < g_pools.size(); pool_index++) {
-        if (g_pools[pool_index].type == type && g_pools[pool_index].linear == linear) {
+        if (g_pools[pool_index].type == type && g_pools[pool_index].linear == linear &&
+            g_pools[pool_index].device_address == device_address) {
             break;
         }
     }
     if (pool_index == g_pools.size()) {
-        g_pools.push_back(Pool{type, linear, {}});
+        g_pools.push_back(Pool{type, linear, device_address, {}});
     }
     Pool &pool = g_pools[pool_index];
     allocation.pool = pool_index;
@@ -142,7 +149,7 @@ Allocation AllocateMemory(const VkMemoryRequirements &requirements, VkMemoryProp
     }
 
     Block block;
-    block.memory = AllocateRaw(kBlockSize, type, &block.mapped);
+    block.memory = AllocateRaw(kBlockSize, type, device_address, &block.mapped);
     block.free.push_back(Range{0, kBlockSize});
     VkDeviceSize offset = 0;
     AllocateFromBlock(block, requirements.size, requirements.alignment, &offset);
@@ -189,9 +196,11 @@ Buffer CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool host_visib
     if (host_visible) {
         buffer.memory = AllocateMemory(
             requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            VK_MEMORY_PROPERTY_HOST_CACHED_BIT, true);
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT, true,
+            (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0);
     } else {
-        buffer.memory = AllocateMemory(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, true);
+        buffer.memory = AllocateMemory(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, true,
+                                       (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0);
     }
     Check(vkBindBufferMemory(g.device, buffer.buffer, buffer.memory.memory, buffer.memory.offset),
           "vkBindBufferMemory");

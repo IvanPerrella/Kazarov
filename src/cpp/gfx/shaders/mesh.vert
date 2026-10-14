@@ -32,6 +32,16 @@ layout(set = 1, binding = 0, std140) uniform MeshConstants {
     vec4 world_uv[2];
     uint flags;
     uint light_count;
+    float material_roughness;
+    float normal_detail_strength;
+    mat4 model_to_world;
+    vec4 camera_position;
+    vec4 camera_forward;
+    mat4 previous_mvp;
+    uint motion_valid;
+    vec2 jitter_ndc;
+    uint motion_pad;
+    uvec4 material_maps;
 }
 mc;
 
@@ -43,6 +53,7 @@ const uint kClip0       = 16u;
 const uint kClip1       = 32u;
 const uint kScreenUv    = 64u;
 const uint kWorldUv     = 128u;
+const uint kMaterialLighting = 512u;
 
 // A byte colour (0..255 as 0..1) read as a modulation with 0x80 as 1.0.
 const float kModulate = 255.0 / 128.0;
@@ -50,6 +61,12 @@ const float kModulate = 255.0 / 128.0;
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec2 v_uv;
 layout(location = 2) out float v_fog;
+#ifdef ENHANCED_OUTPUT
+layout(location = 3) out vec3 v_world_position;
+layout(location = 4) out vec3 v_world_normal;
+layout(location = 5) out vec3 v_vertex_color;
+layout(location = 6) flat out uint v_mesh_flags;
+#endif
 
 out float gl_ClipDistance[2];
 
@@ -63,15 +80,23 @@ void main() {
     vec2 ndc = clip.xy / clip.w;
     ndc = round(ndc / (logical_pixel_ndc / 16.0)) * (logical_pixel_ndc / 16.0);
     clip.xy = ndc * clip.w;
+    clip.xy += mc.jitter_ndc * clip.w;
     gl_Position   = clip;
 
     gl_ClipDistance[0] = (mc.flags & kClip0) != 0u ? dot(mc.clip_plane[0], position) : 1.0;
     gl_ClipDistance[1] = (mc.flags & kClip1) != 0u ? dot(mc.clip_plane[1], position) : 1.0;
 
+    #ifdef ENHANCED_OUTPUT
+    v_world_position = (mc.model_to_world * position).xyz;
+    v_world_normal = mc.normal_matrix * a_normal;
+    v_vertex_color = a_color.rgb;
+    v_mesh_flags = mc.flags;
+    #endif
+
     vec3  color = mc.diffuse.rgb;
     float alpha = mc.diffuse.a;
     if ((mc.flags & kShadow) == 0u) {
-        if ((mc.flags & kLit) != 0u) {
+        if ((mc.flags & kLit) != 0u && (mc.flags & kMaterialLighting) == 0u) {
             vec3 normal = normalize(mc.normal_matrix * a_normal);
             vec3 light  = vec3(0.0);
             for (uint i = 0u; i < min(mc.light_count, 4u); i++) {

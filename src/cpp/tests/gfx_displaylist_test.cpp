@@ -171,6 +171,42 @@ Coverage ReadCoverage(GfxFixture &fixture) {
 
 } // namespace
 
+TEST(GfxGpuDisplayList, EnhancedMotionOnlyImmediateReplayReadsToneMappedFrame) {
+    GfxOptions options;
+    options.offscreen = true;
+    options.enhanced_hdr = true;
+    options.logical_width = kWidth;
+    options.logical_height = kHeight;
+    GfxFixture fixture(kWidth, kHeight, 1.0f, options);
+    const auto shared_depth_target = gfx::CreateRenderTarget(kWidth, kHeight, true, true);
+    ASSERT_NE(shared_depth_target, gfx::kNullTexture);
+
+    std::vector<gfx::Vertex3D> triangle = {
+        Vert({-0.6f, -0.6f, 0.5f}, {0, 0, 1}, {128, 128, 128, 128}),
+        Vert({ 0.6f, -0.6f, 0.5f}, {0, 0, 1}, {128, 128, 128, 128}),
+        Vert({ 0.0f,  0.6f, 0.5f}, {0, 0, 1}, {128, 128, 128, 128}),
+    };
+    gfx::MeshConstants constants{};
+    Identity(constants.mvp);
+    constants.diffuse[0] = constants.diffuse[1] = constants.diffuse[2] = 1.0f;
+    constants.diffuse[3] = 1.0f;
+    const uint8_t clear[4] = {0, 0, 0, 128};
+    gfx::BeginRecording();
+    gfx::Clear(true, clear, true, 0.0f);
+    gfx::SetRenderTarget(shared_depth_target);
+    gfx::Clear(true, clear, false, 0.0f);
+    gfx::SetRenderTarget(gfx::kMainTarget);
+    gfx::DrawMeshImmediate(triangle, kTriangle, constants, {}, {});
+    gfx::CaptureScene();
+    auto list = gfx::EndRecording();
+    ASSERT_TRUE(gfx::RenderList(*list, 1.0f, {.canonical = true}));
+    ASSERT_TRUE(gfx::RenderList(*list, 1.0f, {.present = true}));
+    ASSERT_TRUE(gfx::ReadbackFrame(fixture.pixels, fixture.width, fixture.height));
+    EXPECT_EQ(fixture.width, kWidth);
+    EXPECT_EQ(fixture.height, kHeight);
+    EXPECT_EQ(fixture.pixels.size(), static_cast<size_t>(kWidth * kHeight * 4));
+}
+
 TEST(GfxGpuDisplayList, RecordingReservesPriorSizesWithoutRetainingCommands) {
     GfxFixture          fixture(kWidth, kHeight);
     gfx::Prog0Constants constants = {};

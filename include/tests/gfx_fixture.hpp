@@ -30,6 +30,7 @@ struct GfxOptions {
     bool triangle_fans = true;
     bool separate_stencil_masks = true;
     bool prog0_meshes = false;
+    bool enhanced_hdr = false;
     uint32_t              texture_slots = 0;
     uint32_t              mesh_slots = 0;
     float                 logical_width = 640.0f;
@@ -65,6 +66,7 @@ struct GfxFixture {
         config.triangle_fans = options.triangle_fans;
         config.separate_stencil_masks = options.separate_stencil_masks;
         config.prog0_meshes = options.prog0_meshes;
+        config.enhanced_hdr = options.enhanced_hdr;
         config.texture_slots = options.texture_slots;
         config.mesh_slots = options.mesh_slots;
         config.pipeline_cache = options.pipeline_cache;

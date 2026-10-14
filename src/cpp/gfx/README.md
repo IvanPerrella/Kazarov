@@ -460,6 +460,10 @@ Nothing the renderer calls was introduced by Vulkan 1.4, so 1.3 is the floor:
 
 Optional, used when present:
 
+- A capable GPU provisions `VK_KHR_acceleration_structure`, `VK_KHR_ray_query`,
+  buffer device addresses and `VK_KHR_deferred_host_operations` at startup. An
+  application can then change `RendererConfig::ray_tracing` during play. The
+  ordinary raster pipeline remains available without these capabilities.
 - `VK_EXT_extended_dynamic_state3` with `extendedDynamicState3ColorWriteMask` (below); without it
   the colourless pipelines are added. Chosen by the device's capability, and
   `config.dynamic_color_write_mask = false` forces the fallback.
@@ -476,8 +480,46 @@ Optional, used when present:
   reinterpretation, constant-alpha blend factors, mip LOD bias and comparison samplers are not used.
 - `VK_EXT_debug_utils` and `VK_LAYER_KHRONOS_validation` for validation.
 
-Shaders are compiled for `--target-env vulkan1.4`, which emits SPIR-V 1.6 with no capability beyond
-what 1.3 supports (`spirv-val --target-env vulkan1.3` accepts all three).
+Shaders are compiled for `--target-env vulkan1.4`. Baseline shaders use no
+capability beyond Vulkan 1.3; the separate enhanced ray fragment variants need
+`VK_KHR_ray_query`. The opaque variant requests early depth testing, while the
+alpha-tested variant confirms candidates only after sampling their material.
+
+## Enhanced display shading
+
+Persistent `DrawMesh` geometry has bottom-level acceleration structures. Each
+canonical frame collects the visible mesh transforms into a top-level structure
+for the display replay, with indexed vertices and per-instance material data.
+Current-pose immediate cloth can join this scene; other immediate meshes are
+not universally represented. Geometry omitted by the canonical recording cannot
+contribute to display rays, even if it exists elsewhere in the game world. The
+canonical image used by PS2 feedback keeps its ordinary raster appearance.
+
+Enhanced materials use ray queries for local ambient occlusion, a contact shadow
+ray toward the strongest facing light, rough reflections and a bounded diffuse
+bounce. Secondary hits sample the hit surface's authored UV texture and palette,
+alpha test, normal and ORM maps, vertex colour and light data. These rays do not
+sample prior-frame colour. Contact influence fades with distance, and the
+diffuse bounce is attenuated; it is an approximation rather than converged global
+illumination. Secondary light occlusion is not traced, so a hit's bounced
+radiance can differ from its raster colour. The display pass varies its ray
+budget with resolution, roughness and expected contribution. The first frame
+uses raster lighting until a ray scene exists.
+
+The application may supply local lights and atmosphere parameters for the
+display pass. Atmosphere reconstructs depth once per pixel and applies distance
+and height extinction and scattering before HUD composition. The game decides
+where these effects apply and which original effects they replace.
+
+`SettingsSetEnvPrefix` selects the application's environment prefix. For
+Chronicle, `DC_RAY_PROFILE=1` enables GPU timestamps and shader ray counters;
+`DC_RAY_PROFILE=timing` keeps CPU counts and GPU timestamps without the shader
+atomics. Every 60 canonical or display frames, the log reports ray-enabled
+draws, TLAS instances, BLAS updates, CPU scene preparation, GPU TLAS time and
+the span between the first and last ray mesh draw. The full mode also reports
+AO, contact shadow, reflection, diffuse bounce and local-light shadow rays.
+The draw span can include intervening commands, so compare timing modes with
+an unprofiled run of the same scene. Atmosphere reports its own fog GPU time.
 
 ## Not done here
 
@@ -500,7 +542,7 @@ suite names beginning with `GfxGpu`, including parameterized suites. Consumers c
 exclude them with the single GoogleTest filter `-*GfxGpu*.*`, or CTest's
 `-E "(^|/)GfxGpu"`. Register that same family with the `gpu` label and a device-suitable
 timeout (30 seconds) when using label-based CI exclusion. Pure CPU display-list
-math remains in `GfxDisplayList`; `GfxMeshDc2.MeshConstantsKeepChroniclesSize` is
+math remains in `GfxDisplayList`; `GfxMeshDc2.MeshConstantsPreserveCanonicalPrefixAndEnhancedTail` is
 also CPU-only. Existing renderer/texture GPU families retain their existing exclusions.
 A consumer that previously excluded only `^(GfxMisc|TexDecode)\.` must add
 `|(^|/)GfxGpu` to its CTest exclusion before adopting this dependency, or label

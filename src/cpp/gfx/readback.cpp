@@ -201,7 +201,13 @@ bool ReadbackFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height
         Error("ReadbackFrame inside a frame");
         return false;
     }
-    Image &image = g.presented_display ? g.display_color : PreviousMainColor();
+    Image &image = g.presented_display
+                       ? (g.presented_ui ? g.display_ui : g.display_color)
+                       : PreviousMainColor();
+    if (image.format != kColorFormat) {
+        Error("ReadbackFrame requires an RGBA8 presentation image");
+        return false;
+    }
     width = image.width;
     height = image.height;
     return ReadImage(image, 4, rgba);

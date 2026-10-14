@@ -18,6 +18,8 @@ struct WindowConfig {
     // False for a renderer without a surface (gfx::RendererConfig::offscreen): SDL then loads no
     // Vulkan library and asks for no surface extension.
     bool vulkan = true;
+    // Optional Vulkan loader selected before SDL creates a Vulkan window.
+    const char *vulkan_loader_path = nullptr;
 };
 
 // A window's mode: fullscreen, or a window whose inside is width by height (in the units of
@@ -59,7 +61,7 @@ void WindowSetIdentity(const WindowIdentity &identity);
 // Starts SDL's video subsystem and opens the window. On Windows a headless Vulkan window is hidden.
 // Elsewhere headless uses SDL's offscreen driver, which gives Vulkan a VK_EXT_headless_surface, and
 // SDL's dummy audio driver, which consumes the mix at the device rate without a device.
-void WindowInit(const WindowConfig &config);
+bool WindowInit(const WindowConfig &config);
 // Gives the window the size and fullscreen state WindowInit would have opened it with, on the
 // display it is on; headless, nothing. The renderer follows through WindowPollEvents. A window
 // already in that mode is left alone. SDL may refuse a step or not finish it before its wait ends;

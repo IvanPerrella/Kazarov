@@ -60,6 +60,33 @@ enum class PresentMode : uint8_t {
     Immediate,
 };
 
+enum class DlssQuality : uint8_t {
+    Off, DLAA, Quality, Balanced, Performance, UltraPerformance,
+};
+
+struct LocalLight {
+    float position_radius[4] = {}; // world position and influence radius
+    float color_intensity[4] = {}; // linear radiance and intensity
+};
+
+struct AtmosphereSettings {
+    bool enabled = false;
+    float background_color[3] = {};
+    float lower_color[3] = {};
+    float clear_color[3] = {};
+    float background_density = 0.0f;
+    float clear_distance = 0.0f;
+    float lower_density = 0.0f;
+    float lower_height_falloff = 4.0f;
+    float far_density = 0.0f;
+    float far_start = 0.0f;
+    float far_end = 1.0f;
+    float uncovered_distance = 840.0f;
+    float deck_cell_size = 160.0f;
+    float local_scattering_strength = 0.0f;
+    float local_scattering_limit[3] = {};
+};
+
 struct RendererConfig {
     const char *app_name = "";
     // The game's 2D space. 2D draws, scissors and main-target rectangles are given in it and mapped
@@ -96,6 +123,13 @@ struct RendererConfig {
     // Lowers the texture and mesh tables for tests; 0 is the build maximum, larger values are clamped to it.
     uint32_t texture_slots = 0;
     uint32_t mesh_slots = 0;
+    bool ray_tracing = false;
+    bool enhanced_hdr = false;
+    DlssQuality dlss_quality = DlssQuality::Quality;
+    bool frame_generation = false;
+    // Optional Streamline identity supplied by the game using this host runtime.
+    const char *streamline_project_id = nullptr;
+    const char *streamline_engine_version = nullptr;
 };
 
 // What RendererInit settled on, from the config and the device.
@@ -111,6 +145,8 @@ struct RendererFeatures {
 // Exits the process with a message, naming what each device lacks, if no Vulkan 1.3 or later device
 // has what the renderer needs and can drive the window (any device with a graphics queue, offscreen).
 void             RendererInit(SDL_Window *window, const RendererConfig &config);
+const char      *PrepareStreamlineLoader(const RendererConfig &config);
+void             AbortStreamlineLoader();
 RendererFeatures ActiveRendererFeatures();
 // Whether the Vulkan loader offers VK_EXT_headless_surface, which SDL's offscreen driver needs for a
 // Vulkan window; without it a headless run renders offscreen. Callable before RendererInit.
@@ -120,6 +156,16 @@ void RendererShutdown();
 void RendererResize();
 // The swapchain is recreated with the mode at the next BeginFrame or tick render.
 void SetPresentMode(PresentMode mode);
+void SetDlssQuality(DlssQuality quality);
+void SetFrameGeneration(bool enabled);
+void SetEnhancedHdr(bool enabled);
+void SetRayTracing(bool enabled);
+bool RayTracingAvailable();
+bool RayTracingEnabled();
+void SetBloom(bool enabled);
+void SetAtmosphere(const AtmosphereSettings &settings);
+void SetAtmosphereDeckHeights(std::span<const float, 400> cell_heights);
+void SetLocalLights(std::span<const LocalLight> lights);
 
 // Anisotropic filtering of linearly filtered meshes: 0 or 1 is off, otherwise 2, 4, 8 or 16 samples
 // (a value in between takes the level below it). Takes effect from the next draw.
@@ -429,6 +475,11 @@ enum MeshFlags : uint32_t {
     kMeshWorldUv = 1u << 7,
     // Implied by DrawMeshProg0 and DrawMeshImmediateProg0; a plain draw that sets it draws plain.
     kMeshProg0 = 1u << 8,
+    kMeshMaterialLighting = 1u << 9,
+    kMeshAtmosphere = 1u << 10,
+    kMeshWetSurface = 1u << 11,
+    kMeshEnvironment = 1u << 12,
+    kMeshMatte = 1u << 13,
 };
 
 // Vu_prog0's flags word, as mgCVisualMDT::CreateRenderInfoPacket sets it.
@@ -514,9 +565,26 @@ struct MeshConstants {
     float    world_uv[2][4]; // world x/z rows for terrain sampled across map cells
     uint32_t flags = 0;
     uint32_t light_count = 0;
-    uint32_t pad[2] = {};
+    float material_roughness = 0.48f;
+    float normal_detail_strength = 1.0f;
+    float model_to_world[16] = {};
+    float camera_position[4] = {};
+    float camera_forward[4] = {};
+    float previous_mvp[16] = {};
+    uint32_t motion_valid = 0;
+    uint32_t motion_align = 0;
+    float jitter_ndc[2] = {};
+    uint32_t motion_pad = 0;
+    uint32_t material_align[3] = {};
+    uint32_t material_normal_slot = 0;
+    uint32_t material_orm_slot = 0;
+    uint32_t material_profile = 0;
+    uint32_t material_pad = 0;
 };
-static_assert(sizeof(MeshConstants) == 400);
+static_assert(offsetof(MeshConstants, material_roughness) == 392);
+static_assert(offsetof(MeshConstants, model_to_world) == 400);
+static_assert(offsetof(MeshConstants, material_normal_slot) == 592);
+static_assert(sizeof(MeshConstants) == 608);
 static_assert(offsetof(Prog0Constants, flags) == 464 && offsetof(Prog0Constants, bones) == 480);
 static_assert(sizeof(Prog0Constants) == 2016);
 
@@ -621,6 +689,8 @@ bool CopyTexture(TextureHandle src, Rect src_rect, TextureHandle dst, int32_t ds
 bool BlitTexture(TextureHandle src, Rect src_rect, TextureHandle dst, Rect dst_rect, Filter filter);
 // The main target's logical 640x480, as drawn so far this frame, stretched over all of dst.
 bool SnapshotFrame(TextureHandle dst);
+void CaptureScene();
+void CaptureMenuBackground(TextureHandle texture);
 
 // ---- Readback --------------------------------------------------------------------------------
 
@@ -733,6 +803,7 @@ struct RenderOptions {
 // display render was asked for when the newest main image is not a canonical render (the loading
 // screen presented since) or the window cannot present.
 bool RenderList(const DisplayList &list, float alpha, const RenderOptions &options);
+void ResetMotionHistory();
 // Presents the last canonical render as it is (interpolation off, headless runs).
 bool PresentCanonical();
 
