@@ -394,24 +394,31 @@ float TraceSceneOcclusion(vec3 origin, vec3 direction, float distance_limit, uin
 }
 
 float RayAmbientVisibility(vec3 position, vec3 normal) {
-    vec3 n = normalize(normal);
+    vec3 n = dot(normal, normal) > 0.000001 ? normalize(normal) : vec3(0.0, 1.0, 0.0);
     vec3 tangent = normalize(cross(abs(n.z) < 0.9 ? vec3(0.0, 0.0, 1.0) :
                                       vec3(0.0, 1.0, 0.0), n));
     vec3 bitangent = cross(n, tangent);
-    // Slowly rotating stratified directions are spatially coherent; a per-pixel hash made
-    // the earlier one-frame ray estimate visibly sparkle on dark timber.
-    float phase = fract(dot(position.xz, vec2(0.0011, 0.0017)));
+    // World-anchored directions remain stable while the camera moves. Wider rays reach
+    // pillar bases, wall joints and recesses that near-normal samples tend to miss.
+    float phase = fract(dot(position, vec3(0.0011, 0.0017, 0.0013)));
     float visible = 0.0;
     int sample_count = u_local_lights.count.z != 0u ? 1 : 2;
     for (int sample_index = 0; sample_index < sample_count; sample_index++) {
         float angle = 2.0 * kPi * fract(phase + float(sample_index) * 0.61803398875);
-        float radius = sqrt((float(sample_index) + 0.5) / float(sample_count)) * 0.8;
+        float radius = sqrt((float(sample_index) + 0.5) / float(sample_count)) * 0.96;
         vec3 direction = normalize(tangent * (radius * cos(angle)) +
                                    bitangent * (radius * sin(angle)) +
                                    n * sqrt(1.0 - radius * radius));
-        visible += 1.0 - TraceSceneOcclusion(position + n * 0.5, direction, 12.0, 0u);
+        visible += 1.0 - TraceSceneOcclusion(position + n * 0.5, direction, 30.0, 0u);
     }
     return visible / float(sample_count);
+}
+
+float RayAmbientFactor(vec3 position, vec3 normal, bool character_matte,
+                       out float visibility) {
+    visibility = RayAmbientVisibility(position, normal);
+    float strength = character_matte ? 0.38 : 0.70;
+    return 1.0 - strength * (1.0 - pow(visibility, 1.35));
 }
 
 // Shade actual ray hit geometry, including vertices that were outside the previous image.
@@ -802,7 +809,11 @@ vec3 MaterialLighting(float roughness, vec3 n) {
     vec3 f0 = clamp(max(mc.specular.rgb, vec3(0.04)), vec3(0.0), vec3(1.0));
     vec3 color = mc.ambient.rgb * mc.ambient_material.rgb;
 #ifdef RAY_QUERY_AO
-    if (RayEffect(1u)) color *= mix(0.85, 1.0, RayAmbientVisibility(v_world_position, n));
+    if (RayEffect(1u)) {
+        float visibility;
+        color *= RayAmbientFactor(v_world_position, v_world_normal,
+                                  (v_mesh_flags & kMeshMatte) != 0u, visibility);
+    }
     // One shadow ray follows the strongest light that faces this fragment.
     uint shadow_light = 0u;
     float strongest = 0.0;
@@ -869,11 +880,6 @@ vec3 MaterialLightingLinear(MaterialSurface surface, vec3 n,
     vec3 color = SrgbToLinear(clamp(mc.ambient.rgb, 0.0, 1.0)) *
                  SrgbToLinear(clamp(mc.ambient_material.rgb, 0.0, 1.0)) *
                  texture_albedo * ambient_irradiance * (1.0 - metalness) * ao;
-#ifdef RAY_QUERY_AO
-    if (!RayEffect(4u))
-#endif
-        color += WetFloorGrazingFallback(surface, n, v, mc.material_maps.w,
-                                         mc.material_maps.z, v_mesh_flags);
     // Conductors have no painted diffuse ambient; a tiny coloured environment response
     // keeps a dark blade legible away from a direct light without inventing white fill.
     color += f0 * metalness * 0.012 * ao;
@@ -882,9 +888,16 @@ vec3 MaterialLightingLinear(MaterialSurface surface, vec3 n,
     if (character_matte) color += texture_albedo * (1.0 - metalness) * 0.07;
 #ifdef RAY_QUERY_AO
     if (RayEffect(1u)) {
-        ambient_visibility = RayAmbientVisibility(v_world_position, n);
-        color *= mix(character_matte ? 0.80 : 0.64, 1.0, ambient_visibility);
+        color *= RayAmbientFactor(v_world_position, v_world_normal,
+                                  character_matte, ambient_visibility);
     }
+#endif
+#ifdef RAY_QUERY_AO
+    if (!RayEffect(4u))
+#endif
+        color += WetFloorGrazingFallback(surface, n, v, mc.material_maps.w,
+                                         mc.material_maps.z, v_mesh_flags);
+#ifdef RAY_QUERY_AO
     uint shadow_light = 0u;
     float strongest = 0.0;
     for (uint i = 0u; i < min(mc.light_count, 4u); i++) {
