@@ -559,6 +559,7 @@ void WaitFrame(Frame &frame) {
     if (frame.pending) {
         Check(vkWaitForFences(g.device, 1, &frame.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
         frame.pending = false;
+        HarvestDepthQueries(frame);
     }
 }
 
@@ -909,11 +910,7 @@ bool OpenFrame() {
     return true;
 }
 
-void FinishFrame(Frame &frame) {
-    if (g.depth_queries_recorded) {
-        WaitFrame(frame);
-        HarvestDepthQueries();
-    }
+void FinishFrame() {
     g.main_current ^= 1;
     AdvanceSlot();
 }
@@ -1057,7 +1054,7 @@ void CloseListFrame(bool canonical, bool present) {
     if (canonical) {
         RecordDepthQueries(cmd);
         SubmitWithoutPresent(cmd, CurrentMainColor());
-        FinishFrame(frame);
+        FinishFrame();
         g.canonical_newest = true;
         g.presented_display = false;
         return;
@@ -1111,7 +1108,7 @@ void EndFrame() {
     } else {
         PresentImage(frame, cmd, CurrentMainColor());
     }
-    FinishFrame(frame);
+    FinishFrame();
 }
 
 bool PresentCanonical() {

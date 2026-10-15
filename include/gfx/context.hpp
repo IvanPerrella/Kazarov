@@ -13,7 +13,7 @@
 
 namespace gfx::detail {
 
-inline constexpr uint32_t kFramesInFlight = 2;
+inline constexpr uint32_t kFramesInFlight = 4;
 // Descriptor slots in the bindless array; a handle's low 16 bits are its slot.
 inline constexpr uint32_t kMaxTextures = 8192;
 inline constexpr uint32_t kBaseSamplerCount = 8;
@@ -131,14 +131,10 @@ struct TransientSpan {
 };
 
 struct DepthQuery {
-    LogicalRect  rect = {};
-    bool         queued = false;
-    bool         recorded = false;
-    bool         valid = false;
-    float        result = 0.0f;
-    VkDeviceSize offset = 0;
-    uint32_t     texels = 0;
-    uint8_t     *data = nullptr;
+    LogicalRect rect = {};
+    bool        queued = false;
+    bool        valid = false;
+    float       result = 0.0f;
 };
 
 struct Frame {
@@ -154,6 +150,7 @@ struct Frame {
     std::vector<std::function<void()>> deletions;
     // The only buffer the GPU writes for the host; kept apart from the transients, which it reads.
     Buffer depth_readback;
+    std::array<uint32_t, kDepthQueryCount> depth_texels = {};
 };
 
 struct Swapchain {
@@ -312,7 +309,6 @@ struct Context {
     BoundState    bound;
 
     std::array<DepthQuery, kDepthQueryCount> depth_queries;
-    bool                                     depth_queries_recorded = false;
 
     // Display lists. The canonical render of a list draws into main_color like an immediate frame;
     // a display render draws into display_color with display_depth.
@@ -432,6 +428,6 @@ LogicalRect ExtendRect(LogicalRect rect, uint32_t axes, const LogicalRect &frame
 
 // readback.cpp
 void RecordDepthQueries(VkCommandBuffer cmd);
-void HarvestDepthQueries();
+void HarvestDepthQueries(Frame &frame);
 
 } // namespace gfx::detail

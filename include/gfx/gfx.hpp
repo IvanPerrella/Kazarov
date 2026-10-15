@@ -625,9 +625,9 @@ bool SnapshotFrame(TextureHandle dst);
 // ---- Readback --------------------------------------------------------------------------------
 
 // Queues a read of the main depth buffer over a logical rect, taken at EndFrame. The result is
-// the farthest (smallest) depth in it, 1 near and 0 far, available after EndFrame.
+// the farthest (smallest) depth in it, 1 near and 0 far, available a frame or two later.
 void ReadDepth(uint32_t id, float x, float y, float w = 1.0f, float h = 1.0f);
-// The answer to the last ReadDepth(id); none if the rect was off the target or never asked.
+// The newest answer to ReadDepth(id); none if the rect was off the target or none has landed.
 std::optional<float> DepthResult(uint32_t id);
 // The last presented frame, RGBA8 rows top to bottom. Outside a frame only.
 bool ReadbackFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height);

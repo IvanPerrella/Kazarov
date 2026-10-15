@@ -10,7 +10,8 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
 - `RendererInit(window, config)` creates the device, the swapchain, the main targets and every
   pipeline (below). `config.pipeline_cache` defaults to `save/pipeline_cache.bin`;
   `config.progress(done, total)` is called on the calling thread while pipelines compile.
-- `BeginFrame()` / `EndFrame()` bracket a frame drawn as it is called. Two frames are in flight.
+- `BeginFrame()` / `EndFrame()` bracket a frame drawn as it is called. Four frames are in flight:
+  a tick submits a canonical render and its display renders, so the GPU may run two ticks behind.
   `BeginFrame` returns false when there is nothing to draw to (minimised); draws are then dropped and
   `EndFrame` does nothing. Every frame starts on the main target. `EndFrame` presents. The game's
   ticks are recorded instead and rendered from their display lists (below).
@@ -292,8 +293,9 @@ skinning), O-10 (the add step's alpha is 128 x vertex alpha squared), O-11 (the 
 - `ReadDepth(id, rect)` (16 ids) reads the main depth buffer at `EndFrame` (or at the end of a
   list's canonical render), at most 64x64 pixels
   around the rect's centre, and keeps the farthest (smallest) value: the game's pick-Z keeps the
-  farthest of an 8x8 block. `EndFrame` waits for that frame when a query was made, so
-  `DepthResult(id)` holds the answer as soon as `EndFrame` returns.
+  farthest of an 8x8 block. Nothing waits for it: the answer lands when the CPU next waits on
+  that frame's slot, so `DepthResult(id)` holds a frame or two late (a tick or two of the game's)
+  and keeps the last answer until then.
 - `ReadbackFrame` (the last presented frame: a display render, else the newest main image) and
   `ReadbackTexture` are synchronous and only allowed outside a frame or recording. `WritePng`
   writes an RGB PNG with stored (uncompressed) deflate.
@@ -317,7 +319,7 @@ renders one.
   screen).
 - **Canonical render** (`options.canonical`): every entry runs, in order, into the next of the two
   main colour images, which then becomes what `kPreviousFrame` samples and what a copy or snapshot
-  of `kMainTarget` reads; depth queries are answered from it before `RenderList` returns. It is the
+  of `kMainTarget` reads; depth queries read it (answered later, see Readback). It is the
   frame `BeginFrame` / `EndFrame` would have drawn, pixel for pixel, and nothing is presented.
   `PresentCanonical()` presents it as it is.
 - **Display render**: only the drawing entries run, into a third colour image with its own depth
