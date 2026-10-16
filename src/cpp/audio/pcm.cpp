@@ -71,6 +71,7 @@ std::shared_ptr<PcmTrack> LoadPcmTrack(const std::filesystem::path &path, std::s
                                                    static_cast<int>(data.size()), &ogg_channels, &ogg_rate, &ogg);
         if (count > 0 && ogg != nullptr) {
             rate = static_cast<unsigned>(ogg_rate);
+            channels = static_cast<unsigned>(ogg_channels);
             ToStereo(ogg, static_cast<std::uint64_t>(count), ogg_channels, track->samples);
             decoded = true;
         }
@@ -84,6 +85,7 @@ std::shared_ptr<PcmTrack> LoadPcmTrack(const std::filesystem::path &path, std::s
         return nullptr;
     }
     track->rate = static_cast<int>(rate);
+    track->source_channels = static_cast<int>(channels);
     return track;
 }
 

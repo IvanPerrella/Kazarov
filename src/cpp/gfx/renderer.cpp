@@ -548,7 +548,7 @@ void CreateFrames() {
 }
 
 void RunDeletions(Frame &frame) {
-    std::vector<std::function<void()>> deletions;
+    std::vector<std::function<void()> > deletions;
     deletions.swap(frame.deletions);
     for (std::function<void()> &deletion : deletions) {
         deletion();
@@ -703,6 +703,10 @@ void RunOneShot(const std::function<void(VkCommandBuffer)> &record) {
     submit.pCommandBufferInfos = &command;
     Check(vkQueueSubmit2(g.queue, 1, &submit, fence), "vkQueueSubmit2");
     Check(vkWaitForFences(g.device, 1, &fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+    // Synchronous readback completes earlier submissions; publish their depth answers oldest first.
+    for (uint32_t frame_offset = 1; frame_offset <= kFramesInFlight; ++frame_offset) {
+        WaitFrame(g.frames[(g.frame_slot + frame_offset) % kFramesInFlight]);
+    }
     vkDestroyFence(g.device, fence, nullptr);
     vkFreeCommandBuffers(g.device, g_oneshot_pool, 1, &cmd);
 }

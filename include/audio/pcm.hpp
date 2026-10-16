@@ -13,6 +13,7 @@ namespace audio {
 struct PcmTrack {
     std::vector<std::int16_t> samples;
     int                       rate = 48000;
+    int                       source_channels = 2; /**< Channel count before conversion to stereo. */
     std::int64_t              start = 0;
     std::int64_t              loop_start = 0;
     std::int64_t              loop_end = 0;

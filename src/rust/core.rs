@@ -5,6 +5,16 @@ use std::path::{Path, PathBuf};
 
 #[path = "archive.rs"]
 pub mod archive;
+#[path = "audio.rs"]
+pub mod audio;
+#[path = "configs.rs"]
+pub mod configs;
+#[path = "models.rs"]
+pub mod models;
+#[path = "native_scripts.rs"]
+pub mod native_scripts;
+#[path = "packs.rs"]
+pub mod packs;
 #[path = "publish.rs"]
 pub mod publish;
 #[path = "textures.rs"]
@@ -193,6 +203,31 @@ pub fn extract(source: &Path, data_out: &Path, jobs: usize) -> CoreResult<Extrac
     extract_with_progress(source, data_out, jobs, &|_, _| {})
 }
 
+/// Recognizes a complete stage for the unchanged source and validates every asset.
+fn completed_stage_pngs(
+    raw: &Path,
+    published: &Path,
+    state: &serde_json::Value,
+    source_sha256: &str,
+) -> Option<u64> {
+    let marker = match std::fs::read(published.join("data.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    {
+        Some(marker) => marker,
+        None => return None,
+    };
+    if marker["schema_version"] != 1
+        || marker["data_version"] != data_version()
+        || marker["source_state"] != *state
+        || marker["source_sha256"].as_str() != Some(source_sha256)
+    {
+        return None;
+    }
+    native_scripts::verify_tree(raw, published).ok()?;
+    publish::verify(published).ok()
+}
+
 /// Extracts and publishes data, reporting completed work in weighted phases.
 /// Callbacks can run concurrently; 100% is emitted only after successful publication.
 pub fn extract_with_progress(
@@ -225,6 +260,31 @@ pub fn extract_with_progress(
     let stage = publish::acquire_stage(root, &metadata)?;
     let raw = stage.path().join("raw");
     let published = stage.path().join("published");
+    progress(0.04, "Checking saved conversion…");
+    if let Some(pngs) = completed_stage_pngs(&raw, &published, &initial_state, &source_sha256) {
+        let (files, bytes) = archive::extraction_totals(&source)?;
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(published.join("data.json"))?)?;
+        let report = ExtractReport {
+            files,
+            bytes,
+            texture_sources: marker["texture_sources"].as_u64().unwrap_or(0),
+            pngs,
+        };
+        if source_state(&source)? != initial_state {
+            return Err(CoreError("source changed during extraction".into()));
+        }
+        progress(0.95, "Publishing verified data…");
+        publish::publish(&published, root)?;
+        let stage_path = stage.path().to_path_buf();
+        drop(stage);
+        std::fs::remove_dir_all(stage_path)?;
+        progress(1.0, "Ready — starting game…");
+        return Ok(report);
+    }
+    if published.is_dir() {
+        std::fs::remove_dir_all(&published)?;
+    }
     progress(0.05, "Extracting files…");
     let (files, bytes) =
         archive::extract_raw_with_progress(&source, &raw, jobs, &|done, total| {
@@ -241,17 +301,33 @@ pub fn extract_with_progress(
                 "Converting textures…",
             );
         })?;
+    progress(0.91, "Converting audio…");
+    audio::convert_tree(&raw, &published, jobs)?;
+    progress(0.93, "Converting models and animation…");
+    let converted_models = models::convert_tree(&raw, &published, jobs, &converted.documents)?;
+    textures::remove_embedded(
+        &published,
+        &converted.documents,
+        &converted_models.consumed_texture_sources,
+    )?;
+    progress(0.94, "Converting configuration…");
+    configs::convert_tree(&raw, &published, jobs)?;
+    native_scripts::convert_tree(&raw, &published)?;
+    packs::convert_tree(&raw, &published)?;
+    native_scripts::verify_tree(&raw, &published)?;
+    publish::finalize_assets(&published)?;
     progress(0.95, "Verifying and publishing data…");
     if source_state(&source)? != initial_state {
         return Err(CoreError("source changed during extraction".into()));
     }
-    std::fs::write(
-        published.join("data.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "schema_version":1,"data_version":data_version(),"source_state":initial_state,
-            "source_sha256":source_sha256,
-        }))?,
-    )?;
+    let mut marker = serde_json::to_vec_pretty(&serde_json::json!({
+        "schema_version":1,"data_version":data_version(),"source_state":initial_state,
+        "source_sha256":source_sha256,
+        "output_sha256":publish::output_digest(&published)?,
+        "texture_sources":converted.sources,
+    }))?;
+    marker.push(b'\n');
+    std::fs::write(published.join("data.json"), marker)?;
     publish::publish(&published, root)?;
     let stage_path = stage.path().to_path_buf();
     drop(stage);
@@ -301,8 +377,8 @@ pub fn current(source: &Path, data_root: &Path) -> CoreResult<bool> {
     };
     if marker["schema_version"] != 1
         || marker["data_version"] != data_version()
-        || !root.join("data/manifest.json").is_file()
-        || !root.join("port_data/manifest.json").is_file()
+        || !root.join("data").is_dir()
+        || !root.join("port_data").is_dir()
     {
         return Ok(false);
     }
@@ -316,6 +392,130 @@ pub fn current(source: &Path, data_root: &Path) -> CoreResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retry_rebuilds_incomplete_conversion_without_publishing_stale_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("disc");
+        std::fs::create_dir_all(source.join("MOVIE")).unwrap();
+        let mut hd4 = vec![0u8; 33];
+        hd4[0] = 24;
+        hd4[4] = 4;
+        hd4[12] = 32;
+        hd4[24..33].copy_from_slice(b"FOO.BIN\0\0");
+        std::fs::write(source.join("DATA.HD4"), hd4).unwrap();
+        std::fs::write(source.join("DATA.DAT"), b"DATA").unwrap();
+        let mut hd3 = vec![0u8; 42];
+        hd3[0] = 32;
+        hd3[4] = 3;
+        hd3[12] = 1;
+        hd3[32..42].copy_from_slice(b"BGM_A.STR\0");
+        std::fs::write(source.join("SOUND.HD3"), hd3).unwrap();
+        std::fs::write(source.join("SOUND.DAT"), b"SND").unwrap();
+        let source = std::fs::canonicalize(source).unwrap();
+        let root = temp.path().join("run");
+        std::fs::create_dir_all(&root).unwrap();
+        let metadata = serde_json::json!({
+            "schema_version":1,"data_version":data_version(),"source":source.to_string_lossy(),
+            "source_sha256":source_fingerprint(&source).unwrap(),"jobs":2,
+        });
+        let stage = publish::acquire_stage(&root, &metadata).unwrap();
+        std::fs::create_dir_all(stage.path().join("published/port_data")).unwrap();
+        std::fs::write(stage.path().join("published/port_data/stale.img"), b"old").unwrap();
+        std::fs::create_dir_all(stage.path().join("raw")).unwrap();
+        std::fs::write(stage.path().join("raw/foo.bin"), b"DATA").unwrap();
+        drop(stage);
+        extract(&source, &root.join("data"), 2).unwrap();
+        assert_eq!(std::fs::read(root.join("data/foo.bin")).unwrap(), b"DATA");
+        assert!(!root.join("port_data/stale.img").exists());
+        check(&root.join("data")).unwrap();
+    }
+    #[test]
+    fn completed_stage_rejects_missing_vm_even_with_matching_output_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw = temp.path().join("raw");
+        let published = temp.path().join("published");
+        std::fs::create_dir_all(&raw).unwrap();
+        std::fs::write(
+            raw.join("test.stb"),
+            native_scripts::ambiguous_script_fixture(),
+        )
+        .unwrap();
+        textures::convert_tree(&raw, &published, 1).unwrap();
+        publish::finalize_assets(&published).unwrap();
+        let state = serde_json::json!({"fingerprint":"source-state"});
+        let mut marker = serde_json::json!({
+            "schema_version":1,"data_version":data_version(),"source_state":state,
+            "source_sha256":"source-content",
+            "output_sha256":publish::output_digest(&published).unwrap(),
+        });
+        std::fs::write(
+            published.join("data.json"),
+            serde_json::to_vec_pretty(&marker).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            completed_stage_pngs(&raw, &published, &state, "source-content"),
+            Some(0)
+        );
+        std::fs::remove_file(published.join("data/test.stb")).unwrap();
+        std::fs::create_dir_all(published.join("port_data/test.stb")).unwrap();
+        std::fs::write(
+            published.join("port_data/test.stb/pack.json"),
+            b"{\"schema_version\":1,\"kind\":\"asset_directory\"}",
+        )
+        .unwrap();
+        marker["output_sha256"] = serde_json::json!(publish::output_digest(&published).unwrap());
+        std::fs::write(
+            published.join("data.json"),
+            serde_json::to_vec_pretty(&marker).unwrap(),
+        )
+        .unwrap();
+        assert!(publish::verify(&published).is_ok());
+        assert_eq!(
+            completed_stage_pngs(&raw, &published, &state, "source-content"),
+            None
+        );
+    }
+
+    #[test]
+    fn completed_stage_requires_source_identity_and_intact_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw = temp.path().join("raw");
+        let published = temp.path().join("published");
+        std::fs::create_dir_all(&raw).unwrap();
+        std::fs::write(raw.join("example.bin"), b"payload").unwrap();
+        textures::convert_tree(&raw, &published, 1).unwrap();
+        publish::finalize_assets(&published).unwrap();
+        let state = serde_json::json!({"fingerprint":"source-state"});
+        let marker = serde_json::json!({
+            "schema_version":1,"data_version":data_version(),"source_state":state,
+            "source_sha256":"source-content",
+            "output_sha256":publish::output_digest(&published).unwrap(),
+        });
+        std::fs::write(
+            published.join("data.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            completed_stage_pngs(&raw, &published, &state, "source-content"),
+            Some(0)
+        );
+        assert_eq!(
+            completed_stage_pngs(&raw, &published, &state, "different-source"),
+            None
+        );
+        assert_eq!(
+            completed_stage_pngs(&raw, &published, &serde_json::json!({}), "source-content"),
+            None
+        );
+        std::fs::write(published.join("data/example.bin"), b"corruption").unwrap();
+        assert_eq!(
+            completed_stage_pngs(&raw, &published, &state, "source-content"),
+            None
+        );
+    }
+
     #[test]
     fn current_detects_nested_directory_change_and_stage_reuses_only_matching_source() {
         let temp = tempfile::tempdir().unwrap();
