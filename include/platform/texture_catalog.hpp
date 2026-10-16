@@ -5,10 +5,13 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "platform/vfs.hpp"
 
 namespace texture_catalog {
 
@@ -26,11 +29,21 @@ enum class AnimationMode {
  */
 struct Entry {
     /**
+     * Names one PNG mip image and the converted original supplying it.
+     */
+    struct Level {
+        std::string path; /**< Relative PNG path, or a glTF image reference in an embedded set. */
+        vfs::Ref    file; /**< Converted original PNG, null when absent or embedded. */
+
+        friend bool operator==(const Level &, const Level &) = default;
+    };
+
+    /**
      * Identifies one selectable RGBA mip chain.
      */
     struct Variant {
-        std::string                        selector; /**< Logical animation identity selecting this image. */
-        std::vector<std::filesystem::path> levels;   /**< PNG images containing the RGBA mip chain. */
+        std::string        selector; /**< Logical animation identity selecting this image. */
+        std::vector<Level> levels;   /**< PNG images containing the RGBA mip chain. */
     };
 
     /**
@@ -85,13 +98,17 @@ struct Decoded {
 using ImageExtentResolver = std::function<bool(std::string_view, int &, int &, std::string &)>;
 
 /**
- * Sets the root used to find direct native texture documents.
+ * Mounts a converted-data directory whose direct native texture documents are found by relative path.
  */
 bool Load(const std::filesystem::path &root, std::string &error);
 /**
+ * Uses a mount holding the converted original texture documents and PNGs.
+ */
+void Load(std::shared_ptr<const vfs::Mount> base);
+/**
  * Supplies replacement candidates in priority order before the retail document.
  */
-void SetCandidateResolver(std::function<std::vector<std::filesystem::path>(const std::filesystem::path &)> resolver);
+void SetCandidateResolver(std::function<std::vector<vfs::Ref>(const std::filesystem::path &)> resolver);
 /**
  * Removes all loaded texture sources.
  */

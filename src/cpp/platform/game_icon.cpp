@@ -345,50 +345,6 @@ std::vector<std::uint8_t> Draw(const Model &model, int size, float yaw_degrees, 
     return result;
 }
 
-bool ReadFile(const fs::path &path, std::vector<std::uint8_t> &out) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return false;
-    }
-    out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    return true;
-}
-
-bool SameName(const char *a, const char *b) {
-    for (; *a != 0 && *b != 0; ++a, ++b) {
-        if (std::tolower(static_cast<unsigned char>(*a)) != std::tolower(static_cast<unsigned char>(*b))) {
-            return false;
-        }
-    }
-    return *a == *b;
-}
-
-// relative under root, each component matched without regard to case: extraction may fold the disc's names.
-bool FindFolded(const fs::path &root, const fs::path &relative, fs::path &out) {
-    fs::path at = root;
-    for (const fs::path &part : relative) {
-        std::error_code error;
-        if (fs::exists(at / part, error)) {
-            at /= part;
-            continue;
-        }
-        const std::string wanted = part.generic_string();
-        bool              found = false;
-        for (fs::directory_iterator it(at, error), end; !error && it != end; it.increment(error)) {
-            if (SameName(it->path().filename().generic_string().c_str(), wanted.c_str())) {
-                at = it->path();
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            return false;
-        }
-    }
-    out = at;
-    return true;
-}
-
 #ifdef _WIN32
 // A Windows icon file of 32-bit DIB images; alpha carries the shape, so the AND masks stay clear.
 std::vector<std::uint8_t> IcoFile(const std::vector<std::vector<std::uint8_t> > &images, const std::vector<int> &sizes) {
@@ -502,7 +458,10 @@ void InstallWindowsIcon(const fs::path &data_root, const GameIconSource &source,
 }
 #endif
 
-bool LoadModel(const fs::path &data_root, const GameIconSource &source, Model &model) {
+bool LoadModel(const GameIconSource &source, Model &model) {
+    if (!source.candidates) {
+        return false;
+    }
     for (const fs::path &directory : source.packs) {
         const auto relative = directory / source.member;
         if (relative.is_absolute()) {
@@ -517,17 +476,10 @@ bool LoadModel(const fs::path &data_root, const GameIconSource &source, Model &m
         if (!safe) {
             continue;
         }
-        std::vector<fs::path> candidates;
-        if (source.candidates) {
-            candidates = source.candidates(relative);
-        }
-        fs::path base;
-        if (FindFolded(data_root, relative, base)) {
-            candidates.push_back(base);
-        }
-        for (const auto &path : candidates) {
+        for (const auto &file : source.candidates(relative)) {
             std::vector<std::uint8_t> bytes;
-            if (ReadFile(path, bytes) && Decode(bytes.data(), bytes.size(), model, path.parent_path())) {
+            const auto                host = vfs::HostPath(file);
+            if (vfs::Read(file, bytes) && Decode(bytes.data(), bytes.size(), model, host ? host->parent_path() : fs::path{})) {
                 return true;
             }
         }
@@ -545,9 +497,9 @@ std::vector<std::uint8_t> GameIconRender(const std::uint8_t *ico, std::size_t ic
     return Draw(model, size, yaw, roll);
 }
 
-std::vector<std::uint8_t> GameIconFromData(const fs::path &data_root, const GameIconSource &source, int size) {
+std::vector<std::uint8_t> GameIconFromData(const GameIconSource &source, int size) {
     Model model;
-    if (size <= 0 || !LoadModel(data_root, source, model)) {
+    if (size <= 0 || !LoadModel(source, model)) {
         return {};
     }
     return Draw(model, size, source.yaw, source.roll);
@@ -557,7 +509,7 @@ void GameIconInstall(const fs::path &data_root, const GameIconSource &source) {
     constexpr int                    window_icon_size = 256;
     static std::vector<std::uint8_t> window_icon;
     Model                            model;
-    if (!LoadModel(data_root, source, model)) {
+    if (!LoadModel(source, model)) {
         return;
     }
     window_icon = Draw(model, window_icon_size, source.yaw, source.roll);

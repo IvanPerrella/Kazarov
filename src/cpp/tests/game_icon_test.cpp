@@ -83,20 +83,31 @@ TEST(GameIcon, ReadsNativeFoldersAndPrioritizedModelCandidates) {
     const auto root = fs::temp_directory_path() / "kz_game_icon_native_test";
     fs::remove_all(root);
     Write(root / "COMMENU/A_USA/SAVETEX.PAK/DKICON.GLTF", TriangleIcon());
+    const auto mount = vfs::OpenDirectory(root);
+    const auto base = [&](const fs::path &path) {
+        auto file = vfs::Find(mount, path.generic_string());
+        return file ? std::vector<vfs::Ref>{file} : std::vector<vfs::Ref>{};
+    };
     GameIconSource source;
     source.packs = {"commenu/a_jpn/savetex.pak", "commenu/a_usa/savetex.pak"};
     source.member = "dkicon.gltf";
-    ASSERT_EQ(GameIconFromData(root, source, 32).size(), 32u * 32u * 4u);
+    source.candidates = base;
+    ASSERT_EQ(GameIconFromData(source, 32).size(), 32u * 32u * 4u);
     Write(root / "overlay/green.gltf", TriangleIcon(0, 1));
     Write(root / "overlay/bad.gltf", {'{'});
-    source.candidates = [&](const fs::path &path) { return path.generic_string().find("a_usa") != std::string::npos ? std::vector<fs::path>{root / "overlay/bad.gltf", root / "overlay/green.gltf"} : std::vector<fs::path>{}; };
-    const auto rgba = GameIconFromData(root, source, 32);
+    source.candidates = [&](const fs::path &path) {
+        auto       files = path.generic_string().find("a_usa") != std::string::npos ? std::vector<vfs::Ref>{vfs::HostFile(root / "overlay/bad.gltf"), vfs::HostFile(root / "overlay/green.gltf")} : std::vector<vfs::Ref>{};
+        const auto original = base(path);
+        files.insert(files.end(), original.begin(), original.end());
+        return files;
+    };
+    const auto rgba = GameIconFromData(source, 32);
     ASSERT_EQ(rgba.size(), 32u * 32u * 4u);
     EXPECT_EQ(rgba[(16 * 32 + 16) * 4], 0);
     EXPECT_GT(rgba[(16 * 32 + 16) * 4 + 1], 100);
     source.member = "missing.gltf";
-    source.candidates = {};
-    EXPECT_TRUE(GameIconFromData(root, source, 32).empty());
+    source.candidates = base;
+    EXPECT_TRUE(GameIconFromData(source, 32).empty());
     fs::remove_all(root);
 }
 

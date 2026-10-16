@@ -9,11 +9,11 @@
 namespace audio {
 std::shared_ptr<Bank> Bank::CreateFromJson(std::string_view                                                           text,
                                            const std::function<std::filesystem::path(const std::filesystem::path &)> &resolve) {
-    return CreateFromJsonCandidates(text, [&](const auto &relative) { return std::vector<std::filesystem::path>{resolve(relative)}; });
+    return CreateFromJsonCandidates(text, [&](const auto &relative) { return std::vector<vfs::Ref>{vfs::HostFile(resolve(relative))}; });
 }
 
-std::shared_ptr<Bank> Bank::CreateFromJsonCandidates(std::string_view                                                                        text,
-                                                     const std::function<std::vector<std::filesystem::path>(const std::filesystem::path &)> &resolve) {
+std::shared_ptr<Bank> Bank::CreateFromJsonCandidates(std::string_view                                                           text,
+                                                     const std::function<std::vector<vfs::Ref>(const std::filesystem::path &)> &resolve) {
     try {
         const auto root = nlohmann::json::parse(text);
         if (root.at("schema_version") != 1 || root.at("kind") != "bank") {
@@ -86,7 +86,8 @@ std::shared_ptr<Bank> Bank::CreateFromJsonCandidates(std::string_view           
             std::string               error;
             std::shared_ptr<PcmTrack> track;
             for (const auto &candidate : resolve(relative)) {
-                track = LoadPcmTrack(candidate, error);
+                std::vector<std::uint8_t> bytes;
+                track = vfs::Read(candidate, bytes) ? LoadPcmTrack(bytes, ".wav", error) : nullptr;
                 if (track && loop_start >= 0 && static_cast<std::size_t>(loop_start) < loop_end && loop_end <= static_cast<std::size_t>(track->Frames())) {
                     break;
                 }

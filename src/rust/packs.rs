@@ -234,16 +234,22 @@ pub fn verify(root: &Path) -> CoreResult<()> {
         let mut files = Vec::new();
         collect(&directory, &mut files)?;
         for path in files {
-            let bytes = fs::read(&path)?;
-            if models::pack(&bytes).is_some() || empty_archive(&bytes, &path.to_string_lossy()) {
-                return Err(fail(format!("binary PACK remains: {}", path.display())));
-            }
-            if path.file_name().is_some_and(|name| name == "pack.json") {
-                let document: Value = serde_json::from_slice(&bytes)?;
-                if document != json!({"schema_version":1,"kind":"asset_directory"}) {
-                    return Err(fail("invalid asset directory marker"));
-                }
-            }
+            audit_entry(&path.to_string_lossy(), &fs::read(&path)?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Rejects a binary PACK container or an invalid asset directory marker in one published file.
+pub(crate) fn audit_entry(name: &str, bytes: &[u8]) -> CoreResult<()> {
+    if models::pack(bytes).is_some() || empty_archive(bytes, name) {
+        return Err(fail(format!("binary PACK remains: {name}")));
+    }
+    let file_name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    if file_name == "pack.json" {
+        let document: Value = serde_json::from_slice(bytes)?;
+        if document != json!({"schema_version":1,"kind":"asset_directory"}) {
+            return Err(fail("invalid asset directory marker"));
         }
     }
     Ok(())

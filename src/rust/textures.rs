@@ -1439,6 +1439,7 @@ pub fn remove_embedded(
     published: &Path,
     documents: &[ConvertedTextureDocument],
     consumed: &BTreeSet<String>,
+    referenced: &BTreeSet<String>,
 ) -> CoreResult<()> {
     let port = published.join("port_data");
     let canonical_port = fs::canonicalize(&port)?;
@@ -1491,6 +1492,10 @@ pub fn remove_embedded(
     }
     if !consumed.is_subset(&aliases) {
         return Err(fail("unknown consumed texture source"));
+    }
+    // Model images reference standalone PNGs, so consumed assets they use remain published.
+    for relative in referenced {
+        retained_assets.insert(check_file(relative)?.1);
     }
     let mut removed = Vec::new();
     for file in consumed_files {
@@ -1580,11 +1585,45 @@ mod tests {
                 document: second,
             },
         ];
-        remove_embedded(temp.path(), &documents, &BTreeSet::from(["a/a.img".into()])).unwrap();
+        remove_embedded(
+            temp.path(),
+            &documents,
+            &BTreeSet::from(["a/a.img".into()]),
+            &BTreeSet::new(),
+        )
+        .unwrap();
         assert!(!port.join("a").exists());
         assert_eq!(fs::read(port.join("shared.png")).unwrap(), b"shared");
         assert_eq!(fs::read(port.join("b/b_0.png")).unwrap(), b"second");
         assert!(port.join("b/b.json").is_file());
+    }
+
+    #[test]
+    fn embedded_cleanup_keeps_png_referenced_by_model_images() {
+        let temp = tempfile::tempdir().unwrap();
+        let port = temp.path().join("port_data");
+        fs::create_dir_all(port.join("a")).unwrap();
+        let document = json!({"schema_version":3,"groups":[0],"entries":[
+            {"name":"first","pictures":[{"levels":["a_0.png","a_1.png"]}]}
+        ]});
+        fs::write(port.join("a/a.json"), pretty_json(&document).unwrap()).unwrap();
+        fs::write(port.join("a/a_0.png"), b"base").unwrap();
+        fs::write(port.join("a/a_1.png"), b"mip").unwrap();
+        let documents = vec![ConvertedTextureDocument {
+            source_alias: "a/a.img".into(),
+            document_path: "a/a.json".into(),
+            document,
+        }];
+        remove_embedded(
+            temp.path(),
+            &documents,
+            &BTreeSet::from(["a/a.img".into()]),
+            &BTreeSet::from(["a/a_0.png".into()]),
+        )
+        .unwrap();
+        assert!(!port.join("a/a.json").exists());
+        assert!(!port.join("a/a_1.png").exists());
+        assert_eq!(fs::read(port.join("a/a_0.png")).unwrap(), b"base");
     }
 
     #[test]
@@ -1603,7 +1642,13 @@ mod tests {
             document,
         }];
         assert!(
-            remove_embedded(temp.path(), &documents, &BTreeSet::from(["a/a.img".into()])).is_err()
+            remove_embedded(
+                temp.path(),
+                &documents,
+                &BTreeSet::from(["a/a.img".into()]),
+                &BTreeSet::new()
+            )
+            .is_err()
         );
         assert!(port.join("a/a.json").is_file());
         assert_eq!(

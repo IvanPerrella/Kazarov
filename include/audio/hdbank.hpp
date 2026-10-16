@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "audio/vag.hpp"
+#include "platform/vfs.hpp"
 
 namespace audio {
 
@@ -106,8 +107,8 @@ public:
     /**
      * Loads each sample from the first valid WAV in precedence order.
      */
-    static std::shared_ptr<Bank> CreateFromJsonCandidates(std::string_view                                                                        json,
-                                                          const std::function<std::vector<std::filesystem::path>(const std::filesystem::path &)> &resolve);
+    static std::shared_ptr<Bank> CreateFromJsonCandidates(std::string_view                                                           json,
+                                                          const std::function<std::vector<vfs::Ref>(const std::filesystem::path &)> &resolve);
 
     const HdBank &Header() const { return header_; }
 

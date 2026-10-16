@@ -17,9 +17,12 @@
 
 namespace texture_catalog {
 namespace {
-std::unordered_map<std::string, Source>                                          sources;
-std::filesystem::path                                                            port_data_root;
-std::function<std::vector<std::filesystem::path>(const std::filesystem::path &)> candidate_resolver;
+/** Parsed documents keyed by relative path. */
+std::unordered_map<std::string, Source> sources;
+/** Mount holding the converted original documents and PNGs. */
+std::shared_ptr<const vfs::Mount> base;
+/** Supplies replacement documents in priority order. */
+std::function<std::vector<vfs::Ref>(const std::filesystem::path &)> candidate_resolver;
 
 bool RelativePath(const std::string &name, bool allow_parent = false) {
     const std::filesystem::path path(name);
@@ -36,30 +39,15 @@ bool RelativePath(const std::string &name, bool allow_parent = false) {
     return true;
 }
 
-bool Within(const std::filesystem::path &base, const std::filesystem::path &path);
-
-std::filesystem::path AssetPath(const std::filesystem::path &base, const std::filesystem::path &root,
-                                const nlohmann::json &value, bool allow_parent = false) {
+/**
+ * Joins a document directory and a validated relative asset name.
+ */
+std::string AssetPath(const std::string &directory, const nlohmann::json &value) {
     const auto name = value.get<std::string>();
-    if (!RelativePath(name, allow_parent)) {
+    if (!RelativePath(name)) {
         throw std::runtime_error("invalid relative asset path: " + name);
     }
-    const auto path = std::filesystem::weakly_canonical(base / name);
-    if (!Within(root, path)) {
-        throw std::runtime_error("asset path leaves catalog directory: " + name);
-    }
-    return path;
-}
-
-bool Within(const std::filesystem::path &base, const std::filesystem::path &path) {
-    auto ancestor = base.begin();
-    auto child = path.begin();
-    for (; ancestor != base.end(); ++ancestor, ++child) {
-        if (child == path.end() || *ancestor != *child) {
-            return false;
-        }
-    }
-    return child != path.end();
+    return directory.empty() ? name : directory + '/' + name;
 }
 
 /**
@@ -100,14 +88,12 @@ int NonnegativeInt(const nlohmann::json &value, int maximum = INT_MAX) {
 /**
  * Reads a base PNG's logical width and height from its image header.
  */
-std::pair<int, int> PngExtent(const std::filesystem::path &path) {
-    std::ifstream                 input(path, std::ios::binary);
+std::pair<int, int> PngExtent(const Entry::Level &level) {
     std::array<unsigned char, 24> header{};
-    input.read(reinterpret_cast<char *>(header.data()), header.size());
     constexpr std::array<unsigned char, 8> signature{137, 80, 78, 71, 13, 10, 26, 10};
-    if (!input || !std::equal(signature.begin(), signature.end(), header.begin()) ||
+    if (!vfs::ReadPrefix(level.file, header) || !std::equal(signature.begin(), signature.end(), header.begin()) ||
         !std::equal(header.begin() + 12, header.begin() + 16, "IHDR")) {
-        throw std::runtime_error("invalid base PNG: " + path.string());
+        throw std::runtime_error("invalid base PNG: " + level.path);
     }
     const auto word = [&](int offset) {
         return (uint32_t{header[offset]} << 24) | (uint32_t{header[offset + 1]} << 16) |
@@ -115,7 +101,7 @@ std::pair<int, int> PngExtent(const std::filesystem::path &path) {
     };
     const auto width = word(16), height = word(20);
     if (!width || !height || width > 16384 || height > 16384) {
-        throw std::runtime_error("invalid base PNG dimensions: " + path.string());
+        throw std::runtime_error("invalid base PNG dimensions: " + level.path);
     }
     return {static_cast<int>(width), static_cast<int>(height)};
 }
@@ -123,8 +109,7 @@ std::pair<int, int> PngExtent(const std::filesystem::path &path) {
 /**
  * Resolves the PNG chain belonging to one selectable image.
  */
-void ReadLevels(Entry::Variant &variant, const nlohmann::json &levels, const std::filesystem::path &base,
-                const std::filesystem::path &root, bool embedded) {
+void ReadLevels(Entry::Variant &variant, const nlohmann::json &levels, const std::string &directory, bool embedded) {
     if (!levels.is_array() || levels.empty() || levels.size() > 4) {
         throw std::runtime_error("invalid PNG mip chain");
     }
@@ -138,28 +123,28 @@ void ReadLevels(Entry::Variant &variant, const nlohmann::json &levels, const std
                 })) {
                 throw std::runtime_error("invalid embedded texture image reference: " + reference);
             }
-            variant.levels.emplace_back(reference);
+            variant.levels.push_back({reference, {}});
             continue;
         }
-        const auto path = AssetPath(base, root, level);
-        if (path.extension() != ".png") {
-            throw std::runtime_error("texture level is not PNG: " + path.string());
+        auto path = AssetPath(directory, level);
+        if (!path.ends_with(".png")) {
+            throw std::runtime_error("texture level is not PNG: " + path);
         }
-        variant.levels.push_back(path);
+        auto file = vfs::Find(base, path);
+        variant.levels.push_back({std::move(path), std::move(file)});
     }
 }
 
-Source ParseDetail(const nlohmann::json &detail, const std::filesystem::path &document_path, bool embedded,
+Source ParseDetail(const nlohmann::json &detail, const std::string &document_path, bool embedded,
                    const ImageExtentResolver &extent_resolver) {
     CheckKeys(detail, {"schema_version", "groups", "entries"});
     if (!detail.at("schema_version").is_number_integer() ||
         detail.at("schema_version").get<int>() != 3 || !detail.at("groups").is_array() ||
         !detail.at("entries").is_array()) {
-        throw std::runtime_error("invalid source document: " + document_path.string());
+        throw std::runtime_error("invalid source document: " + document_path);
     }
     Source source;
-    source.source = embedded ? document_path.generic_string()
-                             : document_path.lexically_relative(port_data_root).generic_string();
+    source.source = document_path;
     for (const auto &group : detail.at("groups")) {
         const int value = NonnegativeInt(group);
         if (std::find(source.groups.begin(), source.groups.end(), value) != source.groups.end()) {
@@ -167,7 +152,8 @@ Source ParseDetail(const nlohmann::json &detail, const std::filesystem::path &do
         }
         source.groups.push_back(value);
     }
-    const auto asset_base = document_path.parent_path();
+    const auto separator = document_path.rfind('/');
+    const auto asset_base = separator == std::string::npos ? std::string{} : document_path.substr(0, separator);
     for (const auto &item : detail.at("entries")) {
         if (item.contains("script")) {
             CheckKeys(item, {"name", "script"});
@@ -235,10 +221,10 @@ Source ParseDetail(const nlohmann::json &detail, const std::filesystem::path &do
                 entry.height = NonnegativeInt(canvas.at("height"), 16384);
                 entry.no_image = true;
             } else {
-                ReadLevels(normal, picture.at("levels"), asset_base, port_data_root, embedded);
+                ReadLevels(normal, picture.at("levels"), asset_base, embedded);
                 if (embedded) {
                     std::string extent_error;
-                    if (!extent_resolver(normal.levels.front().generic_string(), entry.width, entry.height,
+                    if (!extent_resolver(normal.levels.front().path, entry.width, entry.height,
                                          extent_error)) {
                         throw std::runtime_error("cannot resolve embedded texture extent: " + extent_error);
                     }
@@ -262,7 +248,7 @@ Source ParseDetail(const nlohmann::json &detail, const std::filesystem::path &do
                     if (variant.selector.empty() || !selectors.insert(variant.selector).second) {
                         throw std::runtime_error("duplicate texture selector");
                     }
-                    ReadLevels(variant, record.at("levels"), asset_base, port_data_root, embedded);
+                    ReadLevels(variant, record.at("levels"), asset_base, embedded);
                     entry.variants.push_back(std::move(variant));
                 }
             }
@@ -294,59 +280,62 @@ Source ParseDetail(const nlohmann::json &detail, const std::filesystem::path &do
     return source;
 }
 
-Source ParseDocument(const std::filesystem::path &document_path, const std::filesystem::path &candidate) {
-    std::ifstream document(candidate);
-    if (!document) {
-        throw std::runtime_error("cannot open source document: " + candidate.string());
+Source ParseDocument(const std::string &document_path, const vfs::Ref &candidate) {
+    std::vector<std::uint8_t> bytes;
+    if (!vfs::Read(candidate, bytes)) {
+        throw std::runtime_error("cannot open source document: " + candidate.Display());
     }
-    return ParseDetail(nlohmann::json::parse(document), document_path, false, {});
+    return ParseDetail(nlohmann::json::parse(bytes), document_path, false, {});
 }
 } // namespace
 
 bool Load(const std::filesystem::path &root, std::string &error) {
     Clear();
     std::error_code path_error;
-    const auto      canonical = std::filesystem::canonical(root, path_error);
-    if (path_error || !std::filesystem::is_directory(canonical)) {
+    if (!std::filesystem::is_directory(root, path_error)) {
         error = "cannot open texture data directory: " + root.string();
         return false;
     }
-    port_data_root = canonical;
+    base = vfs::OpenDirectory(root);
     error.clear();
     return true;
 }
 
-void SetCandidateResolver(std::function<std::vector<std::filesystem::path>(const std::filesystem::path &)> resolver) {
+void Load(std::shared_ptr<const vfs::Mount> mount) {
+    Clear();
+    base = std::move(mount);
+}
+
+void SetCandidateResolver(std::function<std::vector<vfs::Ref>(const std::filesystem::path &)> resolver) {
     candidate_resolver = std::move(resolver);
     sources.clear();
 }
 
 void Clear() {
     sources.clear();
-    port_data_root.clear();
+    base.reset();
     candidate_resolver = {};
 }
 
 const Source *Find(std::string_view path) {
     const std::string key(path);
-    if (port_data_root.empty() || !RelativePath(key) || std::filesystem::path(key).extension() != ".json") {
+    if (!base || !RelativePath(key) || !key.ends_with(".json")) {
         return nullptr;
     }
     if (const auto found = sources.find(key); found != sources.end()) {
         return &found->second;
     }
-    std::error_code path_error;
-    const auto      logical_path = std::filesystem::weakly_canonical(port_data_root / key, path_error);
-    if (path_error || !Within(port_data_root, logical_path)) {
-        return nullptr;
-    }
-    auto candidates = candidate_resolver ? candidate_resolver(key) : std::vector<std::filesystem::path>{};
-    if (std::find(candidates.begin(), candidates.end(), logical_path) == candidates.end()) {
-        candidates.push_back(logical_path);
+    auto candidates = candidate_resolver ? candidate_resolver(std::filesystem::path(std::u8string(key.begin(), key.end())))
+                                         : std::vector<vfs::Ref>{};
+    if (auto original = vfs::Find(base, key)) {
+        const auto name = original.Display();
+        if (std::none_of(candidates.begin(), candidates.end(), [&](const vfs::Ref &candidate) { return candidate.Display() == name; })) {
+            candidates.push_back(std::move(original));
+        }
     }
     for (const auto &candidate : candidates) {
         try {
-            const auto result = sources.emplace(key, ParseDocument(logical_path, candidate));
+            const auto result = sources.emplace(key, ParseDocument(key, candidate));
             return &result.first->second;
         } catch (const std::exception &) {
             // Invalid replacements fall through to a lower-priority document.
@@ -359,13 +348,14 @@ bool Contains(std::string_view path) { return Find(path) != nullptr; }
 
 bool DecodeEmbeddedSet(const nlohmann::json &document, const std::filesystem::path &gltf_document_path,
                        ImageExtentResolver extent_resolver, Source &source, std::string &error) {
+    const auto document_name = gltf_document_path.generic_u8string();
     source = {};
     if (!extent_resolver) {
         error = "missing embedded image extent resolver";
         return false;
     }
     try {
-        source = ParseDetail(document, gltf_document_path, true, extent_resolver);
+        source = ParseDetail(document, std::string(document_name.begin(), document_name.end()), true, extent_resolver);
         error.clear();
         return true;
     } catch (const std::exception &exception) {
@@ -393,11 +383,11 @@ std::optional<Decoded> Decode(const Entry &entry, std::string_view selector, std
     }
     for (size_t mip = 0; mip < variant->levels.size(); ++mip) {
         int                  width = 0, height = 0;
-        std::vector<uint8_t> rgba;
-        const bool           loaded = imagefile::LoadPng(variant->levels[mip], width, height, rgba);
+        std::vector<uint8_t> rgba, png;
+        const bool           loaded = vfs::Read(variant->levels[mip].file, png) && imagefile::LoadPng(png, width, height, rgba);
         if (!loaded ||
             width != std::max(1, entry.width >> mip) || height != std::max(1, entry.height >> mip)) {
-            error = "cannot load texture PNG " + variant->levels[mip].string();
+            error = "cannot load texture PNG " + variant->levels[mip].path;
             return std::nullopt;
         }
         decoded.levels.push_back(std::move(rgba));

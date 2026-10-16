@@ -1,31 +1,13 @@
+use super::zip_archive::{self, Archive, Input, content_digest};
 use super::{CoreError, CoreResult, textures};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn fail(message: impl Into<String>) -> CoreError {
     CoreError(message.into())
-}
-fn digest(path: &Path) -> CoreResult<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    let mut out = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    Ok(out)
 }
 fn files(root: &Path, dir: &Path, out: &mut BTreeSet<String>) -> CoreResult<()> {
     for entry in fs::read_dir(dir)? {
@@ -78,27 +60,6 @@ pub fn finalize_assets(root: &Path) -> CoreResult<()> {
     Ok(())
 }
 
-/// Hashes the complete published trees without maintaining an asset manifest.
-pub fn output_digest(root: &Path) -> CoreResult<String> {
-    let mut hash = Sha256::new();
-    hash.update(b"kazarov-direct-assets-v1\0");
-    for tree in ["data", "port_data"] {
-        let base = root.join(tree);
-        let mut names = BTreeSet::new();
-        files(&base, &base, &mut names)?;
-        for name in names {
-            let key = format!("{tree}/{name}");
-            hash.update((key.len() as u64).to_le_bytes());
-            hash.update(key.as_bytes());
-            hash.update(digest(&base.join(name))?.as_bytes());
-        }
-    }
-    Ok(hash
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
 fn check_asset(
     port: &Path,
     document: &str,
@@ -350,11 +311,8 @@ fn check_levels(
     }
     Ok(())
 }
-pub fn verify(root: &Path) -> CoreResult<u64> {
-    let marker: Value = serde_json::from_slice(&fs::read(root.join("data.json"))?)?;
-    if marker["schema_version"] != 1 || marker["data_version"] != super::data_version() {
-        return Err(fail("data.json has an unsupported data version"));
-    }
+/// Validates staged `data` and `port_data` trees before they are packed.
+pub fn verify_trees(root: &Path) -> CoreResult<u64> {
     let port = root.join("port_data");
     let data = root.join("data");
     let mut port_files = BTreeSet::new();
@@ -399,11 +357,6 @@ pub fn verify(root: &Path) -> CoreResult<u64> {
     super::audio::verify(root)?;
     super::configs::verify(root)?;
     super::packs::verify(root)?;
-    if let Some(expected) = marker["output_sha256"].as_str() {
-        if output_digest(root)? != expected {
-            return Err(fail("published output changed"));
-        }
-    }
     Ok(port_files
         .iter()
         .filter(|name| name.ends_with(".png"))
@@ -544,68 +497,188 @@ fn rename_retry(from: &Path, to: &Path) -> CoreResult<()> {
     }
     unreachable!()
 }
+/// File name of the published asset archive beside the marker.
+pub const ARCHIVE: &str = "data.zip";
+/// File name of the published marker.
+pub const MARKER: &str = "data.json";
+/// Published layout recorded in the marker.
+pub const LAYOUT: &str = "zip";
+/// Root-level index files that runtime lookups no longer use.
+const OBSOLETE_INDEXES: [&str; 5] = [
+    "manifest.json",
+    "catalog.json",
+    "audio_catalog.json",
+    "model_catalog.json",
+    "cfg_catalog.json",
+];
+/// Converted formats that cannot carry proprietary texture payloads.
+const CONVERTED_EXTENSIONS: [&str; 5] = [".png", ".mp4", ".wav", ".gltf", ".json"];
+
+/// Lists the staged `data` and `port_data` files as one merged archive namespace.
+pub fn tree_inputs(root: &Path) -> CoreResult<Vec<Input>> {
+    let mut inputs = Vec::new();
+    for tree in ["data", "port_data"] {
+        let base = root.join(tree);
+        if base.is_dir() {
+            inputs.extend(zip_archive::directory_inputs(&base)?);
+        }
+    }
+    Ok(inputs)
+}
+
+/// Packs verified staged trees into `data.zip`, deleting each file once it is written.
+pub fn pack_trees(
+    root: &Path,
+    progress: &(dyn Fn(u64, u64) + Sync),
+) -> CoreResult<zip_archive::Written> {
+    let written = zip_archive::write(tree_inputs(root)?, &root.join(ARCHIVE), true, progress)?;
+    for tree in ["data", "port_data"] {
+        let base = root.join(tree);
+        if base.is_dir() {
+            fs::remove_dir_all(base)?;
+        }
+    }
+    Ok(written)
+}
+
+/// Packs staged trees and writes the marker describing the archive.
+pub fn seal(
+    root: &Path,
+    mut marker: Value,
+    progress: &(dyn Fn(u64, u64) + Sync),
+) -> CoreResult<zip_archive::Written> {
+    let written = pack_trees(root, progress)?;
+    marker["layout"] = LAYOUT.into();
+    marker["archive_size"] = written.size.into();
+    marker["archive_entries"] = written.entries.into();
+    marker["output_sha256"] = written.content_sha256.clone().into();
+    let mut bytes = serde_json::to_vec_pretty(&marker)?;
+    bytes.push(b'\n');
+    fs::write(root.join(MARKER), bytes)?;
+    Ok(written)
+}
+
+/// Applies the published-asset rules that need only one entry's name and bytes.
+fn audit_entry(name: &str, bytes: &[u8]) -> CoreResult<()> {
+    let lower = name.to_ascii_lowercase();
+    if lower.split('/').any(|part| part.ends_with(".img")) {
+        return Err(fail(format!("legacy .img path remains: {name}")));
+    }
+    if lower.ends_with(".chr") {
+        return Err(fail(format!("legacy character container remains: {name}")));
+    }
+    if OBSOLETE_INDEXES.contains(&name) {
+        return Err(fail(format!("obsolete runtime index remains: {name}")));
+    }
+    if matches!(lower.as_str(), "snd2/rev.bin" | "snd2/map_index.txt") {
+        return Err(fail(format!(
+            "proprietary scene audio table published: {name}"
+        )));
+    }
+    super::packs::audit_entry(name, bytes)?;
+    if !CONVERTED_EXTENSIONS.iter().any(|ext| lower.ends_with(ext)) {
+        if bytes.len() as u64 <= 128 << 20 {
+            textures::audit_payload(bytes, name)?;
+        } else if !textures::large_known_non_texture(name) {
+            return Err(fail(format!("unrecognized large data file: {name}")));
+        }
+    }
+    Ok(())
+}
+
+/// Reads a marker describing the current data version and archive layout.
+pub fn read_marker(root: &Path) -> CoreResult<Value> {
+    let marker: Value = serde_json::from_slice(&fs::read(root.join(MARKER))?)?;
+    if marker["schema_version"] != 1 || marker["data_version"] != super::data_version() {
+        return Err(fail("data.json has an unsupported data version"));
+    }
+    if marker["layout"] != LAYOUT {
+        return Err(fail("data.json does not describe a data.zip layout"));
+    }
+    Ok(marker)
+}
+
+/// Confirms that `data.zip` exists with the size recorded in the marker.
+pub fn archive_present(root: &Path, marker: &Value) -> bool {
+    marker["archive_size"].as_u64().is_some_and(|size| {
+        fs::metadata(root.join(ARCHIVE)).is_ok_and(|meta| meta.is_file() && meta.len() == size)
+    })
+}
+
+/// Fully verifies a published archive against its marker, returning its PNG count.
+pub fn verify(root: &Path) -> CoreResult<u64> {
+    let marker = read_marker(root)?;
+    if !archive_present(root, &marker) {
+        return Err(fail(
+            "data.zip is missing or its size does not match data.json",
+        ));
+    }
+    let archive = Archive::open(&root.join(ARCHIVE))?;
+    let mut records = archive.verify_entries(&audit_entry)?;
+    if marker["archive_entries"].as_u64() != Some(records.len() as u64) {
+        return Err(fail("data.zip entry count does not match data.json"));
+    }
+    if Some(content_digest(&mut records).as_str()) != marker["output_sha256"].as_str() {
+        return Err(fail("published output changed"));
+    }
+    Ok(records
+        .iter()
+        .filter(|record| record.name.ends_with(".png"))
+        .count() as u64)
+}
+
+/// Verifies a staged archive and publishes it.
 pub fn publish(staged: &Path, root: &Path) -> CoreResult<()> {
     verify(staged)?;
+    publish_verified(staged, root)
+}
+
+/// Moves a verified staged archive and marker into place, replacing earlier data of any layout.
+pub fn publish_verified(staged: &Path, root: &Path) -> CoreResult<()> {
     fs::create_dir_all(root)?;
-    let data = root.join("data");
-    let port = root.join("port_data");
-    let marker = root.join("data.json");
-    let staged_data = staged.join("data");
-    let staged_port = staged.join("port_data");
-    let staged_marker = staged.join("data.json");
-    if marker.is_file() && fs::read(&marker)? == fs::read(&staged_marker)? && verify(root).is_ok() {
-        return Ok(());
-    }
-    let backup_data = unique(root, "data-backup");
-    let backup_port = unique(root, "port-data-backup");
-    let backup_marker = unique(root, "marker-backup");
-    let mut old_data = false;
-    let mut old_port = false;
-    let mut old_marker = false;
-    let mut new_data = false;
-    let mut new_port = false;
-    let mut new_marker = false;
+    let staged_archive = staged.join(ARCHIVE);
+    let staged_marker = staged.join(MARKER);
+    let archive = root.join(ARCHIVE);
+    let marker = root.join(MARKER);
+    let legacy_data = root.join("data");
+    let legacy_port = root.join("port_data");
+    let mut displaced: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut placed: Vec<(PathBuf, PathBuf)> = Vec::new();
     let result = (|| -> CoreResult<()> {
-        if marker.is_file() {
-            rename_retry(&marker, &backup_marker)?;
-            old_marker = true;
+        for (original, kind) in [
+            (&marker, "marker-backup"),
+            (&archive, "archive-backup"),
+            (&legacy_data, "data-backup"),
+            (&legacy_port, "port-data-backup"),
+        ] {
+            if fs::symlink_metadata(original).is_ok() {
+                let backup = unique(root, kind);
+                rename_retry(original, &backup)?;
+                displaced.push((original.clone(), backup));
+            }
         }
-        if data.exists() {
-            rename_retry(&data, &backup_data)?;
-            old_data = true;
+        for (from, to) in [(&staged_archive, &archive), (&staged_marker, &marker)] {
+            rename_retry(from, to)?;
+            placed.push((from.clone(), to.clone()));
         }
-        if port.exists() {
-            rename_retry(&port, &backup_port)?;
-            old_port = true;
+        let published = read_marker(root)?;
+        if !archive_present(root, &published) {
+            return Err(fail("published data.zip size does not match data.json"));
         }
-        rename_retry(&staged_data, &data)?;
-        new_data = true;
-        rename_retry(&staged_port, &port)?;
-        new_port = true;
-        rename_retry(&staged_marker, &marker)?;
-        new_marker = true;
-        verify(root)?;
+        Archive::open(&archive)?;
         Ok(())
     })();
     if let Err(error) = result {
         let mut rollback = Vec::new();
-        if new_data && let Err(e) = rename_retry(&data, &staged_data) {
-            rollback.push(e.to_string());
+        for (from, to) in placed.iter().rev() {
+            if let Err(e) = rename_retry(to, from) {
+                rollback.push(e.to_string());
+            }
         }
-        if new_port && let Err(e) = rename_retry(&port, &staged_port) {
-            rollback.push(e.to_string());
-        }
-        if new_marker && let Err(e) = rename_retry(&marker, &staged_marker) {
-            rollback.push(e.to_string());
-        }
-        if old_data && let Err(e) = rename_retry(&backup_data, &data) {
-            rollback.push(e.to_string());
-        }
-        if old_port && let Err(e) = rename_retry(&backup_port, &port) {
-            rollback.push(e.to_string());
-        }
-        if old_marker && let Err(e) = rename_retry(&backup_marker, &marker) {
-            rollback.push(e.to_string());
+        for (original, backup) in displaced.iter().rev() {
+            if let Err(e) = rename_retry(backup, original) {
+                rollback.push(e.to_string());
+            }
         }
         return Err(if rollback.is_empty() {
             error
@@ -613,14 +686,12 @@ pub fn publish(staged: &Path, root: &Path) -> CoreResult<()> {
             fail(format!("{error}; rollback: {}", rollback.join("; ")))
         });
     }
-    if old_data {
-        fs::remove_dir_all(backup_data)?;
-    }
-    if old_port {
-        fs::remove_dir_all(backup_port)?;
-    }
-    if old_marker {
-        fs::remove_file(backup_marker)?;
+    for (_, backup) in displaced {
+        if backup.is_dir() {
+            fs::remove_dir_all(backup)?;
+        } else {
+            fs::remove_file(backup)?;
+        }
     }
     Ok(())
 }
@@ -663,24 +734,86 @@ mod tests {
         verify_catalog(port, &catalog, &assets).unwrap();
     }
 
-    #[test]
-    fn final_manifests_include_converted_assets_and_discard_stale_hashes() {
-        let temp = tempfile::tempdir().unwrap();
-        let data = temp.path().join("data");
-        let port = temp.path().join("port_data");
+    fn staged_trees(root: &Path) {
+        let data = root.join("data");
+        let port = root.join("port_data");
         fs::create_dir_all(&data).unwrap();
         fs::create_dir_all(port.join("audio")).unwrap();
         fs::write(data.join("script.stb"), b"unrelated script").unwrap();
         fs::write(port.join("audio/sample.wav"), b"RIFF converted PCM").unwrap();
+        fs::write(port.join("audio/sample.png"), b"png").unwrap();
         fs::write(port.join("manifest.json"), b"stale manifest").unwrap();
-        finalize_assets(temp.path()).unwrap();
-        assert!(!port.join("manifest.json").exists());
-        assert!(!data.join("manifest.json").exists());
-        let first = output_digest(temp.path()).unwrap();
-        finalize_assets(temp.path()).unwrap();
-        assert_eq!(first, output_digest(temp.path()).unwrap());
-        fs::write(port.join("audio/sample.wav"), b"changed PCM").unwrap();
-        assert_ne!(first, output_digest(temp.path()).unwrap());
+    }
+
+    fn marker() -> Value {
+        serde_json::json!({"schema_version":1,"data_version":super::super::data_version()})
+    }
+
+    #[test]
+    fn sealed_archive_merges_trees_and_detects_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        staged_trees(root);
+        finalize_assets(root).unwrap();
+        assert!(!root.join("port_data/manifest.json").exists());
+        let written = seal(root, marker(), &|_, _| {}).unwrap();
+        assert!(!root.join("data").exists() && !root.join("port_data").exists());
+        assert_eq!(written.entries, 3);
+        assert_eq!(verify(root).unwrap(), 1);
+        let archive = Archive::open(&root.join(ARCHIVE)).unwrap();
+        let names: Vec<&str> = (0..archive.len()).map(|i| archive.name(i)).collect();
+        assert_eq!(
+            names,
+            ["audio/sample.png", "audio/sample.wav", "script.stb"]
+        );
+        drop(archive);
+        let mut changed = read_marker(root).unwrap();
+        changed["output_sha256"] = "0".repeat(64).into();
+        fs::write(root.join(MARKER), serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(verify(root).unwrap_err().to_string().contains("changed"));
+        changed["data_version"] = 8.into();
+        fs::write(root.join(MARKER), serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(verify(root).is_err());
+    }
+
+    #[test]
+    fn publish_replaces_legacy_directories_with_archive() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("run");
+        let staged = temp.path().join("stage");
+        staged_trees(&staged);
+        finalize_assets(&staged).unwrap();
+        seal(&staged, marker(), &|_, _| {}).unwrap();
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::create_dir_all(root.join("port_data/old")).unwrap();
+        fs::write(root.join("port_data/old/file.bin"), b"old").unwrap();
+        fs::write(root.join(MARKER), b"{\"data_version\":8}").unwrap();
+        publish(&staged, &root).unwrap();
+        assert!(!root.join("data").exists() && !root.join("port_data").exists());
+        assert!(root.join(ARCHIVE).is_file());
+        assert!(!staged.join(ARCHIVE).exists());
+        assert_eq!(verify(&root).unwrap(), 1);
+        let leftovers: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers.len(), 2, "{leftovers:?}");
+    }
+
+    #[test]
+    fn audit_rejects_proprietary_and_obsolete_entries() {
+        assert!(audit_entry("catalog.json", b"{}").is_err());
+        assert!(audit_entry("models/foo.img/a.json", b"{}").is_err());
+        assert!(audit_entry("snd2/rev.bin", b"").is_err());
+        assert!(audit_entry("x/pack.json", b"{}").is_err());
+        assert!(
+            audit_entry(
+                "x/pack.json",
+                br#"{"schema_version":1,"kind":"asset_directory"}"#
+            )
+            .is_ok()
+        );
+        assert!(audit_entry("script.stb", b"plain").is_ok());
     }
 
     #[test]

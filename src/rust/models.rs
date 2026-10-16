@@ -456,7 +456,8 @@ struct Gltf {
     rotation_nodes: BTreeMap<usize, usize>,
     reset_rotation_scale: BTreeSet<usize>,
 }
-fn memory_card_icon(data: &[u8]) -> CoreResult<Value> {
+/// Converts a memory card icon model into glTF referencing `image_uri` and the PNG it names.
+fn memory_card_icon(data: &[u8], image_uri: &str) -> CoreResult<(Value, Vec<u8>)> {
     let shapes = u32le(data, 4)? as usize;
     let count = u32le(data, 16)? as usize;
     if u32le(data, 0)? != 0x10000
@@ -590,13 +591,13 @@ fn memory_card_icon(data: &[u8]) -> CoreResult<Value> {
     let normal = gltf.accessor(&normals, 3, "VEC3", false);
     let uv = gltf.accessor(&uvs, 2, "VEC2", false);
     let colour = gltf.accessor(&colours, 4, "VEC4", false);
-    gltf.doc["images"] = json!([{"uri":format!("data:image/png;base64,{}",base64(&png))}]);
+    gltf.doc["images"] = json!([{"uri":image_uri}]);
     gltf.doc["textures"] = json!([{"source":0}]);
     gltf.doc["materials"] = json!([{"pbrMetallicRoughness":{"baseColorTexture":{"index":0},"metallicFactor":0,"roughnessFactor":1},"doubleSided":true}]);
     gltf.doc["meshes"] = json!([{"primitives":[{"attributes":{"POSITION":position,"NORMAL":normal,"TEXCOORD_0":uv,"COLOR_0":colour},"mode":4,"material":0}]}]);
     gltf.doc["nodes"] = json!([{"name":"memory_card_icon","mesh":0}]);
     gltf.doc["scenes"][0]["nodes"] = json!([0]);
-    Ok(gltf.finish())
+    Ok((gltf.finish(), png))
 }
 impl Gltf {
     fn new() -> Self {
@@ -719,9 +720,7 @@ impl Gltf {
 struct Texture {
     source: String,
     name: String,
-    png: PathBuf,
     sampler: Value,
-    embedded: std::cell::RefCell<Option<String>>,
     asset: String,
     pictures: Value,
     directory: PathBuf,
@@ -746,12 +745,7 @@ fn textures(
                 out.push(Texture {
                     source: source.clone(),
                     name: entry["name"].as_str().unwrap_or("").into(),
-                    png: published
-                        .join("port_data")
-                        .join(Path::new(&document).parent().unwrap())
-                        .join(level),
                     sampler: entry["pictures"][0]["sampler"].clone(),
-                    embedded: std::cell::RefCell::new(None),
                     asset: png_identity(&Path::new(&document).parent().unwrap().join(level)),
                     pictures: if entry["pictures"].is_array() {
                         entry["pictures"].clone()
@@ -825,14 +819,8 @@ fn material(
         let image = if let Some(id) = images.iter().position(|i| i["name"] == image_name) {
             id
         } else {
-            if t.embedded.borrow().is_none() {
-                *t.embedded.borrow_mut() = Some(format!(
-                    "data:image/png;base64,{}",
-                    base64(&fs::read(&t.png)?)
-                ));
-            }
             let id = images.len();
-            images.push(json!({"name":image_name,"uri":t.embedded.borrow().as_ref().unwrap(),"extras":{"chronicle_two":{"png":t.asset}}}));
+            images.push(json!({"name":image_name,"extras":{"chronicle_two":{"png":t.asset}}}));
             id
         };
         let textures = gltf
@@ -869,7 +857,7 @@ fn material(
                     let image = if pi == 0 && li == 0 {
                         image
                     } else {
-                        embed_image(
+                        add_image(
                             gltf,
                             &t.directory.join(reference),
                             &format!("{}:{reference}", t.source),
@@ -887,7 +875,7 @@ fn material(
                         let reference = level
                             .as_str()
                             .ok_or_else(|| fail("invalid model texture variant mip"))?;
-                        *level = json!(embed_image(
+                        *level = json!(add_image(
                             gltf,
                             &t.directory.join(reference),
                             &format!("{}:{reference}", t.source)
@@ -905,7 +893,8 @@ fn material(
         json!({"texture":texture,"texture_source":selected_texture.map(|t|&t.source),"texture_path":selected_texture.map(|t|&t.asset),"texture_images":embedded_pictures,"diffuse":diffuse,"ambient":ambient,"specular":specular,"power":power,"flags":u32le(b,at+84)?,"extra":floats(b,at+88,2)?}),
     )
 }
-fn embed_image(gltf: &mut Gltf, path: &Path, name: &str) -> CoreResult<usize> {
+/// Adds a named image backed by a standalone PNG, reusing an existing image of that name.
+fn add_image(gltf: &mut Gltf, path: &Path, name: &str) -> CoreResult<usize> {
     let images = gltf
         .doc
         .as_object_mut()
@@ -918,10 +907,61 @@ fn embed_image(gltf: &mut Gltf, path: &Path, name: &str) -> CoreResult<usize> {
         return Ok(id);
     }
     let id = images.len();
-    images.push(
-        json!({"name":name,"uri":format!("data:image/png;base64,{}",base64(&fs::read(path)?)),"extras":{"chronicle_two":{"png":png_identity(path)}}}),
-    );
+    images.push(json!({"name":name,"extras":{"chronicle_two":{"png":png_identity(path)}}}));
     Ok(id)
+}
+/// Percent-encodes one URI path segment, retaining only unreserved characters.
+fn encode_uri_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+/// Builds the relative URI from a port_data document to another port_data file.
+fn relative_uri(document: &str, target: &str) -> String {
+    let mut base: Vec<&str> = document.split('/').collect();
+    base.pop();
+    let target: Vec<&str> = target.split('/').collect();
+    let common = base
+        .iter()
+        .zip(&target[..target.len() - 1])
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut parts = vec!["..".to_owned(); base.len() - common];
+    parts.extend(target[common..].iter().map(|part| encode_uri_segment(part)));
+    parts.join("/")
+}
+/// Points every glTF image at its standalone PNG relative to the glTF file.
+fn link_images(
+    published: &Path,
+    path: &str,
+    gltf: &mut Value,
+    report: &mut ConversionReport,
+) -> CoreResult<()> {
+    let port = published.join("port_data");
+    let document = path.replace('\\', "/");
+    for image in gltf
+        .get_mut("images")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        let png = image["extras"]["chronicle_two"]["png"]
+            .as_str()
+            .ok_or_else(|| fail(format!("model image has no standalone PNG: {document}")))?
+            .to_owned();
+        if !port.join(&png).is_file() {
+            return Err(fail(format!("missing model image {png}: {document}")));
+        }
+        image["uri"] = json!(relative_uri(&document, &png));
+        report.referenced_pngs.insert(png);
+    }
+    Ok(())
 }
 fn png_identity(path: &Path) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
@@ -1092,6 +1132,7 @@ fn publish_pair(
     } else {
         minimal_model(metadata);
     }
+    link_images(published, path, gltf, report)?;
     let mut images = Vec::new();
     if let Some(values) = gltf.get_mut("images").and_then(Value::as_array_mut) {
         for (image, value) in values.iter_mut().enumerate() {
@@ -1787,6 +1828,8 @@ struct NativeArtifact {
 pub struct ConversionReport {
     pub files: Vec<String>,
     pub consumed_texture_sources: BTreeSet<String>,
+    /// Port-relative standalone PNGs referenced by published glTF images.
+    pub referenced_pngs: BTreeSet<String>,
 }
 
 fn character_parent(alias: &str) -> Option<&str> {
@@ -2007,7 +2050,6 @@ fn embed_texture_set(
                 let name = level
                     .as_str()
                     .ok_or_else(|| fail("texture image path missing"))?;
-                let bytes = fs::read(directory.join(name))?;
                 let images = gltf
                     .as_object_mut()
                     .unwrap()
@@ -2023,7 +2065,7 @@ fn embed_texture_set(
                     image
                 } else {
                     let image = images.len();
-                    images.push(json!({"name":name,"uri":format!("data:image/png;base64,{}",base64(&bytes)),"extras":{"chronicle_two":{"png":png}}}));
+                    images.push(json!({"name":name,"extras":{"chronicle_two":{"png":png}}}));
                     image
                 };
                 *level = json!(format!("#/images/{image}"));
@@ -2500,9 +2542,20 @@ pub fn convert_tree(
             .iter()
             .filter(|resource| extension(&resource.alias).eq_ignore_ascii_case("ico"))
         {
-            let gltf = memory_card_icon(&icon.data)?;
             let path = super::configs::native_path(&icon.alias, "gltf");
+            let image = Path::new(&path)
+                .with_extension("png")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let (gltf, png) = memory_card_icon(&icon.data, &relative_uri(&path, &image))?;
+            let image_path = published.join("port_data").join(&image);
+            if image_path.exists() && fs::read(&image_path)? != png {
+                return Err(fail(format!("memory card icon image collides: {image}")));
+            }
             save(&published.join("port_data").join(&path), &gltf)?;
+            fs::write(&image_path, &png)?;
+            report.referenced_pngs.insert(image.clone());
+            report.files.push(image);
             report.files.push(path);
             converted.insert(icon.alias.clone());
         }
@@ -2928,6 +2981,79 @@ fn decode_uri(uri: &str, prefix: &str) -> CoreResult<Vec<u8>> {
     }
     Ok(out)
 }
+/// Resolves a relative glTF URI against its port_data document into a port_data path.
+fn resolve_uri(document: &str, uri: &str) -> CoreResult<String> {
+    let invalid = || fail(format!("invalid glTF image URI {uri:?} in {document}"));
+    if uri.is_empty() || uri.starts_with('/') || uri.contains([':', '?', '#', '\\']) {
+        return Err(invalid());
+    }
+    let mut parts: Vec<String> = document.split('/').map(str::to_owned).collect();
+    parts.pop();
+    for segment in uri.split('/') {
+        let mut decoded = Vec::with_capacity(segment.len());
+        let mut bytes = segment.bytes();
+        while let Some(byte) = bytes.next() {
+            if byte == b'%' {
+                let hex = [
+                    bytes.next().ok_or_else(invalid)?,
+                    bytes.next().ok_or_else(invalid)?,
+                ];
+                let hex = std::str::from_utf8(&hex).map_err(|_| invalid())?;
+                decoded.push(u8::from_str_radix(hex, 16).map_err(|_| invalid())?);
+            } else {
+                decoded.push(byte);
+            }
+        }
+        let decoded = String::from_utf8(decoded).map_err(|_| invalid())?;
+        if segment == ".." {
+            parts.pop().ok_or_else(invalid)?;
+        } else if matches!(decoded.as_str(), "" | "." | "..") || decoded.contains(['/', '\\', '\0'])
+        {
+            return Err(invalid());
+        } else {
+            parts.push(decoded);
+        }
+    }
+    Ok(parts.join("/"))
+}
+/// Checks that every glTF image references an existing standalone PNG in port_data.
+fn verify_images(
+    port: &Path,
+    document: &str,
+    doc: &Value,
+    metadata: &Value,
+    files: &BTreeSet<String>,
+    checked: &mut BTreeSet<String>,
+) -> CoreResult<()> {
+    let mut resolved = Vec::new();
+    for image in doc["images"].as_array().into_iter().flatten() {
+        let uri = image["uri"]
+            .as_str()
+            .ok_or_else(|| fail(format!("glTF image URI missing: {document}")))?;
+        let path = resolve_uri(document, uri)?;
+        if !files.contains(&path) {
+            return Err(fail(format!("missing glTF image {path}: {document}")));
+        }
+        if !checked.contains(&path) {
+            let mut signature = [0; 8];
+            std::io::Read::read_exact(&mut fs::File::open(port.join(&path))?, &mut signature)?;
+            if &signature != b"\x89PNG\r\n\x1a\n" {
+                return Err(fail(format!("glTF image is not PNG: {path}")));
+            }
+            checked.insert(path.clone());
+        }
+        resolved.push(path);
+    }
+    for row in metadata["images"].as_array().into_iter().flatten() {
+        let image = index(&row["image"], resolved.len(), "metadata image")?;
+        if row["png"].as_str() != Some(resolved[image].as_str()) {
+            return Err(fail(format!(
+                "metadata image {image} does not match its glTF URI: {document}"
+            )));
+        }
+    }
+    Ok(())
+}
 fn reference(root: &Path, value: &Value, key: &str) -> CoreResult<PathBuf> {
     let s = value[key]
         .as_str()
@@ -3118,14 +3244,11 @@ fn validate_gltf(doc: &Value, metadata: &Value) -> CoreResult<()> {
         }
     }
     for image in doc["images"].as_array().unwrap_or(&empty) {
-        let b = decode_uri(
-            image["uri"]
-                .as_str()
-                .ok_or_else(|| fail("glTF image URI missing"))?,
-            "data:image/png;base64,",
-        )?;
-        if !b.starts_with(b"\x89PNG\r\n\x1a\n") {
-            return Err(fail("invalid embedded model PNG"));
+        let uri = image["uri"]
+            .as_str()
+            .ok_or_else(|| fail("glTF image URI missing"))?;
+        if uri.starts_with("data:") {
+            return Err(fail("glTF image is embedded instead of a standalone PNG"));
         }
     }
     let meshes = doc["meshes"].as_array().unwrap_or(&empty);
@@ -3364,6 +3487,16 @@ pub fn verify(root: &Path) -> CoreResult<()> {
     if port.is_dir() {
         collect(&port, &mut files)?;
     }
+    let names: BTreeSet<String> = files
+        .iter()
+        .map(|path| {
+            path.strip_prefix(&port)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    let mut checked_pngs = BTreeSet::new();
     for path in files {
         if path.extension().and_then(|s| s.to_str()) != Some("gltf") {
             continue;
@@ -3384,6 +3517,12 @@ pub fn verify(root: &Path) -> CoreResult<()> {
             )));
         }
         validate_gltf(&doc, &metadata)?;
+        let document = path
+            .strip_prefix(&port)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        verify_images(&port, &document, &doc, &metadata, &names, &mut checked_pngs)?;
         if metadata["kind"] == "character" {
             for model in metadata["models"]
                 .as_array()
@@ -3569,8 +3708,9 @@ mod tests {
         }
         let last = raw.len() - 2;
         raw[last..].copy_from_slice(&31u16.to_le_bytes());
-        let doc = memory_card_icon(&raw).unwrap();
+        let (doc, png) = memory_card_icon(&raw, "icon.png").unwrap();
         validate_gltf(&doc, &json!({"schema_version":1})).unwrap();
+        assert_eq!(doc["images"], json!([{"uri":"icon.png"}]));
         assert_eq!(doc["accessors"][0]["count"], 3);
         assert!(doc.get("extras").is_none());
         assert!(doc.get("animations").is_none());
@@ -3582,6 +3722,16 @@ mod tests {
         convert_tree(&temp.path().join("raw"), &temp.path().join("out"), 1, &[]).unwrap();
         verify(&temp.path().join("out")).unwrap();
         assert!(temp.path().join("out/port_data/title/icon.gltf").is_file());
+        let image = temp.path().join("out/port_data/title/icon.png");
+        assert_eq!(fs::read(&image).unwrap(), png);
+        let published: Value = serde_json::from_slice(
+            &fs::read(temp.path().join("out/port_data/title/icon.gltf")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(published["images"], json!([{"uri":"icon.png"}]));
+        fs::remove_file(&image).unwrap();
+        assert!(verify(&temp.path().join("out")).is_err());
+        fs::write(&image, &png).unwrap();
         assert!(
             !temp
                 .path()
@@ -3620,6 +3770,150 @@ mod tests {
                 .unwrap()
                 .starts_with("data:application/octet-stream;base64,")
         );
+    }
+    fn test_png(colour: u8) -> Vec<u8> {
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[colour; 4])
+            .unwrap();
+        png
+    }
+    #[test]
+    fn image_uris_are_relative_and_percent_encoded() {
+        assert_eq!(relative_uri("a/b.gltf", "a/t/x.png"), "t/x.png");
+        assert_eq!(relative_uri("a/b/c.gltf", "a/x.png"), "../x.png");
+        assert_eq!(relative_uri("a/b/c.gltf", "d/e/x.png"), "../../d/e/x.png");
+        assert_eq!(relative_uri("c.gltf", "d/x y#%.png"), "d/x%20y%23%25.png");
+        assert_eq!(relative_uri("a/x.png/c.gltf", "a/x.png"), "../x.png");
+        for (document, target) in [
+            ("a/b/c.gltf", "a/d/e f.png"),
+            ("c.gltf", "x.png"),
+            ("a/b/c/d.gltf", "e/%41.png"),
+        ] {
+            let uri = relative_uri(document, target);
+            assert_eq!(resolve_uri(document, &uri).unwrap(), target);
+        }
+        assert_eq!(resolve_uri("a/b/c.gltf", "../../x.png").unwrap(), "x.png");
+        for uri in [
+            "data:image/png;base64,AAAA",
+            "/x.png",
+            "../../x.png",
+            "a//x.png",
+            "./x.png",
+            "%2E%2E/x.png",
+            "a%2Fx.png",
+            "x%2.png",
+            "x.png?v=1",
+            "x.png#0",
+            "a\\x.png",
+        ] {
+            assert!(resolve_uri("a/c.gltf", uri).is_err(), "{uri}");
+        }
+    }
+    #[test]
+    fn shared_model_images_reference_standalone_pngs_externally() {
+        let temp = tempfile::tempdir().unwrap();
+        let port = temp.path().join("port_data");
+        fs::create_dir_all(port.join("map/d01/tex")).unwrap();
+        fs::create_dir_all(port.join("shared")).unwrap();
+        let stone = test_png(1);
+        let sky = test_png(2);
+        fs::write(port.join("map/d01/tex/stone 0.png"), &stone).unwrap();
+        fs::write(port.join("shared/sky_0.png"), &sky).unwrap();
+        let mut report = ConversionReport::default();
+        let documents = [
+            (
+                "map/d01/floor 1/room#1.gltf",
+                ["../tex/stone%200.png", "../../../shared/sky_0.png"],
+            ),
+            (
+                "map/d01/room.gltf",
+                ["tex/stone%200.png", "../../shared/sky_0.png"],
+            ),
+        ];
+        for (path, _) in documents {
+            let mut gltf = json!({"asset":{"version":"2.0"},"images":[
+                {"name":"stone","extras":{"chronicle_two":{"png":"map/d01/tex/stone 0.png"}}},
+                {"name":"stone mip","extras":{"chronicle_two":{"png":"map/d01/tex/stone 0.png"}}},
+                {"name":"sky","extras":{"chronicle_two":{"png":"shared/sky_0.png"}}}
+            ]});
+            let mut metadata = json!({"schema_version":1,"kind":"model"});
+            publish_pair(temp.path(), path, &mut gltf, &mut metadata, &mut report).unwrap();
+        }
+        verify(temp.path()).unwrap();
+        assert_eq!(
+            report.referenced_pngs,
+            BTreeSet::from(["map/d01/tex/stone 0.png".into(), "shared/sky_0.png".into()])
+        );
+        for (path, [stone_uri, sky_uri]) in documents {
+            let text = fs::read_to_string(port.join(path)).unwrap();
+            assert!(!text.contains("data:image"));
+            let gltf: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                gltf["images"],
+                json!([{"name":"stone","uri":stone_uri},{"name":"stone mip","uri":stone_uri},
+                       {"name":"sky","uri":sky_uri}])
+            );
+            for (image, expected) in [(0, &stone), (1, &stone), (2, &sky)] {
+                let uri = gltf["images"][image]["uri"].as_str().unwrap();
+                let resolved = resolve_uri(path, uri).unwrap();
+                assert_eq!(&fs::read(port.join(resolved)).unwrap(), expected);
+            }
+            let sidecar: Value = serde_json::from_slice(
+                &fs::read(port.join(Path::new(path).with_extension("game.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(sidecar["images"][2]["png"], "shared/sky_0.png");
+        }
+
+        let mut unbacked = json!({"asset":{"version":"2.0"},"images":[{"name":"lost"}]});
+        let mut metadata = json!({"schema_version":1,"kind":"model"});
+        assert!(
+            publish_pair(
+                temp.path(),
+                "lost.gltf",
+                &mut unbacked,
+                &mut metadata,
+                &mut report
+            )
+            .is_err()
+        );
+        let mut missing = json!({"asset":{"version":"2.0"},"images":[
+            {"name":"gone","extras":{"chronicle_two":{"png":"gone.png"}}}
+        ]});
+        assert!(
+            publish_pair(
+                temp.path(),
+                "lost.gltf",
+                &mut missing,
+                &mut metadata,
+                &mut report
+            )
+            .is_err()
+        );
+
+        let embedded = port.join("embedded.gltf");
+        save(
+            &embedded,
+            &json!({"asset":{"version":"2.0"},"images":[{"uri":format!("data:image/png;base64,{}",base64(&sky))}]}),
+        )
+        .unwrap();
+        save(
+            &port.join("embedded.game.json"),
+            &json!({"schema_version":1}),
+        )
+        .unwrap();
+        assert!(verify(temp.path()).is_err());
+        fs::remove_file(&embedded).unwrap();
+        fs::remove_file(port.join("embedded.game.json")).unwrap();
+        verify(temp.path()).unwrap();
+        fs::remove_file(port.join("shared/sky_0.png")).unwrap();
+        assert!(verify(temp.path()).is_err());
     }
     #[test]
     fn base64_padding() {
