@@ -485,6 +485,15 @@ Optional, used when present:
 Shaders are compiled for `--target-env vulkan1.4`, which emits SPIR-V 1.6 with no capability beyond
 what 1.3 supports (`spirv-val --target-env vulkan1.3` accepts all three).
 
+### Android
+
+Android asks for Vulkan 1.3 and compiles the shaders for `vulkan1.3`. Its `libvulkan` does not
+export the 1.3 commands at every API level, so `vulkan_android.cpp` defines the twelve the renderer
+calls, each forwarding to the device's own. The swapchain keeps the identity transform and leaves the
+rotation to the compositor; the SUBOPTIMAL results that rotation reports keep the swapchain while the
+surface's capabilities are unchanged. A surface lost while the app is in the background is dropped
+with its swapchain and made again on a later frame. Errors also go to the system log.
+
 ## Not done here
 
 - DATE/DATM (destination alpha test; `clsmes.cpp` MakeFukidashi) is not emulated; a stencil pass

@@ -13,6 +13,13 @@
 
 namespace {
 
+// Android shows the window fullscreen at the display's size, whatever is asked.
+#ifdef __ANDROID__
+constexpr bool kFixedWindow = true;
+#else
+constexpr bool kFixedWindow = false;
+#endif
+
 SDL_Window                              *g_window = nullptr;
 bool                                     g_headless = false;
 bool                                     g_mode_event = false;
@@ -72,6 +79,9 @@ void WindowSetIdentity(const WindowIdentity &identity) { g_identity = identity; 
 
 void WindowInit(const WindowConfig &config) {
     SDL_SetAppMetadata(g_identity.title, nullptr, g_identity.app_id);
+#ifdef __ANDROID__
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+#endif
     g_headless = config.headless;
     if (config.headless) {
 #ifdef _WIN32
@@ -123,7 +133,7 @@ void WindowSetIcon(const std::uint8_t *rgba, int size) {
 
 WindowModeResult WindowSetMode(const WindowConfig &config) {
     WindowModeResult result;
-    if (g_window == nullptr || config.headless) {
+    if (g_window == nullptr || config.headless || kFixedWindow) {
         return result;
     }
     SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);

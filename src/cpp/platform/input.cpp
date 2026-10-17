@@ -8,8 +8,11 @@
 #include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
 #include <numbers>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -188,6 +191,11 @@ std::int64_t                                             g_stick_read_serial = -
 bool                                                     g_stick_live = false;
 bool                                                     g_gamepad_subsystem = false;
 InputKeyboardMouse                                       g_scripted;
+#ifdef __ANDROID__
+// The on-screen gamepad (InputSetTouchOverlay) and whether it is shown.
+InputTouchOverlayState g_touch_overlay;
+bool                   g_touch_overlay_visible = true;
+#endif
 // The mouse is a menu's pointer (InputSetMenuMouse); the motion it has gathered for it.
 bool  g_menu_mouse = false;
 bool  g_menu_navigation = false;
@@ -242,8 +250,17 @@ bool ParseSource(std::string_view name, ActionKind kind, Source &source) {
         std::size_t star = text.find('*');
         if (star != std::string_view::npos) {
             std::string_view factor = Trim(text.substr(star + 1));
+#ifdef __ANDROID__
+            // Android's libc++ has no floating-point from_chars.
+            std::string factor_text(factor);
+            char       *end = nullptr;
+            scale = std::strtof(factor_text.c_str(), &end);
+            bool parsed = !factor_text.empty() && end == factor_text.c_str() + factor_text.size();
+#else
             auto [end, error] = std::from_chars(factor.data(), factor.data() + factor.size(), scale);
-            if (error != std::errc{} || end != factor.data() + factor.size() || !std::isfinite(scale)) {
+            bool parsed = error == std::errc{} && end == factor.data() + factor.size();
+#endif
+            if (!parsed || !std::isfinite(scale)) {
                 return false;
             }
             text = Trim(text.substr(0, star));
@@ -795,6 +812,24 @@ static InputGlyphFamily GamepadFamily(SDL_Gamepad *gamepad) {
                                       SDL_GetGamepadProduct(gamepad));
 }
 
+#ifdef __ANDROID__
+// The on-screen gamepad stands in for physical devices, so it hides while one is connected or held.
+bool TouchOverlayWanted() {
+    if (std::ranges::any_of(g_slots, [](const PadSlot &slot) { return slot.gamepad != nullptr; }) ||
+        SDL_HasKeyboard() || MouseButtons() != 0 || std::ranges::find(g_keys, true) != g_keys.end()) {
+        return false;
+    }
+    int                                                 count = 0;
+    std::unique_ptr<SDL_MouseID[], decltype(&SDL_free)> mice(SDL_GetMice(&count), SDL_free);
+    if (mice == nullptr) {
+        return true;
+    }
+    // Touches and pens move the pointer under ids of their own; they are not a mouse.
+    return std::ranges::all_of(std::span(mice.get(), static_cast<std::size_t>(count)),
+                               [](SDL_MouseID id) { return id == SDL_TOUCH_MOUSEID || id == SDL_PEN_MOUSEID; });
+}
+#endif
+
 void InputPoll() {
     EnsureBindings();
     if (g_gamepad_subsystem) {
@@ -803,6 +838,9 @@ void InputPoll() {
     if (g_slots[0].gamepad != nullptr) {
         g_pad_family = GamepadFamily(g_slots[0].gamepad);
     }
+#ifdef __ANDROID__
+    g_touch_overlay_visible = TouchOverlayWanted();
+#endif
     for (int pad = 0; pad < kInputPadCount; ++pad) {
         InputPadState state;
         state.connected = pad == 0 || g_slots[pad].gamepad != nullptr;
@@ -1029,12 +1067,33 @@ void InputNoteLeftStickRead() { g_stick_read_serial = g_latch_serial; }
 
 bool InputLeftStickLive() { return g_stick_live; }
 
+#ifdef __ANDROID__
+void InputSetTouchOverlay(const InputTouchOverlayState &state) {
+    g_touch_overlay = state;
+    if (state.buttons != 0 || state.left_x != 0.0f || state.left_y != 0.0f || state.right_x != 0.0f ||
+        state.right_y != 0.0f) {
+        g_last_keyboard = false;
+    }
+}
+
+bool InputTouchOverlayVisible() { return g_touch_overlay_visible; }
+#endif
+
 const InputPadState &InputGetPad(int pad) {
     static const InputPadState kAbsent;
     if (pad < 0 || pad >= kInputPadCount) {
         return kAbsent;
     }
     g_view[pad] = g_override[pad] ? *g_override[pad] : g_state[pad];
+#ifdef __ANDROID__
+    if (pad == 0 && g_touch_overlay_visible && !g_override[pad]) {
+        g_view[pad].buttons |= g_touch_overlay.buttons;
+        g_view[pad].left_x = InputStickByte(g_touch_overlay.left_x);
+        g_view[pad].left_y = InputStickByte(g_touch_overlay.left_y);
+        g_view[pad].right_x = InputStickByte(g_touch_overlay.right_x);
+        g_view[pad].right_y = InputStickByte(g_touch_overlay.right_y);
+    }
+#endif
     if (g_keyboard_stick_navigation && !g_stick_live) {
         g_view[pad].buttons |= g_view[pad].stick_dpad;
     }

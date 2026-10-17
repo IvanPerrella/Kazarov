@@ -27,6 +27,10 @@ inline constexpr uint32_t kFirstUserSlot = 3;
 [[noreturn]] void Fatal(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void              Error(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void              Check(VkResult result, const char *call);
+#ifdef __ANDROID__
+// Resolves the Vulkan 1.3 commands Android's loader does not export (vulkan_android.cpp).
+void LoadCoreDeviceCommands(VkDevice device);
+#endif
 
 // ---- Memory ----------------------------------------------------------------------------------
 
@@ -163,6 +167,11 @@ struct Swapchain {
     VkExtent2D               extent = {};
     std::vector<VkImage>     images;
     std::vector<VkSemaphore> render_finished;
+#ifdef __ANDROID__
+    // The surface's capabilities when the swapchain was made, and whether the compositor rotates it.
+    VkSurfaceCapabilitiesKHR capabilities = {};
+    bool                     compositor_rotation = false;
+#endif
 };
 
 // Draw-path state that persists in the command buffer between draws.

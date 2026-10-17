@@ -4,8 +4,12 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
+#include <ranges>
 #include <sstream>
+#include <string>
+#include <type_traits>
 
 #include "platform/paths.hpp"
 
@@ -44,10 +48,24 @@ InputPadState Released() {
     return state;
 }
 
+// Android's libc++ has no floating-point std::from_chars.
+#ifdef __ANDROID__
+constexpr bool kFloatFromChars = false;
+#else
+constexpr bool kFloatFromChars = true;
+#endif
+
 template <class T>
 bool ParseNumber(std::string_view token, T &value) {
-    auto [end, error] = std::from_chars(token.data(), token.data() + token.size(), value);
-    return error == std::errc() && end == token.data() + token.size();
+    if constexpr (kFloatFromChars || !std::is_floating_point_v<T>) {
+        auto [end, error] = std::from_chars(token.data(), token.data() + token.size(), value);
+        return error == std::errc() && end == token.data() + token.size();
+    } else {
+        std::string text(token);
+        char       *end = nullptr;
+        value = static_cast<T>(std::strtod(text.c_str(), &end));
+        return !text.empty() && end == text.c_str() + text.size();
+    }
 }
 
 std::vector<std::string_view> Tokens(std::string_view line) {
@@ -183,8 +201,10 @@ bool InputScriptParse(std::string_view text, InputScript &script, std::string &e
             return false;
         }
         auto same_pad = [&](const InputScriptStep &other) { return other.pad == step.pad; };
-        auto previous = std::ranges::find_last_if(script.steps, same_pad);
-        if (!previous.empty() && step.frame < previous.front().frame) {
+        // A reversed view rather than std::ranges::find_last_if, which Android's libc++ lacks.
+        auto earlier = std::views::reverse(script.steps);
+        auto previous = std::ranges::find_if(earlier, same_pad);
+        if (previous != earlier.end() && step.frame < previous->frame) {
             error = "line " + std::to_string(number) + ": frames must not decrease";
             return false;
         }

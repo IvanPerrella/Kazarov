@@ -8,7 +8,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <type_traits>
 #include <vector>
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 #include "gfx/context.hpp"
 #include "gfx/displaylist.hpp"
@@ -19,12 +24,27 @@ namespace detail {
 
 Context g;
 
-void Fatal(const char *format, ...) {
-    std::va_list args;
-    va_start(args, format);
+namespace {
+
+// Writes a message to stderr and, on Android, where stderr is not shown, to the system log.
+void Report([[maybe_unused]] bool fatal, const char *format, std::va_list args) {
+#ifdef __ANDROID__
+    std::va_list log_args{};
+    va_copy(log_args, args);
+    __android_log_vprint(fatal ? ANDROID_LOG_ERROR : ANDROID_LOG_WARN, "gfx", format, log_args);
+    va_end(log_args);
+#endif
     std::fputs("gfx: ", stderr);
     std::vfprintf(stderr, format, args);
     std::fputc('\n', stderr);
+}
+
+} // namespace
+
+void Fatal(const char *format, ...) {
+    std::va_list args;
+    va_start(args, format);
+    Report(true, format, args);
     va_end(args);
     std::exit(1);
 }
@@ -35,9 +55,7 @@ void Error(const char *format, ...) {
     }
     std::va_list args;
     va_start(args, format);
-    std::fputs("gfx: ", stderr);
-    std::vfprintf(stderr, format, args);
-    std::fputc('\n', stderr);
+    Report(false, format, args);
     va_end(args);
 }
 
@@ -126,7 +144,12 @@ void CreateInstance() {
     app.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     app.pEngineName = "Kazarov";
     app.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+#ifdef __ANDROID__
+    // The NDK's headers and loader stop at Vulkan 1.3, the renderer's floor.
+    app.apiVersion = VK_API_VERSION_1_3;
+#else
     app.apiVersion = VK_API_VERSION_1_4;
+#endif
 
     VkDebugUtilsMessengerCreateInfoEXT messenger = {};
     messenger.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
@@ -213,7 +236,7 @@ void PickPhysicalDevice() {
             Error("%s cannot be used; it lacks %s", properties.deviceName, Join(missing).c_str());
             continue;
         }
-        int score = properties.apiVersion >= VK_API_VERSION_1_4 ? 1 : 0;
+        int score = properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 4, 0) ? 1 : 0;
         if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
             score += 4;
         } else if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
@@ -346,6 +369,9 @@ void CreateDevice() {
     info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     info.ppEnabledExtensionNames = extensions.data();
     Check(vkCreateDevice(g.physical_device, &info, nullptr, &g.device), "vkCreateDevice");
+#ifdef __ANDROID__
+    LoadCoreDeviceCommands(g.device);
+#endif
     vkGetDeviceQueue(g.device, g.queue_family, 0, &g.queue);
     if (g.dynamic_color_write_mask) {
         g.cmd_set_color_write_mask = reinterpret_cast<PFN_vkCmdSetColorWriteMaskEXT>(
@@ -396,10 +422,75 @@ void DestroySwapchainResources() {
     g.swapchain.images.clear();
 }
 
+#ifdef __ANDROID__
+// Android takes the window's surface away while the app is in the background. The swapchain and
+// surface are dropped then and made again, on a later frame, once the window is back.
+void DropSurface() {
+    if (g.swapchain.handle != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(g.device, g.swapchain.handle, nullptr);
+        g.swapchain.handle = VK_NULL_HANDLE;
+    }
+    if (g.surface != VK_NULL_HANDLE) {
+        SDL_Vulkan_DestroySurface(g.instance, g.surface, nullptr);
+        g.surface = VK_NULL_HANDLE;
+    }
+    g.resize_pending = true;
+}
+
+bool EnsureSurface() {
+    if (g.surface == VK_NULL_HANDLE && !SDL_Vulkan_CreateSurface(g.window, g.instance, nullptr, &g.surface)) {
+        Error("SDL_Vulkan_CreateSurface: %s", SDL_GetError());
+        g.surface = VK_NULL_HANDLE;
+        g.resize_pending = true;
+        return false;
+    }
+    return true;
+}
+#endif
+
+// Whether a result means the swapchain no longer matches its surface and must be made again.
+bool SwapchainLost(VkResult result) {
+#ifdef __ANDROID__
+    if (result == VK_ERROR_SURFACE_LOST_KHR) {
+        return true;
+    }
+#endif
+    return result == VK_ERROR_OUT_OF_DATE_KHR;
+}
+
+// Whether a SUBOPTIMAL result calls for a new swapchain. Android reports it on every present while
+// the compositor rotates the frame, so there the swapchain is kept while the surface is unchanged.
+bool SuboptimalNeedsRecreate() {
+#ifdef __ANDROID__
+    VkSurfaceCapabilitiesKHR current;
+    if (g.swapchain.compositor_rotation &&
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g.physical_device, g.surface, &current) == VK_SUCCESS) {
+        static_assert(std::has_unique_object_representations_v<VkSurfaceCapabilitiesKHR>);
+        return std::memcmp(&current, &g.swapchain.capabilities, sizeof current) != 0;
+    }
+#endif
+    return true;
+}
+
 bool CreateSwapchain() {
+#ifdef __ANDROID__
+    if (!EnsureSurface()) {
+        return false;
+    }
+#endif
     VkSurfaceCapabilitiesKHR capabilities;
-    Check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g.physical_device, g.surface, &capabilities),
-          "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    VkResult                 surface =
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g.physical_device, g.surface, &capabilities);
+#ifdef __ANDROID__
+    if (surface == VK_ERROR_SURFACE_LOST_KHR) {
+        DropSurface();
+        if (!EnsureSurface()) {
+            return false;
+        }
+        surface = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g.physical_device, g.surface, &capabilities);
+    }
+#endif
+    Check(surface, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
     if (!(capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
         Fatal("the surface cannot be a transfer destination");
     }
@@ -437,17 +528,36 @@ bool CreateSwapchain() {
     info.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = capabilities.currentTransform;
+#ifdef __ANDROID__
+    // The compositor rotates the landscape frame onto the display.
+    if ((capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) != 0) {
+        info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    }
+#endif
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     info.presentMode = PickPresentMode();
     info.clipped = VK_TRUE;
     info.oldSwapchain = old;
-    Check(vkCreateSwapchainKHR(g.device, &info, nullptr, &g.swapchain.handle), "vkCreateSwapchainKHR");
+    VkSwapchainKHR created = VK_NULL_HANDLE;
+    VkResult       result = vkCreateSwapchainKHR(g.device, &info, nullptr, &created);
+#ifdef __ANDROID__
+    if (result == VK_ERROR_NATIVE_WINDOW_IN_USE_KHR || result == VK_ERROR_SURFACE_LOST_KHR) {
+        DropSurface();
+        return false;
+    }
+#endif
+    Check(result, "vkCreateSwapchainKHR");
+    g.swapchain.handle = created;
     if (old != VK_NULL_HANDLE) {
         vkDestroySwapchainKHR(g.device, old, nullptr);
     }
 
     g.swapchain.format = format.format;
     g.swapchain.extent = extent;
+#ifdef __ANDROID__
+    g.swapchain.capabilities = capabilities;
+    g.swapchain.compositor_rotation = info.preTransform != capabilities.currentTransform;
+#endif
     uint32_t count = 0;
     vkGetSwapchainImagesKHR(g.device, g.swapchain.handle, &count, nullptr);
     g.swapchain.images.resize(count);
@@ -927,7 +1037,7 @@ bool AcquireImage(bool targets) {
     }
     VkResult result = vkAcquireNextImageKHR(g.device, g.swapchain.handle, UINT64_MAX,
                                             CurrentFrame().image_available, VK_NULL_HANDLE, &g.image_index);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+    if (SwapchainLost(result)) {
         // Recreating may submit pending uploads and move to the next slot.
         if (!RecreateSwapchain(targets)) {
             SubmitUploadsAndWait();
@@ -937,7 +1047,9 @@ bool AcquireImage(bool targets) {
                                        CurrentFrame().image_available, VK_NULL_HANDLE, &g.image_index);
     }
     if (result == VK_SUBOPTIMAL_KHR) {
-        g.resize_pending = true;
+        if (SuboptimalNeedsRecreate()) {
+            g.resize_pending = true;
+        }
     } else if (result != VK_SUCCESS) {
         Error("vkAcquireNextImageKHR failed (%d)", static_cast<int>(result));
         SubmitUploadsAndWait();
@@ -981,7 +1093,11 @@ void PresentImage(Frame &frame, VkCommandBuffer cmd, Image &source) {
     present.pSwapchains = &g.swapchain.handle;
     present.pImageIndices = &g.image_index;
     VkResult result = vkQueuePresentKHR(g.queue, &present);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+    if (result == VK_SUBOPTIMAL_KHR) {
+        if (SuboptimalNeedsRecreate()) {
+            g.resize_pending = true;
+        }
+    } else if (SwapchainLost(result)) {
         g.resize_pending = true;
     } else {
         Check(result, "vkQueuePresentKHR");
