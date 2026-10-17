@@ -313,8 +313,9 @@ when the game's data-version check reports missing or outdated data. It returns
 setup before starting. Window initialization failures cross the bridge as errors.
 The game should recheck its data marker before continuing startup.
 
-Setup provides an editable source path, **Choose folder**, a progress bar and
-**Okay**. The source can be a disc folder or a typed ISO path. The picker is native
+Setup provides an editable source path, **Choose image**, **Choose folder**, a
+progress bar and **Okay**. The source can be a disc folder or an ISO image; a folder
+holding no `DATA.DAT` and a single `.iso` file stands for that image. The pickers are native
 on Windows and macOS, and uses the XDG desktop portal on Linux; Linux installations
 need a portal backend for their desktop. The setup window uses eframe/egui with
 OpenGL and supports X11 and Wayland. Linux build dependencies are included in the
