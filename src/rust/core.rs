@@ -1,21 +1,27 @@
+use progress::{Phase, Reporter, Stage};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
+#[path = "actions.rs"]
+pub mod actions;
 #[path = "archive.rs"]
 pub mod archive;
 #[path = "audio.rs"]
 pub mod audio;
 #[path = "configs.rs"]
 pub mod configs;
+#[path = "configs_native.rs"]
+pub mod configs_native;
 #[path = "models.rs"]
 pub mod models;
 #[path = "native_scripts.rs"]
 pub mod native_scripts;
 #[path = "packs.rs"]
 pub mod packs;
+#[path = "progress.rs"]
+pub mod progress;
 #[path = "publish.rs"]
 pub mod publish;
 #[path = "textures.rs"]
@@ -70,18 +76,40 @@ pub struct CheckReport {
     pub textures: u64,
 }
 
-fn source_fingerprint(source: &Path) -> CoreResult<String> {
-    fn hash_file(path: &Path, hash: &mut Sha256) -> CoreResult<()> {
+fn source_fingerprint(source: &Path, phase: &Phase) -> CoreResult<String> {
+    fn hash_file(path: &Path, hash: &mut Sha256, phase: &Phase) -> CoreResult<()> {
+        const CHUNK: usize = 4 << 20;
         let mut file = std::fs::File::open(path)?;
-        let mut buffer = vec![0u8; 1024 * 1024];
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            hash.update(&buffer[..count]);
+        let (full, filled) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(2);
+        let (empty, recycled) = std::sync::mpsc::sync_channel::<Vec<u8>>(3);
+        for _ in 0..3 {
+            empty.send(vec![0; CHUNK]).expect("fingerprint buffers");
         }
-        Ok(())
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                while let Ok(mut buffer) = recycled.recv() {
+                    buffer.resize(CHUNK, 0);
+                    let read = file.read(&mut buffer).map(|count| {
+                        buffer.truncate(count);
+                        buffer
+                    });
+                    let end = read.as_ref().map_or(true, Vec::is_empty);
+                    if full.send(read).is_err() || end {
+                        break;
+                    }
+                }
+            });
+            while let Ok(buffer) = filled.recv() {
+                let buffer = buffer?;
+                if buffer.is_empty() {
+                    break;
+                }
+                hash.update(&buffer);
+                phase.inc(buffer.len() as u64);
+                let _ = empty.send(buffer);
+            }
+            Ok(())
+        })
     }
     fn gather(dir: &Path, out: &mut Vec<PathBuf>) -> CoreResult<()> {
         for entry in std::fs::read_dir(dir)? {
@@ -103,8 +131,10 @@ fn source_fingerprint(source: &Path) -> CoreResult<String> {
     let mut hash = Sha256::new();
     if source.is_file() {
         hash.update(b"kazarov-source-file-v1\0");
-        hash.update(std::fs::metadata(source)?.len().to_le_bytes());
-        hash_file(source, &mut hash)?;
+        let length = std::fs::metadata(source)?.len();
+        phase.set_total(length);
+        hash.update(length.to_le_bytes());
+        hash_file(source, &mut hash, phase)?;
     } else if source.is_dir() {
         hash.update(b"kazarov-source-tree-v1\0");
         let mut paths = Vec::new();
@@ -115,7 +145,17 @@ fn source_fingerprint(source: &Path) -> CoreResult<String> {
                 .to_string_lossy()
                 .replace('\\', "/")
         });
+        let mut entries = Vec::with_capacity(paths.len());
         for path in paths {
+            let length = if path.is_dir() {
+                None
+            } else {
+                Some(std::fs::metadata(&path)?.len())
+            };
+            phase.add_total(length.unwrap_or(0));
+            entries.push((path, length));
+        }
+        for (path, length) in entries {
             let relative = path
                 .strip_prefix(source)
                 .map_err(|e| CoreError(e.to_string()))?
@@ -124,12 +164,14 @@ fn source_fingerprint(source: &Path) -> CoreResult<String> {
             let bytes = relative.as_bytes();
             hash.update((bytes.len() as u64).to_le_bytes());
             hash.update(bytes);
-            if path.is_dir() {
-                hash.update(b"D");
-            } else {
-                hash.update(b"F");
-                hash.update(std::fs::metadata(&path)?.len().to_le_bytes());
-                hash_file(&path, &mut hash)?;
+            match length {
+                None => hash.update(b"D"),
+                Some(length) => {
+                    hash.update(b"F");
+                    hash.update(length.to_le_bytes());
+                    phase.item(&relative);
+                    hash_file(&path, &mut hash, phase)?;
+                }
             }
         }
     } else {
@@ -202,51 +244,10 @@ fn source_state(source: &Path) -> CoreResult<serde_json::Value> {
     Ok(serde_json::json!({"path":path,"fingerprint":fingerprint}))
 }
 
-/// Coalesces parallel progress callbacks for stderr; the bar never moves backwards.
-#[derive(Default)]
-struct ExtractCliProgress {
-    coalesced_fraction: f32,
-    coalesced_message: &'static str,
-    printed_fraction: f32,
-    printed_message: &'static str,
-}
-
-impl ExtractCliProgress {
-    fn advance(&mut self, fraction: f32, message: &'static str) {
-        if fraction >= self.coalesced_fraction {
-            self.coalesced_fraction = fraction.clamp(0.0, 1.0);
-            self.coalesced_message = message;
-        }
-    }
-
-    fn maybe_eprint(&mut self) {
-        let message_changed = self.coalesced_message != self.printed_message;
-        let step = self.coalesced_fraction - self.printed_fraction >= 0.01
-            || self.coalesced_fraction >= 0.99;
-        if !message_changed && !step {
-            return;
-        }
-        eprintln!(
-            "dc2data: [{:>3.0}%] {}",
-            self.coalesced_fraction * 100.0,
-            self.coalesced_message
-        );
-        self.printed_fraction = self.coalesced_fraction;
-        self.printed_message = self.coalesced_message;
-    }
-}
-
-fn extract_cli_progress() -> impl Fn(f32, &'static str) + Sync {
-    let state = Mutex::new(ExtractCliProgress::default());
-    move |fraction, message| {
-        let mut progress = state.lock().expect("extract progress lock");
-        progress.advance(fraction, message);
-        progress.maybe_eprint();
-    }
-}
-
 pub fn extract(source: &Path, data_out: &Path, jobs: usize) -> CoreResult<ExtractReport> {
-    extract_with_progress(source, data_out, jobs, &extract_cli_progress())
+    Reporter::new(&|_, _| {})
+        .with_console()
+        .run(|reporter| extract_stages(source, data_out, jobs, reporter))
 }
 
 /// Recognizes a complete, verified archive staged for the unchanged source.
@@ -254,21 +255,51 @@ fn completed_stage_pngs(
     published: &Path,
     state: &serde_json::Value,
     source_sha256: &str,
+    phase: &Phase,
 ) -> Option<u64> {
     let marker = publish::read_marker(published).ok()?;
     if marker["source_state"] != *state || marker["source_sha256"].as_str() != Some(source_sha256) {
         return None;
     }
-    publish::verify(published).ok()
+    publish::verify_with_progress(published, phase).ok()
 }
 
-/// Extracts and publishes data, reporting completed work in weighted phases.
+/// Extracts and publishes data, reporting weighted stage progress from a fixed-cadence ticker.
 /// Callbacks can run concurrently; 100% is emitted only after successful publication.
 pub fn extract_with_progress(
     source: &Path,
     data_out: &Path,
     jobs: usize,
     progress: &(dyn Fn(f32, &'static str) + Sync),
+) -> CoreResult<ExtractReport> {
+    Reporter::new(progress).run(|reporter| extract_stages(source, data_out, jobs, reporter))
+}
+
+const WORKER_STACK: usize = 16 << 20;
+
+fn join<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    handle
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn summary(report: &ExtractReport, marker: &serde_json::Value) -> String {
+    format!(
+        "{} source files ({}) · {} texture sources · {} PNGs · data.zip {} in {} entries",
+        progress::group(report.files),
+        progress::size(report.bytes),
+        progress::group(report.texture_sources),
+        progress::group(report.pngs),
+        progress::size(marker["archive_size"].as_u64().unwrap_or(0)),
+        progress::group(marker["archive_entries"].as_u64().unwrap_or(0)),
+    )
+}
+
+fn extract_stages(
+    source: &Path,
+    data_out: &Path,
+    jobs: usize,
+    reporter: &Reporter<'_>,
 ) -> CoreResult<ExtractReport> {
     if data_out.file_name().is_none_or(|name| name != "data") {
         return Err(CoreError("output must be <game-root>/data".into()));
@@ -284,9 +315,16 @@ pub fn extract_with_progress(
     if source.is_dir() && root.canonicalize()?.starts_with(&source) {
         return Err(CoreError("The output must be outside the source disc folder. Choose the folder containing the original disc files.".into()));
     }
-    progress(0.0, "Checking source files…");
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .stack_size(WORKER_STACK)
+        .thread_name(|index| format!("dc2data-worker-{index}"))
+        .build()
+        .map_err(|error| CoreError(format!("cannot start conversion workers: {error}")))?;
+    let phase = reporter.phase(Stage::Fingerprint);
     let initial_state = source_state(&source)?;
-    let source_sha256 = source_fingerprint(&source)?;
+    let source_sha256 = source_fingerprint(&source, &phase)?;
+    reporter.done(Stage::Fingerprint);
     let metadata = serde_json::json!({
         "schema_version":1,"data_version":data_version(),"source":source.to_string_lossy(),
         "source_sha256":source_sha256,"jobs":jobs,
@@ -294,8 +332,15 @@ pub fn extract_with_progress(
     let stage = publish::acquire_stage(root, &metadata)?;
     let raw = stage.path().join("raw");
     let published = stage.path().join("published");
-    progress(0.02, "Checking saved conversion…");
-    if let Some(pngs) = completed_stage_pngs(&published, &initial_state, &source_sha256) {
+    let cached = reporter.phase(Stage::VerifyArchive);
+    if let Some(pngs) =
+        pool.install(|| completed_stage_pngs(&published, &initial_state, &source_sha256, &cached))
+    {
+        reporter.done(Stage::VerifyArchive);
+        for skipped in &Stage::ALL[Stage::Extract as usize..=Stage::Seal as usize] {
+            reporter.skip(*skipped);
+        }
+        reporter.log("reusing the verified conversion staged for this source");
         let (files, bytes) = archive::extraction_totals(&source)?;
         let marker = publish::read_marker(&published)?;
         let report = ExtractReport {
@@ -307,84 +352,115 @@ pub fn extract_with_progress(
         if source_state(&source)? != initial_state {
             return Err(CoreError("source changed during extraction".into()));
         }
-        progress(0.99, "Publishing verified data…");
+        reporter.phase(Stage::Publish);
         publish::publish_verified(&published, root)?;
         let stage_path = stage.path().to_path_buf();
         drop(stage);
         std::fs::remove_dir_all(stage_path)?;
-        progress(1.0, "Ready — starting game…");
+        reporter.done(Stage::Publish);
+        reporter.footer(summary(&report, &marker));
         return Ok(report);
     }
+    cached.reset();
     if published.is_dir() {
         std::fs::remove_dir_all(&published)?;
     }
-    progress(0.05, "Extracting files…");
+    let phase = reporter.phase(Stage::Extract);
     let (files, bytes) =
-        archive::extract_raw_with_progress(&source, &raw, jobs, &|done, total| {
-            progress(
-                0.05 + 0.25 * done as f32 / total.max(1) as f32,
-                "Extracting files…",
-            );
-        })?;
-    progress(0.30, "Converting textures…");
+        pool.install(|| archive::extract_raw_with_progress(&source, &raw, jobs, &phase))?;
+    reporter.done(Stage::Extract);
+    let phase = reporter.phase(Stage::Textures);
     let converted =
-        textures::convert_tree_with_progress(&raw, &published, jobs, &|done, total| {
-            progress(
-                0.30 + 0.38 * done as f32 / total.max(1) as f32,
-                "Converting textures…",
-            );
-        })?;
-    progress(0.68, "Converting audio…");
-    audio::convert_tree(&raw, &published, jobs)?;
-    progress(0.70, "Converting models and animation…");
-    let converted_models = models::convert_tree(&raw, &published, jobs, &converted.documents)?;
-    textures::remove_embedded(
-        &published,
-        &converted.documents,
-        &converted_models.consumed_texture_sources,
-        &converted_models.referenced_pngs,
-    )?;
-    progress(0.71, "Converting configuration…");
-    configs::convert_tree(&raw, &published, jobs)?;
-    native_scripts::convert_tree(&raw, &published)?;
-    packs::convert_tree(&raw, &published)?;
-    native_scripts::verify_tree(&raw, &published)?;
-    publish::finalize_assets(&published)?;
-    progress(0.72, "Verifying converted data…");
-    publish::verify_trees(&published)?;
+        pool.install(|| textures::convert_tree_with_progress(&raw, &published, jobs, &phase))?;
+    reporter.done(Stage::Textures);
+    // Audio and model conversion write disjoint port_data trees and leave data/ untouched.
+    let audio_phase = reporter.phase(Stage::Audio);
+    let models_phase = reporter.phase(Stage::Models);
+    let (audio, converted_models) = std::thread::scope(|scope| {
+        let audio = std::thread::Builder::new()
+            .name("dc2data-audio".into())
+            .stack_size(WORKER_STACK)
+            .spawn_scoped(scope, || {
+                let result = pool.install(|| audio::convert_assets(&raw, &published, &audio_phase));
+                if result.is_ok() {
+                    reporter.done(Stage::Audio);
+                }
+                result
+            })?;
+        let models = pool.install(|| {
+            models::convert_tree(&raw, &published, &converted.documents, &models_phase)
+        });
+        if models.is_ok() {
+            reporter.done(Stage::Models);
+        }
+        CoreResult::Ok((join(audio), models))
+    })?;
+    audio?;
+    let converted_models = converted_models?;
+    let phase = reporter.phase(Stage::Cleanup);
+    pool.install(|| -> CoreResult<()> {
+        audio::strip_data(&raw, &published, &phase)?;
+        models::strip_data(&raw, &published, &converted_models, &phase)?;
+        textures::remove_embedded(
+            &published,
+            &converted.documents,
+            &converted_models.consumed_texture_sources,
+            &converted_models.referenced_pngs,
+        )
+    })?;
+    reporter.done(Stage::Cleanup);
+    let phase = reporter.phase(Stage::Configs);
+    pool.install(|| configs::convert_tree(&raw, &published, &phase))?;
+    reporter.done(Stage::Configs);
+    let phase = reporter.phase(Stage::Scripts);
+    pool.install(|| native_scripts::convert_tree(&raw, &published, &phase))?;
+    reporter.done(Stage::Scripts);
+    let phase = reporter.phase(Stage::Packs);
+    pool.install(|| packs::convert_tree(&raw, &published, &phase))?;
+    reporter.done(Stage::Packs);
+    let phase = reporter.phase(Stage::VerifyScripts);
+    pool.install(|| native_scripts::verify_tree(&raw, &published, &phase))?;
+    reporter.done(Stage::VerifyScripts);
+    let phase = reporter.phase(Stage::VerifyTrees);
+    pool.install(|| -> CoreResult<u64> {
+        publish::finalize_assets(&published)?;
+        publish::verify_trees(&published, &phase)
+    })?;
     if source_state(&source)? != initial_state {
         return Err(CoreError("source changed during extraction".into()));
     }
-    // The raw tree only feeds conversion; removing it before packing lowers peak disk use.
-    std::fs::remove_dir_all(&raw)?;
-    progress(0.75, "Packing data…");
-    publish::seal(
-        &published,
-        serde_json::json!({
-            "schema_version":1,"data_version":data_version(),"source_state":initial_state,
-            "source_sha256":source_sha256,"texture_sources":converted.sources,
-        }),
-        &|done, total| {
-            progress(
-                0.75 + 0.19 * done as f32 / total.max(1) as f32,
-                "Packing data…",
-            );
-        },
-    )?;
-    progress(0.94, "Verifying packed data…");
-    publish::verify(&published)?;
-    progress(0.99, "Publishing data…");
+    reporter.done(Stage::VerifyTrees);
+    let phase = reporter.phase(Stage::Seal);
+    let marker = serde_json::json!({
+        "schema_version":1,"data_version":data_version(),"source_state":initial_state,
+        "source_sha256":source_sha256,"texture_sources":converted.sources,
+    });
+    // The raw tree only feeds conversion; removing it while packing lowers peak disk use.
+    std::thread::scope(|scope| {
+        let removal = scope.spawn(|| std::fs::remove_dir_all(&raw));
+        let written = pool.install(|| publish::seal(&published, marker, &phase));
+        join(removal)?;
+        written
+    })?;
+    reporter.done(Stage::Seal);
+    let phase = reporter.phase(Stage::VerifyArchive);
+    pool.install(|| publish::verify_with_progress(&published, &phase))?;
+    reporter.done(Stage::VerifyArchive);
+    reporter.phase(Stage::Publish);
+    let marker = publish::read_marker(&published)?;
     publish::publish_verified(&published, root)?;
     let stage_path = stage.path().to_path_buf();
     drop(stage);
     std::fs::remove_dir_all(stage_path)?;
-    progress(1.0, "Ready — starting game…");
-    Ok(ExtractReport {
+    reporter.done(Stage::Publish);
+    let report = ExtractReport {
         files,
         bytes,
         texture_sources: converted.sources,
         pngs: converted.pngs,
-    })
+    };
+    reporter.footer(summary(&report, &marker));
+    Ok(report)
 }
 
 pub fn list(source: &Path) -> CoreResult<String> {
@@ -457,7 +533,7 @@ mod tests {
         std::fs::create_dir_all(root.join("port_data")).unwrap();
         let metadata = serde_json::json!({
             "schema_version":1,"data_version":data_version(),"source":source.to_string_lossy(),
-            "source_sha256":source_fingerprint(&source).unwrap(),"jobs":2,
+            "source_sha256":source_fingerprint(&source, &Phase::noop()).unwrap(),"jobs":2,
         });
         let stage = publish::acquire_stage(&root, &metadata).unwrap();
         std::fs::create_dir_all(stage.path().join("published/port_data")).unwrap();
@@ -494,7 +570,7 @@ mod tests {
                 "schema_version":1,"data_version":data_version(),"source_state":state,
                 "source_sha256":"source-content",
             }),
-            &|_, _| {},
+            &Phase::noop(),
         )
         .unwrap();
     }
@@ -506,15 +582,20 @@ mod tests {
         let state = serde_json::json!({"fingerprint":"source-state"});
         sealed_stage(&published, &state);
         assert_eq!(
-            completed_stage_pngs(&published, &state, "source-content"),
+            completed_stage_pngs(&published, &state, "source-content", &Phase::noop()),
             Some(0)
         );
         assert_eq!(
-            completed_stage_pngs(&published, &state, "different-source"),
+            completed_stage_pngs(&published, &state, "different-source", &Phase::noop()),
             None
         );
         assert_eq!(
-            completed_stage_pngs(&published, &serde_json::json!({}), "source-content"),
+            completed_stage_pngs(
+                &published,
+                &serde_json::json!({}),
+                "source-content",
+                &Phase::noop()
+            ),
             None
         );
         let zip = published.join(publish::ARCHIVE);
@@ -526,7 +607,7 @@ mod tests {
         bytes[at] = b'E';
         std::fs::write(&zip, bytes).unwrap();
         assert_eq!(
-            completed_stage_pngs(&published, &state, "source-content"),
+            completed_stage_pngs(&published, &state, "source-content", &Phase::noop()),
             None
         );
     }
@@ -541,7 +622,7 @@ mod tests {
         let state = source_state(&source).unwrap();
         sealed_stage(&root, &state);
         assert!(current(&source, &root.join("data")).unwrap());
-        let metadata = serde_json::json!({"schema_version":1,"source_sha256":source_fingerprint(&source).unwrap()});
+        let metadata = serde_json::json!({"schema_version":1,"source_sha256":source_fingerprint(&source, &Phase::noop()).unwrap()});
         let guard = publish::acquire_stage(&root, &metadata).unwrap();
         let reused = guard.path().to_path_buf();
         assert_ne!(

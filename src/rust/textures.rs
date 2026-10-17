@@ -1,3 +1,4 @@
+use super::progress::Phase;
 use super::{CoreError, CoreResult};
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -372,6 +373,23 @@ fn file_hash(path: &Path) -> CoreResult<String> {
     }
     Ok(hex_digest(&hasher.finalize()))
 }
+fn copy_hashed(source: &Path, target: &Path) -> CoreResult<String> {
+    use std::io::{Read, Write};
+    let mut input = fs::File::open(source)?;
+    let mut output = fs::File::create(target)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 4 << 20];
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        output.write_all(&buffer[..count])?;
+    }
+    fs::set_permissions(target, fs::metadata(source)?.permissions())?;
+    Ok(hex_digest(&hasher.finalize()))
+}
 fn png_rgba(width: usize, height: usize, pixels: &[u8]) -> CoreResult<Vec<u8>> {
     if pixels.len() != width * height * 4 {
         return Err(fail("invalid PNG RGBA raster"));
@@ -581,8 +599,8 @@ pub(super) fn large_known_non_texture(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower == "sound/sound.dat" || (lower.starts_with("movie/") && lower.ends_with(".pss"))
 }
-fn possible_texture(path: &Path, name: &str) -> CoreResult<bool> {
-    if fs::metadata(path)?.len() <= 128 << 20 {
+fn possible_texture(len: u64, name: &str) -> CoreResult<bool> {
+    if len <= 128 << 20 {
         return Ok(true);
     }
     if large_known_non_texture(name) {
@@ -974,7 +992,7 @@ fn prune_unmanifested(root: &Path, allowed: &BTreeSet<String>) -> CoreResult<()>
     }
     visit(root, root, allowed)
 }
-fn process_file(raw: &Path, output: &Path, path: &Path) -> CoreResult<Unit> {
+fn process_file(raw: &Path, output: &Path, path: &Path, phase: &Phase) -> CoreResult<Unit> {
     let mut unit = Unit::new();
     let relative = path.strip_prefix(raw).map_err(|e| fail(e.to_string()))?;
     let key = relative.to_string_lossy().replace('\\', "/");
@@ -982,13 +1000,17 @@ fn process_file(raw: &Path, output: &Path, path: &Path) -> CoreResult<Unit> {
         .extension()
         .and_then(|s| s.to_str())
         .is_some_and(|s| s.eq_ignore_ascii_case("img") || s.eq_ignore_ascii_case("tm2"));
-    if texture_extension && fs::metadata(path)?.len() == 0 {
+    let len = fs::metadata(path)?.len();
+    if texture_extension && len == 0 {
         unit.sources
             .push(json!({"source":key,"kind":"empty","entries":[]}));
         return Ok(unit);
     }
+    if len >= 4 << 20 {
+        phase.item(&key);
+    }
     let target = output.join("data").join(relative);
-    if possible_texture(path, &key)? {
+    let digest = if possible_texture(len, &key)? {
         let original = fs::read(path)?;
         let transformed = unit.transform(output, &original, &key, 0)?;
         let Some(bytes) = transformed else {
@@ -999,15 +1021,22 @@ fn process_file(raw: &Path, output: &Path, path: &Path) -> CoreResult<Unit> {
                 "unrecognized standalone texture format: {key}"
             )));
         }
-        write_if_changed(&target, &bytes)?;
+        let digest = write_if_changed(&target, &bytes)?;
         audit_payload(&bytes, &key)?;
+        digest
     } else {
         fs::create_dir_all(target.parent().ok_or_else(|| fail("no data parent"))?)?;
-        if !target.is_file() || file_hash(&target)? != file_hash(path)? {
-            fs::copy(path, &target)?;
+        if target.is_file() {
+            let digest = file_hash(path)?;
+            if file_hash(&target)? != digest {
+                fs::copy(path, &target)?;
+            }
+            digest
+        } else {
+            copy_hashed(path, &target)?
         }
-    }
-    unit.data_hashes.insert(key, file_hash(&target)?);
+    };
+    unit.data_hashes.insert(key, digest);
     Ok(unit)
 }
 fn bake_variants(state: &mut Unit, output: &Path, raw: &Path) -> CoreResult<()> {
@@ -1234,7 +1263,14 @@ fn runtime_document(source: &Value) -> CoreResult<Value> {
     Ok(json!({"schema_version":3,"groups":groups,"entries":entries}))
 }
 pub fn convert_tree(raw: &Path, output: &Path, jobs: usize) -> CoreResult<ConversionReport> {
-    convert_tree_with_progress(raw, output, jobs, &|_, _| {})
+    if jobs == 0 || jobs > 64 {
+        return Err(fail("jobs must be between 1 and 64"));
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .build()
+        .map_err(|e| fail(e.to_string()))?
+        .install(|| convert_tree_with_progress(raw, output, jobs, &Phase::noop()))
 }
 
 /// Reports completed conversion files while retaining deterministic output ordering.
@@ -1242,10 +1278,8 @@ pub fn convert_tree_with_progress(
     raw: &Path,
     output: &Path,
     jobs: usize,
-    progress: &(dyn Fn(usize, usize) + Sync),
+    phase: &Phase,
 ) -> CoreResult<ConversionReport> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let completed = AtomicUsize::new(0);
     if jobs == 0 || jobs > 64 {
         return Err(fail("jobs must be between 1 and 64"));
     }
@@ -1254,22 +1288,17 @@ pub fn convert_tree_with_progress(
     let mut files = Vec::new();
     collect_files(raw, raw, &mut files)?;
     files.sort();
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(jobs)
-        .build()
-        .map_err(|e| fail(e.to_string()))?;
-    let results: Vec<_> = pool.install(|| {
-        files
-            .par_iter()
-            .map(|p| {
-                let result = process_file(raw, output, p);
-                if result.is_ok() {
-                    progress(completed.fetch_add(1, Ordering::Relaxed) + 1, files.len());
-                }
-                result
-            })
-            .collect()
-    });
+    phase.set_total(files.len() as u64 + 2);
+    let results: Vec<_> = files
+        .par_iter()
+        .map(|p| {
+            let result = process_file(raw, output, p, phase);
+            if result.is_ok() {
+                phase.inc(1);
+            }
+            result
+        })
+        .collect();
     let mut state = Unit::new();
     let mut errors = Vec::new();
     for (path, result) in files.iter().zip(results) {
@@ -1306,9 +1335,11 @@ pub fn convert_tree_with_progress(
         )));
     }
     bake_variants(&mut state, output, raw)?;
+    phase.inc(1);
     let mut documents = BTreeSet::new();
     let mut aliases = BTreeSet::new();
     let mut converted_documents = Vec::with_capacity(state.sources.len());
+    let mut writes = Vec::with_capacity(state.sources.len());
     for source in &state.sources {
         let key = source["source"]
             .as_str()
@@ -1320,21 +1351,26 @@ pub fn convert_tree_with_progress(
         }
         let document = runtime_document(source)?;
         let content = pretty_json(&document)?;
-        state.written.insert(
-            path.clone(),
-            write_if_changed(&output.join("port_data").join(&path), &content)?,
-        );
+        writes.push((path.clone(), content));
         converted_documents.push(ConvertedTextureDocument {
             source_alias: key.to_owned(),
             document_path: path,
             document,
         });
     }
+    let digests: Vec<CoreResult<String>> = writes
+        .par_iter()
+        .map(|(path, content)| write_if_changed(&output.join("port_data").join(path), content))
+        .collect();
+    for ((path, _), digest) in writes.into_iter().zip(digests) {
+        state.written.insert(path, digest?);
+    }
     let pngs = state.written.keys().filter(|k| k.ends_with(".png")).count() as u64;
     let expected_port: BTreeSet<String> = state.written.keys().cloned().collect();
     let expected_data: BTreeSet<String> = state.data_hashes.keys().cloned().collect();
     prune_unmanifested(&output.join("port_data"), &expected_port)?;
     prune_unmanifested(&output.join("data"), &expected_data)?;
+    phase.inc(1);
     Ok(ConversionReport {
         sources: converted_documents.len() as u64,
         pngs,
@@ -1466,19 +1502,28 @@ pub fn remove_embedded(
         {
             return Err(fail("invalid or duplicate texture inventory source"));
         }
-        let (file, _) = check_file(&item.document_path)?;
-        let saved: Value = serde_json::from_slice(&fs::read(&file)?)?;
-        if saved != item.document {
-            return Err(fail(format!(
-                "texture document changed: {}",
-                item.document_path
-            )));
-        }
-        let assets = picture_assets(&item.document_path, &item.document)?;
-        let mut checked_assets = Vec::with_capacity(assets.len());
-        for asset in &assets {
-            checked_assets.push(check_file(asset)?);
-        }
+    }
+    let checked: Vec<CoreResult<_>> = documents
+        .par_iter()
+        .map(|item| {
+            let (file, _) = check_file(&item.document_path)?;
+            let saved: Value = serde_json::from_slice(&fs::read(&file)?)?;
+            if saved != item.document {
+                return Err(fail(format!(
+                    "texture document changed: {}",
+                    item.document_path
+                )));
+            }
+            let assets = picture_assets(&item.document_path, &item.document)?;
+            let checked_assets = assets
+                .iter()
+                .map(|asset| check_file(asset))
+                .collect::<CoreResult<Vec<_>>>()?;
+            Ok((file, checked_assets))
+        })
+        .collect();
+    for (item, checked) in documents.iter().zip(checked) {
+        let (file, checked_assets) = checked?;
         if consumed.contains(&item.source_alias) {
             consumed_files.push(file);
             consumed_assets.extend(
@@ -1494,19 +1539,23 @@ pub fn remove_embedded(
         return Err(fail("unknown consumed texture source"));
     }
     // Model images reference standalone PNGs, so consumed assets they use remain published.
-    for relative in referenced {
-        retained_assets.insert(check_file(relative)?.1);
+    let referenced: Vec<CoreResult<_>> = referenced
+        .par_iter()
+        .map(|relative| check_file(relative))
+        .collect();
+    for checked in referenced {
+        retained_assets.insert(checked?.1);
     }
-    let mut removed = Vec::new();
-    for file in consumed_files {
-        fs::remove_file(&file)?;
-        removed.push(file);
-    }
-    for (key, file) in consumed_assets {
-        if !retained_assets.contains(&key) {
-            fs::remove_file(&file)?;
-            removed.push(file);
-        }
+    let mut removed = consumed_files;
+    removed.extend(
+        consumed_assets
+            .into_iter()
+            .filter(|(key, _)| !retained_assets.contains(key))
+            .map(|(_, file)| file),
+    );
+    let deleted: Vec<std::io::Result<()>> = removed.par_iter().map(fs::remove_file).collect();
+    for result in deleted {
+        result?;
     }
     for file in removed {
         let mut parent = file.parent();
@@ -1772,7 +1821,7 @@ mod tests {
         img.extend(tim2);
         let nested = pack(&[("nested.img", &img)]);
         let original = pack(&[
-            ("wmap.cfg", b""),
+            ("scoop.cfg", b""),
             ("frametex.img", &img),
             ("inner.pac", &nested),
             ("keep.bin", b"unchanged"),
@@ -1808,13 +1857,14 @@ mod tests {
                     .is_file()
             );
         }
-        super::super::configs::convert_tree(&raw, &output, 1).unwrap();
+        super::super::configs::convert_tree(&raw, &output, &Phase::noop()).unwrap();
         let empty: Value = serde_json::from_slice(
-            &fs::read(output.join("port_data/bundle.pac/wmap.cfg.json")).unwrap(),
+            &fs::read(output.join("port_data/bundle.pac/scoop.cfg.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(empty["commands"], json!([]));
-        super::super::packs::convert_tree(&raw, &output).unwrap();
+        assert_eq!(empty["kind"], "scoop_texts");
+        assert_eq!(empty["entries"], json!([]));
+        super::super::packs::convert_tree(&raw, &output, &Phase::noop()).unwrap();
         assert!(!output.join("port_data/bundle.pac/frametex.img").exists());
         assert!(
             !output

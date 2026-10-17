@@ -1,5 +1,7 @@
 //! Migrates compiled-script resource operands to directly published native files.
+use super::progress::Phase;
 use super::{CoreError, CoreResult};
+use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -191,12 +193,20 @@ fn normalize(value: &str) -> String {
         .trim_end_matches(";1")
         .to_owned()
 }
+#[derive(Default)]
 struct Inventory {
     paths: BTreeMap<String, String>,
     leaves: BTreeMap<String, BTreeSet<String>>,
     profiles: BTreeMap<String, BTreeSet<String>>,
 }
 impl Inventory {
+    fn merge(&mut self, other: Inventory) {
+        self.paths.extend(other.paths);
+        self.profiles.extend(other.profiles);
+        for (leaf, targets) in other.leaves {
+            self.leaves.entry(leaf).or_default().extend(targets);
+        }
+    }
     fn resource(&self, text: &str) -> Option<String> {
         let key = normalize(text);
         if let Some(path) = self.paths.get(&key) {
@@ -568,24 +578,11 @@ fn migrate_container(
     Ok((output, changes))
 }
 /// Rewrites resource operands in retained bytecode after native assets have been published.
-pub fn convert_tree(raw: &Path, published: &Path) -> CoreResult<()> {
+pub fn convert_tree(raw: &Path, published: &Path, phase: &Phase) -> CoreResult<()> {
     let assets = published.join("port_data");
-    let mut inventory = Inventory {
-        paths: BTreeMap::new(),
-        leaves: BTreeMap::new(),
-        profiles: BTreeMap::new(),
-    };
-    let mut files = Vec::new();
-    gather(raw, &mut files)?;
-    for p in files {
-        let alias = p
-            .strip_prefix(raw)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase();
-        inventory_resource(&fs::read(p)?, &alias, &assets, &mut inventory, 0)?;
-    }
+    let mut raw_files = Vec::new();
+    gather(raw, &mut raw_files)?;
+    raw_files.sort();
     let mut files = Vec::new();
     if published.join("data").is_dir() {
         gather(&published.join("data"), &mut files)?;
@@ -599,18 +596,52 @@ pub fn convert_tree(raw: &Path, published: &Path) -> CoreResult<()> {
             .into_iter()
             .filter(|p| p.extension().is_some_and(|v| v == "stb")),
     );
-    let (mut scripts, mut operands) = (0, 0);
-    for p in files {
-        let bytes = fs::read(&p)?;
-        let (output, count) = migrate_container(&bytes, &inventory, 0)
-            .map_err(|e| fail(format!("{}: {e}", p.display())))?;
-        if count > 0 {
-            fs::write(p, output)?;
-            scripts += 1;
-            operands += count;
-        }
+    files.sort();
+    phase.set_total((raw_files.len() + files.len()) as u64);
+    let locals: Vec<CoreResult<Inventory>> = raw_files
+        .par_iter()
+        .map(|p| -> CoreResult<Inventory> {
+            let alias = p
+                .strip_prefix(raw)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase();
+            let mut local = Inventory::default();
+            inventory_resource(&fs::read(p)?, &alias, &assets, &mut local, 0)?;
+            phase.inc(1);
+            Ok(local)
+        })
+        .collect();
+    let mut inventory = Inventory::default();
+    for local in locals {
+        inventory.merge(local?);
     }
-    eprintln!("native compiled scripts: {operands} resource operands rewritten in {scripts} files");
+    let migrated: Vec<CoreResult<usize>> = files
+        .par_iter()
+        .map(|p| -> CoreResult<usize> {
+            let bytes = fs::read(p)?;
+            if bytes.len() >= 2 << 20 {
+                phase.item(&p.file_name().unwrap_or_default().to_string_lossy());
+            }
+            let (output, count) = migrate_container(&bytes, &inventory, 0)
+                .map_err(|e| fail(format!("{}: {e}", p.display())))?;
+            if count > 0 {
+                fs::write(p, output)?;
+            }
+            phase.inc(1);
+            Ok(count)
+        })
+        .collect();
+    let (mut scripts, mut operands) = (0, 0);
+    for count in migrated {
+        let count = count?;
+        scripts += usize::from(count > 0);
+        operands += count;
+    }
+    phase.log(format!(
+        "native compiled scripts: {operands} resource operands rewritten in {scripts} files"
+    ));
     Ok(())
 }
 
@@ -645,85 +676,408 @@ fn script_sources(
 }
 
 /// Checks retained VM source coverage and exact deterministic operand migration before cache reuse.
-pub fn verify_tree(raw: &Path, published: &Path) -> CoreResult<()> {
+pub fn verify_tree(raw: &Path, published: &Path, phase: &Phase) -> CoreResult<()> {
     let assets = published.join("port_data");
-    let mut inventory = Inventory {
-        paths: BTreeMap::new(),
-        leaves: BTreeMap::new(),
-        profiles: BTreeMap::new(),
-    };
     let mut files = Vec::new();
     gather(raw, &mut files)?;
+    files.sort();
+    phase.set_total(files.len() as u64);
+    let locals = files
+        .par_iter()
+        .map(|source| -> CoreResult<_> {
+            let alias = source
+                .strip_prefix(raw)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase();
+            let bytes = fs::read(source)?;
+            let mut inventory = Inventory::default();
+            inventory_resource(&bytes, &alias, &assets, &mut inventory, 0)?;
+            let mut local = BTreeMap::new();
+            script_sources(&bytes, &alias, &mut local, 0)?;
+            phase.inc(1);
+            Ok((inventory, local))
+        })
+        .collect::<Vec<_>>();
+    let mut inventory = Inventory::default();
     let mut sources = BTreeMap::new();
-    for source in files {
-        let alias = source
-            .strip_prefix(raw)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase();
-        let bytes = fs::read(source)?;
-        inventory_resource(&bytes, &alias, &assets, &mut inventory, 0)?;
-        script_sources(&bytes, &alias, &mut sources, 0)?;
+    for local in locals {
+        let (local_inventory, local_sources) = local?;
+        inventory.merge(local_inventory);
+        sources.extend(local_sources);
     }
-    let mut operands = 0;
-    for (alias, original) in &sources {
-        let extension = Path::new(alias)
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("stb")
-            .split('#')
-            .next()
-            .unwrap();
-        let native = super::configs::native_path(alias, extension);
-        let direct = published.join("data").join(alias);
-        let path = if direct.is_file() {
-            direct
-        } else {
-            assets.join(&native)
-        };
-        let actual = fs::read(&path)
-            .map_err(|error| fail(format!("missing native VM script {alias}: {error}")))?;
-        let (expected, count) = migrate(original, &inventory)?;
-        if actual != expected || !is_valid_script(&actual) {
-            return Err(fail(format!(
-                "native VM script differs from source migration: {}",
-                path.display()
-            )));
-        }
-        operands += count;
-        let parts: Vec<_> = alias.split('/').collect();
-        if let Some(parent) = (0..parts.len().saturating_sub(1)).rev().find(|index| {
-            parts[*index]
+    phase.add_total(sources.len() as u64);
+    let checked: Vec<CoreResult<usize>> = sources
+        .iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|(alias, original)| -> CoreResult<usize> {
+            let extension = Path::new(alias)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("stb")
                 .split('#')
                 .next()
-                .unwrap()
-                .trim_end_matches('_')
-                .ends_with(".chr")
-        }) {
-            let character = parts[..=parent].join("/");
-            let game_path = assets.join(super::configs::native_path(&character, "game.json"));
-            let game: serde_json::Value = serde_json::from_slice(&fs::read(game_path)?)?;
-            if !game["resources"]["scripts"]
-                .as_array()
-                .is_some_and(|scripts| scripts.iter().any(|script| script["path"] == native))
-            {
+                .unwrap();
+            let native = super::configs::native_path(alias, extension);
+            let direct = published.join("data").join(alias);
+            let path = if direct.is_file() {
+                direct
+            } else {
+                assets.join(&native)
+            };
+            let actual = fs::read(&path)
+                .map_err(|error| fail(format!("missing native VM script {alias}: {error}")))?;
+            let (expected, count) = migrate(original, &inventory)?;
+            if actual != expected || !is_valid_script(&actual) {
                 return Err(fail(format!(
-                    "character omits native VM script resource: {alias}"
+                    "native VM script differs from source migration: {}",
+                    path.display()
                 )));
             }
-        }
+            let parts: Vec<_> = alias.split('/').collect();
+            if let Some(parent) = (0..parts.len().saturating_sub(1)).rev().find(|index| {
+                parts[*index]
+                    .split('#')
+                    .next()
+                    .unwrap()
+                    .trim_end_matches('_')
+                    .ends_with(".chr")
+            }) {
+                let character = parts[..=parent].join("/");
+                let game_path = assets.join(super::configs::native_path(&character, "game.json"));
+                let game: serde_json::Value = serde_json::from_slice(&fs::read(game_path)?)?;
+                if !game["resources"]["scripts"]
+                    .as_array()
+                    .is_some_and(|scripts| scripts.iter().any(|script| script["path"] == native))
+                {
+                    return Err(fail(format!(
+                        "character omits native VM script resource: {alias}"
+                    )));
+                }
+            }
+            phase.inc(1);
+            Ok(count)
+        })
+        .collect();
+    let mut operands = 0;
+    for count in checked {
+        operands += count?;
     }
-    eprintln!(
+    phase.log(format!(
         "native compiled script verification: {} scripts, {operands} migrated resource operands",
         sources.len()
-    );
+    ));
     Ok(())
 }
 
+/// Event extension that loads a character pack into an event-scene actor (`_LOAD_CHARA`).
+const EXT_LOAD_CHARA: i32 = 9;
+/// Event extension that loads a motion pack into an event-scene actor (`_LOAD_MOTION`).
+const EXT_LOAD_MOTION: i32 = 19;
+/// Address mode of a script global slot (`RS_ADDR_GLOBAL`).
+const ADDR_GLOBAL: i32 = 0x40;
+/// One character or motion load into an event-scene actor whose pack is a constant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ActorLoad {
+    /// Offset of the first instruction of the calling function.
+    pub function: usize,
+    /// Offset of the extension call instruction.
+    pub instruction: usize,
+    /// Whether the call loads a motion pack (`_LOAD_MOTION`) rather than a character.
+    pub motion: bool,
+    /// Pack path exactly as the script names it, normalized to lower case with `/` separators.
+    pub path: String,
+    /// Event-scene actor slot the pack is loaded into.
+    pub actor: i32,
+    /// Global slot the actor is read from, when the script stores only constants there.
+    pub global: Option<i32>,
+}
+/// Abstract value of one script stack slot.
+#[derive(Clone, Copy)]
+enum Value {
+    Integer(i32),
+    String(usize),
+    Global(i32),
+    GlobalAddress(i32),
+    Unknown,
+}
+/// Runs the stack effect of every instruction of a script, reporting extension calls and stores.
+fn simulate(
+    b: &[u8],
+    code: usize,
+    functions: &[Vec<Instruction>],
+    mut on_store: impl FnMut(i32, Value),
+    mut on_ext: impl FnMut(&Vec<Instruction>, &Instruction, &[Value]) -> CoreResult<()>,
+) -> CoreResult<()> {
+    for function in functions {
+        let mut stack = Vec::new();
+        for insn in function {
+            match insn.op {
+                1 | 2 => {
+                    if matches!(insn.a2, 2 | 4 | 16 | 32) {
+                        stack.pop();
+                    }
+                    stack.push(match (insn.op, insn.a2) {
+                        (1, ADDR_GLOBAL) => Value::Global(insn.a1),
+                        (2, ADDR_GLOBAL) => Value::GlobalAddress(insn.a1),
+                        _ => Value::Unknown,
+                    });
+                }
+                3 => stack.push(match insn.a1 {
+                    1 => Value::Integer(insn.a2),
+                    3 => usize::try_from(insn.a2).map_or(Value::Unknown, Value::String),
+                    _ => Value::Unknown,
+                }),
+                4 | 20 => {
+                    stack.pop();
+                }
+                5 => {
+                    let value = stack.pop().unwrap_or(Value::Unknown);
+                    if let Some(Value::GlobalAddress(slot)) = stack.pop() {
+                        on_store(slot, value);
+                    }
+                    stack.push(value);
+                }
+                6..=10 | 14 | 24 | 25 => {
+                    stack.pop();
+                    stack.pop();
+                    stack.push(Value::Unknown);
+                }
+                11..=13 | 26 | 29 | 30 => {
+                    stack.pop();
+                    stack.push(Value::Unknown);
+                }
+                15..=18 | 27 => stack.clear(),
+                19 => {
+                    let block = code + offset(insn.a2)?;
+                    let args = offset(word(b, block + 12)?)?;
+                    stack.truncate(stack.len().saturating_sub(args));
+                    stack.push(Value::Unknown);
+                }
+                21 => {
+                    let count = offset(insn.a1)?;
+                    if count > stack.len() {
+                        stack.clear();
+                        continue;
+                    }
+                    let start = stack.len() - count;
+                    on_ext(function, insn, &stack[start..])?;
+                    stack.truncate(start);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+/// Lists the `_LOAD_CHARA` and `_LOAD_MOTION` calls of a compiled script whose pack is a constant.
+///
+/// An actor read from a global slot the script only ever sets to constants yields one load per
+/// constant. Calls whose pack or actor is otherwise computed, or given through argument lists, are
+/// not listed.
+pub(crate) fn actor_loads(b: &[u8]) -> CoreResult<Vec<ActorLoad>> {
+    let (code, functions) = decode(b)?;
+    // Constants stored into each global slot; `None` once any other value is stored there.
+    let mut globals = BTreeMap::<i32, Option<BTreeSet<i32>>>::new();
+    simulate(
+        b,
+        code,
+        &functions,
+        |slot, value| {
+            let entry = globals.entry(slot).or_insert_with(|| Some(BTreeSet::new()));
+            match (entry.as_mut(), value) {
+                (Some(values), Value::Integer(constant)) => {
+                    values.insert(constant);
+                }
+                _ => *entry = None,
+            }
+        },
+        |_, _, _| Ok(()),
+    )?;
+    let mut loads = Vec::new();
+    simulate(
+        b,
+        code,
+        &functions,
+        |_, _| {},
+        |function, insn, args| {
+            let motion = match (args.first(), args.len()) {
+                (Some(Value::Integer(EXT_LOAD_CHARA)), 5 | 6) => false,
+                (Some(Value::Integer(EXT_LOAD_MOTION)), 5) => true,
+                _ => return Ok(()),
+            };
+            let Value::String(at) = args[2] else {
+                return Ok(());
+            };
+            let (actors, global) = match args[4] {
+                Value::Integer(actor) => (BTreeSet::from([actor]), None),
+                Value::Global(slot) => match globals.get(&slot) {
+                    Some(Some(values)) => (values.clone(), Some(slot)),
+                    _ => return Ok(()),
+                },
+                _ => return Ok(()),
+            };
+            let bytes = literal(
+                b,
+                code,
+                &Instruction {
+                    at: insn.at,
+                    op: 3,
+                    a1: 3,
+                    a2: at as i32,
+                },
+            )?;
+            if !bytes.is_ascii() {
+                return Ok(());
+            }
+            let path = normalize(std::str::from_utf8(bytes).unwrap());
+            for actor in actors {
+                loads.push(ActorLoad {
+                    function: function[0].at,
+                    instruction: insn.at,
+                    motion,
+                    path: path.clone(),
+                    actor,
+                    global,
+                });
+            }
+            Ok(())
+        },
+    )?;
+    Ok(loads)
+}
+/// Lists the ASCII string literals of a compiled script, normalized like resource paths.
+pub(crate) fn string_literals(b: &[u8]) -> CoreResult<BTreeSet<String>> {
+    let (code, functions) = decode(b)?;
+    let mut out = BTreeSet::new();
+    for insn in functions.iter().flatten() {
+        if insn.op == 3 && insn.a1 == 3 {
+            let bytes = literal(b, code, insn)?;
+            if bytes.is_ascii() {
+                out.insert(normalize(std::str::from_utf8(bytes).unwrap()));
+            }
+        }
+    }
+    Ok(out)
+}
+/// Argument of an extension call in a test script.
+#[cfg(test)]
+pub(crate) enum ScriptArg<'a> {
+    Int(i32),
+    Text(&'a str),
+    /// Reads a global slot.
+    Global(i32),
+}
+/// Pseudo extension id of a test script step that stores the constant `args[1]` into global `args[0]`.
+#[cfg(test)]
+pub(crate) const STORE_GLOBAL: i32 = -1;
+/// Builds a compiled script whose main function makes the given extension calls in order.
+#[cfg(test)]
+pub(crate) fn event_script_fixture(calls: &[(i32, &[ScriptArg])]) -> Vec<u8> {
+    const CODE: usize = 48;
+    let mut code = Vec::new();
+    let mut strings = Vec::new();
+    let count: usize = calls
+        .iter()
+        .map(|(ext, args)| match *ext {
+            STORE_GLOBAL => 4,
+            _ => args.len() + 2,
+        })
+        .sum::<usize>()
+        + 1;
+    let strings_at = count * 12;
+    let mut push = |op: i32, a1: i32, a2: i32| {
+        for value in [op, a1, a2] {
+            code.extend(value.to_le_bytes());
+        }
+    };
+    for (ext, args) in calls {
+        if let (STORE_GLOBAL, [ScriptArg::Int(slot), ScriptArg::Int(value)]) = (*ext, args) {
+            push(2, *slot, ADDR_GLOBAL);
+            push(3, 1, *value);
+            push(5, 0, 0);
+            push(4, 0, 0);
+            continue;
+        }
+        push(3, 1, *ext);
+        for arg in *args {
+            match arg {
+                ScriptArg::Int(value) => push(3, 1, *value),
+                ScriptArg::Global(slot) => push(1, *slot, ADDR_GLOBAL),
+                ScriptArg::Text(text) => {
+                    push(3, 3, (strings_at + strings.len()) as i32);
+                    strings.extend(text.as_bytes());
+                    strings.push(0);
+                }
+            }
+        }
+        push(21, args.len() as i32 + 1, 0);
+    }
+    push(15, 0, 0);
+    let mut bytes = vec![0; CODE];
+    bytes[..4].copy_from_slice(b"STB\0");
+    for (at, value) in [(4, 28i32), (8, CODE as i32), (12, 28), (16, 0)] {
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend(code);
+    bytes.extend(strings);
+    while !bytes.len().is_multiple_of(4) {
+        bytes.push(0);
+    }
+    bytes
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn actor_loads_follow_constant_actors_and_globals_set_only_to_constants() {
+        let load = |ext: i32, path: &'static str, actor: ScriptArg<'static>| {
+            (
+                ext,
+                vec![
+                    ScriptArg::Int(0),
+                    ScriptArg::Text(path),
+                    ScriptArg::Text("info.cfg"),
+                    actor,
+                ],
+            )
+        };
+        let steps = [
+            (STORE_GLOBAL, vec![ScriptArg::Int(6), ScriptArg::Int(0)]),
+            (STORE_GLOBAL, vec![ScriptArg::Int(6), ScriptArg::Int(32)]),
+            load(EXT_LOAD_CHARA, r"chara\C01_base.chr", ScriptArg::Int(32)),
+            load(EXT_LOAD_MOTION, "e280_mints.chr", ScriptArg::Global(6)),
+            // An actor read from a global the script never sets is not listed.
+            load(EXT_LOAD_MOTION, "skipped.chr", ScriptArg::Global(7)),
+        ];
+        let calls: Vec<(i32, &[ScriptArg])> = steps
+            .iter()
+            .map(|(ext, args)| (*ext, args.as_slice()))
+            .collect();
+        let loads = actor_loads(&event_script_fixture(&calls)).unwrap();
+        let summary: Vec<_> = loads
+            .iter()
+            .map(|l| (l.motion, l.path.as_str(), l.actor, l.global))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (false, "chara/c01_base.chr", 32, None),
+                (true, "e280_mints.chr", 0, Some(6)),
+                (true, "e280_mints.chr", 32, Some(6)),
+            ]
+        );
+        assert!(
+            loads[1].function == loads[0].function && loads[1].instruction > loads[0].instruction
+        );
+        assert!(
+            string_literals(&event_script_fixture(&calls))
+                .unwrap()
+                .contains("e280_mints.chr")
+        );
+    }
     #[test]
     fn ambiguous_vm_sources_survive_all_converters_and_missing_cache_is_rejected() {
         fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -754,11 +1108,18 @@ mod tests {
         fs::write(raw.join("effects.chr"), archive(&entries)).unwrap();
         fs::write(raw.join("test.stb"), &script).unwrap();
         let textures = super::super::textures::convert_tree(&raw, &published, 1).unwrap();
-        super::super::models::convert_tree(&raw, &published, 1, &textures.documents).unwrap();
-        super::super::configs::convert_tree(&raw, &published, 1).unwrap();
-        convert_tree(&raw, &published).unwrap();
-        super::super::packs::convert_tree(&raw, &published).unwrap();
-        verify_tree(&raw, &published).unwrap();
+        let models = super::super::models::convert_tree(
+            &raw,
+            &published,
+            &textures.documents,
+            &Phase::noop(),
+        )
+        .unwrap();
+        super::super::models::strip_data(&raw, &published, &models, &Phase::noop()).unwrap();
+        super::super::configs::convert_tree(&raw, &published, &Phase::noop()).unwrap();
+        convert_tree(&raw, &published, &Phase::noop()).unwrap();
+        super::super::packs::convert_tree(&raw, &published, &Phase::noop()).unwrap();
+        verify_tree(&raw, &published, &Phase::noop()).unwrap();
         assert_eq!(fs::read(published.join("data/test.stb")).unwrap(), script);
         let game: serde_json::Value = serde_json::from_slice(
             &fs::read(published.join("port_data/effects.game.json")).unwrap(),
@@ -777,7 +1138,7 @@ mod tests {
             b"{\"schema_version\":1,\"kind\":\"asset_directory\"}",
         )
         .unwrap();
-        assert!(verify_tree(&raw, &published).is_err());
+        assert!(verify_tree(&raw, &published, &Phase::noop()).is_err());
     }
 
     #[test]
@@ -820,6 +1181,7 @@ mod tests {
         verify_tree(
             Path::new(&std::env::var("KZ_NATIVE_SCRIPT_RAW").unwrap()),
             Path::new(&std::env::var("KZ_NATIVE_SCRIPT_PUBLISHED").unwrap()),
+            &Phase::noop(),
         )
         .unwrap();
     }

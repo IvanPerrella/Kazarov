@@ -1,5 +1,7 @@
 //! Publishes ordinary retail PACK containers as directly readable asset directories.
+use super::progress::Phase;
 use super::{CoreError, CoreResult, models};
+use rayon::prelude::*;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -190,31 +192,88 @@ fn publish_pack(
     Ok(true)
 }
 
+fn publish_source(
+    raw: &Path,
+    published: &Path,
+    source: &Path,
+    alias: &str,
+    phase: &Phase,
+) -> CoreResult<()> {
+    let bytes = fs::read(source)?;
+    if bytes.len() >= 2 << 20 {
+        phase.item(alias);
+    }
+    let target = published
+        .join("data")
+        .join(source.strip_prefix(raw).unwrap());
+    let current = if target.is_file() {
+        Some(fs::read(&target)?)
+    } else {
+        None
+    };
+    if publish_pack(&bytes, current.as_deref(), alias, published, 0)? && target.is_file() {
+        fs::remove_file(target)?;
+    }
+    phase.inc(1);
+    Ok(())
+}
+fn disjoint_folders(folders: &[&str]) -> bool {
+    let nested = |ancestor: &str, path: &str| {
+        path.strip_prefix(ancestor)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    folders.iter().enumerate().all(|(i, a)| {
+        folders
+            .iter()
+            .enumerate()
+            .all(|(j, b)| i == j || (a != b && !nested(a, b) && !nested(b, a)))
+    })
+}
+
 /// Converts every ordinary PACK to a directory while copying only surviving published member payloads.
-pub fn convert_tree(raw: &Path, published: &Path) -> CoreResult<()> {
+pub fn convert_tree(raw: &Path, published: &Path, phase: &Phase) -> CoreResult<()> {
     let mut files = Vec::new();
     collect(raw, &mut files)?;
     files.sort();
-    for source in files {
-        let alias = source
-            .strip_prefix(raw)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        let bytes = fs::read(&source)?;
-        if models::pack(&bytes).is_none() && !empty_archive(&bytes, &alias) {
-            continue;
+    phase.set_total(files.len() as u64);
+    let scanned: Vec<CoreResult<Option<(String, String)>>> = files
+        .par_iter()
+        .map(|source| -> CoreResult<Option<(String, String)>> {
+            let alias = source
+                .strip_prefix(raw)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let bytes = fs::read(source)?;
+            if models::pack(&bytes).is_none() && !empty_archive(&bytes, &alias) {
+                phase.inc(1);
+                return Ok(None);
+            }
+            let folder = folder_path(&alias)
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_lowercase();
+            Ok(Some((alias, folder)))
+        })
+        .collect();
+    let mut packs = Vec::new();
+    for (source, entry) in files.iter().zip(scanned) {
+        if let Some((alias, folder)) = entry? {
+            packs.push((source, alias, folder));
         }
-        let target = published
-            .join("data")
-            .join(source.strip_prefix(raw).unwrap());
-        let current = if target.is_file() {
-            Some(fs::read(&target)?)
-        } else {
-            None
-        };
-        if publish_pack(&bytes, current.as_deref(), &alias, published, 0)? && target.is_file() {
-            fs::remove_file(target)?;
+    }
+    let folders: Vec<&str> = packs.iter().map(|(_, _, folder)| folder.as_str()).collect();
+    if disjoint_folders(&folders) {
+        let results: Vec<CoreResult<()>> = packs
+            .par_iter()
+            .map(|(source, alias, _)| publish_source(raw, published, source, alias, phase))
+            .collect();
+        for result in results {
+            result?;
+        }
+    } else {
+        for (source, alias, _) in &packs {
+            publish_source(raw, published, source, alias, phase)?;
         }
     }
     let native = published.join("port_data");
@@ -233,8 +292,15 @@ pub fn verify(root: &Path) -> CoreResult<()> {
         }
         let mut files = Vec::new();
         collect(&directory, &mut files)?;
-        for path in files {
-            audit_entry(&path.to_string_lossy(), &fs::read(&path)?)?;
+        files.sort();
+        let results: Vec<CoreResult<()>> = files
+            .par_iter()
+            .map(|path| -> CoreResult<()> {
+                audit_entry(&path.to_string_lossy(), &fs::read(path)?)
+            })
+            .collect();
+        for result in results {
+            result?;
         }
     }
     Ok(())
@@ -295,7 +361,7 @@ mod tests {
         ]);
         fs::write(raw.join("outer.pcp"), original).unwrap();
         fs::write(output.join("data/outer.pcp"), current).unwrap();
-        convert_tree(&raw, &output).unwrap();
+        convert_tree(&raw, &output, &Phase::noop()).unwrap();
         verify(&output).unwrap();
         assert_eq!(
             fs::read(output.join("port_data/outer.pcp/keep.bin")).unwrap(),
@@ -322,7 +388,7 @@ mod tests {
         fs::write(raw.join("empty.pac"), pack(&[("old.mds", b"removed")])).unwrap();
         fs::write(raw.join("zero.pcp"), b"").unwrap();
         fs::write(output.join("data/zero.pcp"), b"").unwrap();
-        convert_tree(&raw, &output).unwrap();
+        convert_tree(&raw, &output, &Phase::noop()).unwrap();
         assert_eq!(
             fs::read(output.join("port_data/dup.pac/a.bin")).unwrap(),
             b"one"

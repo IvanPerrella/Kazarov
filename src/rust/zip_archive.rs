@@ -43,9 +43,20 @@ const END_RECORD: usize = 22;
 const ZIP64_END_RECORD: usize = 56;
 const ZIP64_LOCATOR: usize = 20;
 const MAX_COMMENT: usize = 0xffff;
-/// Compressed entries are batched until their inputs reach this many bytes.
+/// Entries are batched until their in-memory inputs reach this many bytes.
+#[cfg(not(test))]
 const BATCH_BYTES: u64 = 512 << 20;
+#[cfg(test)]
+const BATCH_BYTES: u64 = 8 << 10;
+#[cfg(not(test))]
 const BATCH_ENTRIES: usize = 4096;
+#[cfg(test)]
+const BATCH_ENTRIES: usize = 3;
+/// Stored entries up to this size are read once and held in memory until written.
+#[cfg(not(test))]
+const BUFFERED_STORED_BYTES: u64 = 64 << 20;
+#[cfg(test)]
+const BUFFERED_STORED_BYTES: u64 = 4096;
 const COPY_CHUNK: usize = 4 << 20;
 
 fn fail(message: impl Into<String>) -> CoreError {
@@ -488,6 +499,15 @@ impl Archive {
         &self,
         visit: &(dyn Fn(&str, &[u8]) -> CoreResult<()> + Sync),
     ) -> CoreResult<Vec<ContentRecord<'_>>> {
+        self.verify_entries_with_progress(visit, &|_| {})
+    }
+
+    /// Like `verify_entries`, reporting each verified entry through `on_entry`.
+    pub fn verify_entries_with_progress(
+        &self,
+        visit: &(dyn Fn(&str, &[u8]) -> CoreResult<()> + Sync),
+        on_entry: &(dyn Fn(u64) + Sync),
+    ) -> CoreResult<Vec<ContentRecord<'_>>> {
         (0..self.entries.len())
             .into_par_iter()
             .map(|index| {
@@ -502,6 +522,7 @@ impl Archive {
                     Cow::Owned(self.read(index)?)
                 };
                 visit(&entry.name, &bytes)?;
+                on_entry(1);
                 Ok(ContentRecord {
                     name: &entry.name,
                     size: entry.size,
@@ -513,7 +534,7 @@ impl Archive {
 }
 
 /// Summary of a written archive.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Written {
     pub size: u64,
     pub entries: u64,
@@ -535,9 +556,28 @@ struct Prepared {
     payload: Option<Vec<u8>>,
 }
 
+/// Bytes an entry holds in memory while its batch is prepared and written.
+fn resident_bytes(name: &str, length: u64) -> u64 {
+    if stored_by_name(name) && length > BUFFERED_STORED_BYTES {
+        0
+    } else {
+        length
+    }
+}
+
 fn prepare(input: &Input) -> CoreResult<Prepared> {
     let context = |error: std::io::Error| fail(format!("{}: {error}", input.source.display()));
     if stored_by_name(&input.name) {
+        if fs::metadata(&input.source).map_err(context)?.len() <= BUFFERED_STORED_BYTES {
+            let bytes = fs::read(&input.source).map_err(context)?;
+            return Ok(Prepared {
+                method: METHOD_STORED,
+                crc: crc32fast::hash(&bytes),
+                size: bytes.len() as u64,
+                sha256: Sha256::digest(&bytes).into(),
+                payload: Some(bytes),
+            });
+        }
         let mut file = File::open(&input.source).map_err(context)?;
         let mut crc = crc32fast::Hasher::new();
         let mut sha = Sha256::new();
@@ -742,6 +782,7 @@ pub fn write(
         .map(|input| Ok(fs::metadata(&input.source)?.len()))
         .collect::<CoreResult<Vec<u64>>>()?;
     let total: u64 = lengths.iter().sum();
+    progress(0, total);
     let mut partial_name = output
         .file_name()
         .ok_or_else(|| fail("archive output has no file name"))?
@@ -751,15 +792,7 @@ pub fn write(
     if partial.exists() {
         fs::remove_file(&partial)?;
     }
-    let file = File::create(&partial)?;
-    let mut out = CountingWriter {
-        inner: BufWriter::with_capacity(COPY_CHUNK, file),
-        position: 0,
-    };
-    let mut central = Vec::with_capacity(inputs.len());
-    let mut hash = Sha256::new();
-    hash.update(b"kazarov-archive-content-v1\0");
-    let mut done = 0u64;
+    let mut ranges = Vec::new();
     let mut start = 0;
     while start < inputs.len() {
         let mut end = start;
@@ -768,53 +801,94 @@ pub fn write(
             && end - start < BATCH_ENTRIES
             && (end == start || batch_bytes < BATCH_BYTES)
         {
-            if !stored_by_name(&inputs[end].name) {
-                batch_bytes += lengths[end];
-            }
+            batch_bytes += resident_bytes(&inputs[end].name, lengths[end]);
             end += 1;
         }
-        let prepared = inputs[start..end]
-            .par_iter()
-            .map(prepare)
-            .collect::<CoreResult<Vec<_>>>()?;
-        for (input, prepared) in inputs[start..end].iter().zip(prepared) {
-            let compressed = prepared
-                .payload
-                .as_ref()
-                .map_or(prepared.size, |payload| payload.len() as u64);
-            let local = out.position;
-            out.put(&local_header(
-                &input.name,
-                prepared.method,
-                prepared.crc,
-                compressed,
-                prepared.size,
-                local,
-            ))?;
-            match &prepared.payload {
-                Some(payload) => out.put(payload)?,
-                None => copy_stored(input, &prepared, &mut out)?,
-            }
-            hash.update((input.name.len() as u64).to_le_bytes());
-            hash.update(input.name.as_bytes());
-            hash.update(prepared.size.to_le_bytes());
-            hash.update(prepared.sha256);
-            central.push(CentralEntry {
-                name: input.name.clone(),
-                method: prepared.method,
-                crc: prepared.crc,
-                compressed,
-                size: prepared.size,
-                local,
-            });
-            if remove_sources {
-                fs::remove_file(&input.source)?;
-            }
-            done += prepared.size;
-            progress(done, total);
-        }
+        ranges.push(start..end);
         start = end;
     }
+    let file = File::create(&partial)?;
+    let mut out = CountingWriter {
+        inner: BufWriter::with_capacity(COPY_CHUNK, file),
+        position: 0,
+    };
+    let (inputs, ranges) = (&inputs[..], &ranges[..]);
+    let (mut out, central, hash) = std::thread::scope(|scope| -> CoreResult<_> {
+        // A rendezvous channel keeps one batch being written and one being prepared resident.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<Prepared>>(0);
+        let writer = scope.spawn(move || -> CoreResult<_> {
+            let mut central = Vec::with_capacity(inputs.len());
+            let mut hash = Sha256::new();
+            hash.update(b"kazarov-archive-content-v1\0");
+            let mut done = 0u64;
+            for (range, prepared) in ranges.iter().zip(rx) {
+                for (input, prepared) in inputs[range.clone()].iter().zip(prepared) {
+                    let compressed = prepared
+                        .payload
+                        .as_ref()
+                        .map_or(prepared.size, |payload| payload.len() as u64);
+                    let local = out.position;
+                    out.put(&local_header(
+                        &input.name,
+                        prepared.method,
+                        prepared.crc,
+                        compressed,
+                        prepared.size,
+                        local,
+                    ))?;
+                    match &prepared.payload {
+                        Some(payload) => out.put(payload)?,
+                        None => copy_stored(input, &prepared, &mut out)?,
+                    }
+                    hash.update((input.name.len() as u64).to_le_bytes());
+                    hash.update(input.name.as_bytes());
+                    hash.update(prepared.size.to_le_bytes());
+                    hash.update(prepared.sha256);
+                    central.push(CentralEntry {
+                        name: input.name.clone(),
+                        method: prepared.method,
+                        crc: prepared.crc,
+                        compressed,
+                        size: prepared.size,
+                        local,
+                    });
+                    if remove_sources {
+                        fs::remove_file(&input.source)?;
+                    }
+                    done += prepared.size;
+                    progress(done, total);
+                }
+            }
+            Ok((out, central, hash))
+        });
+        let mut prepare_error = None;
+        for range in ranges {
+            let prepared = inputs[range.clone()]
+                .par_iter()
+                .map(prepare)
+                .collect::<CoreResult<Vec<_>>>();
+            match prepared {
+                Ok(prepared) => {
+                    if tx.send(prepared).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    prepare_error = Some(error);
+                    break;
+                }
+            }
+        }
+        drop(tx);
+        let written = match writer.join() {
+            Ok(result) => result?,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        if let Some(error) = prepare_error {
+            return Err(error);
+        }
+        Ok(written)
+    })?;
     let directory_offset = out.position;
     for entry in &central {
         out.put(&central_header(entry))?;
@@ -1098,5 +1172,171 @@ mod tests {
                 .1;
             assert_eq!(archive.read(index).unwrap(), *expected);
         }
+    }
+
+    fn write_serial(
+        mut inputs: Vec<Input>,
+        output: &Path,
+        remove_sources: bool,
+        progress: &(dyn Fn(u64, u64) + Sync),
+    ) -> CoreResult<Written> {
+        for input in &inputs {
+            validate_name(&input.name)?;
+        }
+        inputs.sort_by(|a, b| a.name.cmp(&b.name));
+        check_unique(inputs.iter().map(|input| input.name.as_str()))?;
+        let lengths = inputs
+            .iter()
+            .map(|input| Ok(fs::metadata(&input.source)?.len()))
+            .collect::<CoreResult<Vec<u64>>>()?;
+        let total: u64 = lengths.iter().sum();
+        let mut partial_name = output
+            .file_name()
+            .ok_or_else(|| fail("archive output has no file name"))?
+            .to_os_string();
+        partial_name.push(".partial");
+        let partial = output.with_file_name(partial_name);
+        if partial.exists() {
+            fs::remove_file(&partial)?;
+        }
+        let file = File::create(&partial)?;
+        let mut out = CountingWriter {
+            inner: BufWriter::with_capacity(COPY_CHUNK, file),
+            position: 0,
+        };
+        let mut central = Vec::with_capacity(inputs.len());
+        let mut hash = Sha256::new();
+        hash.update(b"kazarov-archive-content-v1\0");
+        let mut done = 0u64;
+        let mut start = 0;
+        while start < inputs.len() {
+            let mut end = start;
+            let mut batch_bytes = 0u64;
+            while end < inputs.len()
+                && end - start < BATCH_ENTRIES
+                && (end == start || batch_bytes < BATCH_BYTES)
+            {
+                if !stored_by_name(&inputs[end].name) {
+                    batch_bytes += lengths[end];
+                }
+                end += 1;
+            }
+            let prepared = inputs[start..end]
+                .par_iter()
+                .map(prepare)
+                .collect::<CoreResult<Vec<_>>>()?;
+            for (input, prepared) in inputs[start..end].iter().zip(prepared) {
+                let compressed = prepared
+                    .payload
+                    .as_ref()
+                    .map_or(prepared.size, |payload| payload.len() as u64);
+                let local = out.position;
+                out.put(&local_header(
+                    &input.name,
+                    prepared.method,
+                    prepared.crc,
+                    compressed,
+                    prepared.size,
+                    local,
+                ))?;
+                match &prepared.payload {
+                    Some(payload) => out.put(payload)?,
+                    None => copy_stored(input, &prepared, &mut out)?,
+                }
+                hash.update((input.name.len() as u64).to_le_bytes());
+                hash.update(input.name.as_bytes());
+                hash.update(prepared.size.to_le_bytes());
+                hash.update(prepared.sha256);
+                central.push(CentralEntry {
+                    name: input.name.clone(),
+                    method: prepared.method,
+                    crc: prepared.crc,
+                    compressed,
+                    size: prepared.size,
+                    local,
+                });
+                if remove_sources {
+                    fs::remove_file(&input.source)?;
+                }
+                done += prepared.size;
+                progress(done, total);
+            }
+            start = end;
+        }
+        let directory_offset = out.position;
+        for entry in &central {
+            out.put(&central_header(entry))?;
+        }
+        let directory_size = out.position - directory_offset;
+        out.put(&end_records(
+            central.len() as u64,
+            directory_offset,
+            directory_size,
+        ))?;
+        let size = out.position;
+        let file = out
+            .inner
+            .into_inner()
+            .map_err(|error| CoreError(error.error().to_string()))?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&partial, output)?;
+        Ok(Written {
+            size,
+            entries: central.len() as u64,
+            content_sha256: hex(&hash.finalize()),
+        })
+    }
+
+    fn pipelined_fixture(temp: &Path) -> PathBuf {
+        let source = temp.join("source");
+        let mut files: Vec<(String, Vec<u8>)> = (0..10)
+            .map(|i| {
+                (
+                    format!("d/text{i}.txt"),
+                    format!("entry {i} ").repeat(500 + i * 37).into_bytes(),
+                )
+            })
+            .collect();
+        files.push(("img/a.png".into(), vec![7; 3000]));
+        files.push((
+            "img/b.PNG".into(),
+            (0..9000u32).map(|i| (i * 31) as u8).collect(),
+        ));
+        files.push((
+            "img/big.mp4".into(),
+            (0..70_000u32).map(|i| (i * 7) as u8).collect(),
+        ));
+        files.push(("empty.bin".into(), Vec::new()));
+        for (name, bytes) in &files {
+            let path = source.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        source
+    }
+
+    #[test]
+    fn pipelined_write_matches_serial_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = pipelined_fixture(temp.path());
+        let pipelined = temp.path().join("pipelined.zip");
+        let serial = temp.path().join("serial.zip");
+        let written = write(
+            directory_inputs(&source).unwrap(),
+            &pipelined,
+            false,
+            &|_, _| {},
+        )
+        .unwrap();
+        let reference = write_serial(
+            directory_inputs(&source).unwrap(),
+            &serial,
+            false,
+            &|_, _| {},
+        )
+        .unwrap();
+        assert_eq!(written, reference);
+        assert_eq!(fs::read(pipelined).unwrap(), fs::read(serial).unwrap());
     }
 }

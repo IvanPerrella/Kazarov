@@ -1,3 +1,4 @@
+use super::progress::Phase;
 use super::{CoreError, CoreResult};
 use gpt_disk_io::{BlockIoAdapter, gpt_disk_types::BlockSize};
 use iso9660::{DirectoryIterator, FileEntry, find_file, mount};
@@ -550,7 +551,11 @@ fn extent_matches(extent: &Extent, target: &Path) -> CoreResult<bool> {
 }
 
 pub fn extract_raw(source: &Path, raw_out: &Path, jobs: usize) -> CoreResult<(u64, u64)> {
-    extract_raw_with_progress(source, raw_out, jobs, &|_, _| {})
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs.clamp(1, 256))
+        .build()
+        .map_err(|err| error(format!("cannot start extraction workers: {err}")))?
+        .install(|| extract_raw_with_progress(source, raw_out, jobs, &Phase::noop()))
 }
 
 /// Reports each raw file after copying or verifying its cached contents.
@@ -564,56 +569,51 @@ pub fn extract_raw_with_progress(
     source: &Path,
     raw_out: &Path,
     jobs: usize,
-    progress: &(dyn Fn(usize, usize) + Sync),
+    phase: &Phase,
 ) -> CoreResult<(u64, u64)> {
     if jobs == 0 || jobs > 256 {
         return Err(error("jobs must be in 1..=256"));
     }
     let archive = open_archive(source)?;
     let (plan, files, bytes) = plan_archive(&archive)?;
-    eprintln!(
-        "dc2data: extracting {} raw files ({} bytes) with {} workers",
+    let planned: u64 = plan.iter().map(|item| item.extent.size).sum();
+    phase.log(format!(
+        "extracting {} raw files ({}) with {} workers",
         plan.len(),
-        bytes,
+        super::progress::size(planned),
         jobs
-    );
+    ));
+    phase.set_total(planned);
     fs::create_dir_all(raw_out)?;
     let completed = AtomicUsize::new(0);
     let skipped = AtomicUsize::new(0);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(jobs)
-        .build()
-        .map_err(|err| error(format!("cannot start extraction workers: {err}")))?;
-    pool.install(|| {
-        plan.par_iter().try_for_each(|item| -> CoreResult<()> {
-            let target = raw_out.join(&item.rel);
-            if extent_matches(&item.extent, &target)
-                .map_err(|err| error(format!("{}: resume comparison: {}", item.rel, err.0)))?
-            {
-                skipped.fetch_add(1, Ordering::Relaxed);
-            } else {
-                copy_extent(&item.extent, &target)
-                    .map_err(|err| error(format!("{}: {}", item.rel, err.0)))?;
-            }
-            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            progress(done, plan.len());
-            if done.is_multiple_of(500) || done == plan.len() {
-                eprintln!(
-                    "dc2data: raw files {done}/{} ({} verified and reused)",
-                    plan.len(),
-                    skipped.load(Ordering::Relaxed)
-                );
-            }
-            Ok(())
-        })
+    plan.par_iter().try_for_each(|item| -> CoreResult<()> {
+        let target = raw_out.join(&item.rel);
+        if item.extent.size >= 8 << 20 {
+            phase.item(&item.rel);
+        }
+        if extent_matches(&item.extent, &target)
+            .map_err(|err| error(format!("{}: resume comparison: {}", item.rel, err.0)))?
+        {
+            skipped.fetch_add(1, Ordering::Relaxed);
+        } else {
+            copy_extent(&item.extent, &target)
+                .map_err(|err| error(format!("{}: {}", item.rel, err.0)))?;
+        }
+        completed.fetch_add(1, Ordering::Relaxed);
+        phase.inc(item.extent.size);
+        phase.add_bytes(item.extent.size);
+        Ok(())
     })?;
     if completed.load(Ordering::Relaxed) != plan.len() {
         return Err(error("incomplete raw extraction"));
     }
-    eprintln!(
-        "dc2data: raw extraction complete; {} files reused after byte verification",
-        skipped.load(Ordering::Relaxed)
-    );
+    let skipped = skipped.load(Ordering::Relaxed);
+    if skipped > 0 {
+        phase.log(format!(
+            "{skipped} raw files reused after byte verification"
+        ));
+    }
     Ok((files, bytes))
 }
 

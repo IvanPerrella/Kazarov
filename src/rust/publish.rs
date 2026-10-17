@@ -1,5 +1,7 @@
+use super::progress::Phase;
 use super::zip_archive::{self, Archive, Input, content_digest};
 use super::{CoreError, CoreResult, textures};
+use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -312,51 +314,94 @@ fn check_levels(
     Ok(())
 }
 /// Validates staged `data` and `port_data` trees before they are packed.
-pub fn verify_trees(root: &Path) -> CoreResult<u64> {
+pub fn verify_trees(root: &Path, phase: &Phase) -> CoreResult<u64> {
     let port = root.join("port_data");
     let data = root.join("data");
     let mut port_files = BTreeSet::new();
     files(&port, &port, &mut port_files)?;
     let mut data_files = BTreeSet::new();
     files(&data, &data, &mut data_files)?;
-    for relative in &data_files {
-        let path = data.join(relative);
-        if relative.to_ascii_lowercase().ends_with(".chr") {
-            return Err(fail(format!(
-                "legacy character container remains: {relative}"
-            )));
-        }
-        if fs::metadata(&path)?.len() <= 128 << 20 {
-            textures::audit_payload(&fs::read(path)?, relative)?;
-        } else if !textures::large_known_non_texture(relative) {
-            return Err(fail(format!("unrecognized large data file: {relative}")));
-        }
-    }
-    for relative in &port_files {
-        if matches!(
-            relative.as_str(),
-            "catalog.json"
-                | "audio_catalog.json"
-                | "model_catalog.json"
-                | "cfg_catalog.json"
-                | "manifest.json"
-        ) {
-            return Err(fail(format!("obsolete runtime index remains: {relative}")));
-        }
-        if relative.ends_with(".json") {
-            let document: Value = serde_json::from_slice(&fs::read(port.join(relative))?)?;
-            if document["schema_version"] == 3
-                && document.get("groups").is_some()
-                && document.get("entries").is_some()
-            {
-                verify_texture_document(&port, relative, &port_files)?;
+    phase.set_total((data_files.len() + port_files.len() + 4) as u64);
+    let data_checks = data_files
+        .par_iter()
+        .map(|relative| -> CoreResult<()> {
+            let path = data.join(relative);
+            if relative.to_ascii_lowercase().ends_with(".chr") {
+                return Err(fail(format!(
+                    "legacy character container remains: {relative}"
+                )));
             }
-        }
-    }
-    super::models::verify(root)?;
-    super::audio::verify(root)?;
-    super::configs::verify(root)?;
-    super::packs::verify(root)?;
+            if fs::metadata(&path)?.len() <= 128 << 20 {
+                textures::audit_payload(&fs::read(path)?, relative)?;
+            } else if !textures::large_known_non_texture(relative) {
+                return Err(fail(format!("unrecognized large data file: {relative}")));
+            }
+            phase.inc(1);
+            Ok(())
+        })
+        .collect::<Vec<CoreResult<()>>>();
+    data_checks.into_iter().collect::<CoreResult<()>>()?;
+    let port_checks = port_files
+        .par_iter()
+        .map(|relative| -> CoreResult<()> {
+            if matches!(
+                relative.as_str(),
+                "catalog.json"
+                    | "audio_catalog.json"
+                    | "model_catalog.json"
+                    | "cfg_catalog.json"
+                    | "manifest.json"
+            ) {
+                return Err(fail(format!("obsolete runtime index remains: {relative}")));
+            }
+            if relative.ends_with(".json") {
+                let document: Value = serde_json::from_slice(&fs::read(port.join(relative))?)?;
+                if document["schema_version"] == 3
+                    && document.get("groups").is_some()
+                    && document.get("entries").is_some()
+                {
+                    verify_texture_document(&port, relative, &port_files)?;
+                }
+            }
+            phase.inc(1);
+            Ok(())
+        })
+        .collect::<Vec<CoreResult<()>>>();
+    port_checks.into_iter().collect::<CoreResult<()>>()?;
+    let ((models, audio), (configs, packs)) = rayon::join(
+        || {
+            rayon::join(
+                || {
+                    let result = super::models::verify(root);
+                    phase.inc(1);
+                    result
+                },
+                || {
+                    let result = super::audio::verify(root);
+                    phase.inc(1);
+                    result
+                },
+            )
+        },
+        || {
+            rayon::join(
+                || {
+                    let result = super::configs::verify(root);
+                    phase.inc(1);
+                    result
+                },
+                || {
+                    let result = super::packs::verify(root);
+                    phase.inc(1);
+                    result
+                },
+            )
+        },
+    );
+    models?;
+    audio?;
+    configs?;
+    packs?;
     Ok(port_files
         .iter()
         .filter(|name| name.ends_with(".png"))
@@ -527,11 +572,16 @@ pub fn tree_inputs(root: &Path) -> CoreResult<Vec<Input>> {
 }
 
 /// Packs verified staged trees into `data.zip`, deleting each file once it is written.
-pub fn pack_trees(
-    root: &Path,
-    progress: &(dyn Fn(u64, u64) + Sync),
-) -> CoreResult<zip_archive::Written> {
-    let written = zip_archive::write(tree_inputs(root)?, &root.join(ARCHIVE), true, progress)?;
+pub fn pack_trees(root: &Path, phase: &Phase) -> CoreResult<zip_archive::Written> {
+    let written = zip_archive::write(
+        tree_inputs(root)?,
+        &root.join(ARCHIVE),
+        true,
+        &|done, total| {
+            phase.set_total(total);
+            phase.set_done(done);
+        },
+    )?;
     for tree in ["data", "port_data"] {
         let base = root.join(tree);
         if base.is_dir() {
@@ -542,12 +592,9 @@ pub fn pack_trees(
 }
 
 /// Packs staged trees and writes the marker describing the archive.
-pub fn seal(
-    root: &Path,
-    mut marker: Value,
-    progress: &(dyn Fn(u64, u64) + Sync),
-) -> CoreResult<zip_archive::Written> {
-    let written = pack_trees(root, progress)?;
+pub fn seal(root: &Path, mut marker: Value, phase: &Phase) -> CoreResult<zip_archive::Written> {
+    let written = pack_trees(root, phase)?;
+    phase.add_bytes(written.size);
     marker["layout"] = LAYOUT.into();
     marker["archive_size"] = written.size.into();
     marker["archive_entries"] = written.entries.into();
@@ -607,6 +654,11 @@ pub fn archive_present(root: &Path, marker: &Value) -> bool {
 
 /// Fully verifies a published archive against its marker, returning its PNG count.
 pub fn verify(root: &Path) -> CoreResult<u64> {
+    verify_with_progress(root, &Phase::noop())
+}
+
+/// Fully verifies a published archive against its marker, reporting verified entries.
+pub fn verify_with_progress(root: &Path, phase: &Phase) -> CoreResult<u64> {
     let marker = read_marker(root)?;
     if !archive_present(root, &marker) {
         return Err(fail(
@@ -614,7 +666,8 @@ pub fn verify(root: &Path) -> CoreResult<u64> {
         ));
     }
     let archive = Archive::open(&root.join(ARCHIVE))?;
-    let mut records = archive.verify_entries(&audit_entry)?;
+    phase.set_total(archive.len() as u64);
+    let mut records = archive.verify_entries_with_progress(&audit_entry, &|n| phase.inc(n))?;
     if marker["archive_entries"].as_u64() != Some(records.len() as u64) {
         return Err(fail("data.zip entry count does not match data.json"));
     }
@@ -756,7 +809,7 @@ mod tests {
         staged_trees(root);
         finalize_assets(root).unwrap();
         assert!(!root.join("port_data/manifest.json").exists());
-        let written = seal(root, marker(), &|_, _| {}).unwrap();
+        let written = seal(root, marker(), &Phase::noop()).unwrap();
         assert!(!root.join("data").exists() && !root.join("port_data").exists());
         assert_eq!(written.entries, 3);
         assert_eq!(verify(root).unwrap(), 1);
@@ -783,7 +836,7 @@ mod tests {
         let staged = temp.path().join("stage");
         staged_trees(&staged);
         finalize_assets(&staged).unwrap();
-        seal(&staged, marker(), &|_, _| {}).unwrap();
+        seal(&staged, marker(), &Phase::noop()).unwrap();
         fs::create_dir_all(root.join("data")).unwrap();
         fs::create_dir_all(root.join("port_data/old")).unwrap();
         fs::write(root.join("port_data/old/file.bin"), b"old").unwrap();

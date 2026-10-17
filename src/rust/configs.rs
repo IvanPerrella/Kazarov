@@ -1,5 +1,10 @@
-//! Publishes tagged configuration scripts as typed, directly executable JSON documents.
+//! Publishes tagged configuration scripts as native semantic JSON documents.
+//!
+//! The tokenizer below reads a script into the commands and typed operands the retail interpreter
+//! pushes; `configs_native` turns them into the document of the script's family.
+use super::progress::Phase;
 use super::{CoreError, CoreResult};
+use rayon::prelude::*;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -395,7 +400,9 @@ fn parse_subtitles(raw: &[u8]) -> CoreResult<Value> {
         }
     }
     finish(&mut chapters, &mut id, &mut entries, pending, start, clear);
-    Ok(json!({"schema_version":1,"kind":"movie_subtitles","chapters":chapters}))
+    Ok(
+        json!({"schema_version":super::configs_native::SCHEMA_VERSION,"kind":"movie_subtitles","chapters":chapters}),
+    )
 }
 pub(crate) fn parse(raw: &[u8]) -> CoreResult<Value> {
     if raw.trim_ascii_start().starts_with(b"@") {
@@ -653,14 +660,21 @@ fn save(path: &Path, value: &Value) -> CoreResult<()> {
     fs::write(path, serde_json::to_vec_pretty(value)?)?;
     Ok(())
 }
-fn convert(
+enum Planned {
+    Unused(String),
+    Save {
+        alias: String,
+        path: String,
+        document: Value,
+    },
+}
+fn plan(
     raw: &[u8],
     alias: &str,
-    published: &Path,
     excluded: &BTreeSet<String>,
-    catalog: &mut BTreeMap<String, Value>,
     identities: &BTreeSet<String>,
     depth: usize,
+    out: &mut Vec<Planned>,
 ) -> CoreResult<()> {
     if depth > 16 {
         return Err(fail("CFG PACK nesting exceeds 16"));
@@ -670,25 +684,18 @@ fn convert(
             let path = output_path(alias);
             let mut document = parse(raw).map_err(|e| fail(format!("{alias}: {e}")))?;
             migrate_references(&mut document, alias, identities);
-            let target = published.join("port_data").join(&path);
-            if let Some((owner, _)) = catalog.iter().find(|(_, value)| {
-                value
-                    .as_str()
-                    .is_some_and(|existing| existing.eq_ignore_ascii_case(&path))
-            }) {
-                return Err(fail(format!(
-                    "native CFG output collision: {owner} and {alias} -> {path}"
-                )));
+            if super::configs_native::unused(alias) {
+                out.push(Planned::Unused(alias.into()));
+                return Ok(());
             }
-            if target.exists() {
-                return Err(fail(format!(
-                    "native CFG output collision with converted asset: {alias} -> {path}"
-                )));
+            if document["kind"] != "movie_subtitles" {
+                document = super::configs_native::build(alias, &document)?.0;
             }
-            save(&target, &document)?;
-            if catalog.insert(alias.into(), json!(path)).is_some() {
-                return Err(fail("duplicate CFG alias"));
-            }
+            out.push(Planned::Save {
+                alias: alias.into(),
+                path,
+                document,
+            });
         }
         return Ok(());
     }
@@ -703,18 +710,65 @@ fn convert(
             } else {
                 format!("{alias}/{}#entry:{i}", m.name)
             };
-            convert(
+            plan(
                 slice(raw, m.start, m.size)?,
                 &child,
-                published,
                 excluded,
-                catalog,
                 identities,
                 depth + 1,
+                out,
             )?;
         }
     }
     Ok(())
+}
+#[derive(Default)]
+struct Catalog {
+    aliases: BTreeMap<String, Value>,
+    paths: BTreeMap<String, String>,
+    writes: Vec<(PathBuf, Value)>,
+}
+impl Catalog {
+    fn record(&mut self, planned: Planned, published: &Path) -> CoreResult<()> {
+        match planned {
+            Planned::Unused(alias) => {
+                if self.aliases.insert(alias, Value::Null).is_some() {
+                    return Err(fail("duplicate CFG alias"));
+                }
+            }
+            Planned::Save {
+                alias,
+                path,
+                document,
+            } => {
+                if let Some(owner) = self.paths.get(&path.to_ascii_lowercase()) {
+                    return Err(fail(format!(
+                        "native CFG output collision: {owner} and {alias} -> {path}"
+                    )));
+                }
+                let target = published.join("port_data").join(&path);
+                if target.exists() {
+                    return Err(fail(format!(
+                        "native CFG output collision with converted asset: {alias} -> {path}"
+                    )));
+                }
+                if self.aliases.insert(alias.clone(), json!(path)).is_some() {
+                    return Err(fail("duplicate CFG alias"));
+                }
+                self.paths.insert(path.to_ascii_lowercase(), alias);
+                self.writes.push((target, document));
+            }
+        }
+        Ok(())
+    }
+    fn commit(&self) -> CoreResult<()> {
+        let saved: Vec<CoreResult<()>> = self
+            .writes
+            .par_iter()
+            .map(|(target, document)| save(target, document))
+            .collect();
+        saved.into_iter().collect()
+    }
 }
 fn strip(
     raw: &mut [u8],
@@ -763,78 +817,98 @@ fn files(directory: &Path, out: &mut Vec<PathBuf>) -> CoreResult<()> {
 }
 
 /// Publishes every direct or PACK-contained CFG and removes its compatibility payload.
-pub fn convert_tree(raw: &Path, published: &Path, _jobs: usize) -> CoreResult<()> {
+pub fn convert_tree(raw: &Path, published: &Path, phase: &Phase) -> CoreResult<()> {
     let excluded = BTreeSet::new();
-    let mut catalog = BTreeMap::new();
     let mut all = Vec::new();
     files(raw, &mut all)?;
     all.sort();
-    let mut identities = BTreeSet::new();
-    for path in &all {
-        let alias = path
-            .strip_prefix(raw)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        identities.insert(alias.to_ascii_lowercase());
-        if fs::metadata(path)?.len() <= 128 << 20 {
+    phase.set_total(3 * all.len() as u64);
+    let entries = all
+        .iter()
+        .map(|path| -> CoreResult<_> {
             let alias = path
                 .strip_prefix(raw)
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            inventory(&fs::read(path)?, &alias, &mut identities, 0)?;
-        }
-    }
-    for path in &all {
-        if fs::metadata(path)?.len() > 128 << 20 {
-            continue;
-        }
-        let alias = path
-            .strip_prefix(raw)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        convert(
-            &fs::read(path)?,
-            &alias,
-            published,
-            &excluded,
-            &mut catalog,
-            &identities,
-            0,
-        )?;
-    }
-    let consumed: BTreeSet<_> = catalog.keys().cloned().collect();
-    for path in all {
-        let alias = path
-            .strip_prefix(raw)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        let target = published.join("data").join(path.strip_prefix(raw).unwrap());
-        if consumed.contains(&alias) {
-            if target.is_file() {
-                fs::remove_file(target)?
+            Ok((path, alias, fs::metadata(path)?.len()))
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    let identity_sets: Vec<CoreResult<BTreeSet<String>>> = entries
+        .par_iter()
+        .map(|(path, alias, len)| -> CoreResult<BTreeSet<String>> {
+            let mut set = BTreeSet::from([alias.to_ascii_lowercase()]);
+            if *len <= 128 << 20 {
+                inventory(&fs::read(path)?, alias, &mut set, 0)?;
             }
-            continue;
-        }
-        if target.is_file() && fs::metadata(&target)?.len() <= 128 << 20 {
-            let mut b = fs::read(&target)?;
-            if strip(&mut b, &alias, &consumed, 0)? {
-                fs::write(target, b)?
+            phase.inc(1);
+            Ok(set)
+        })
+        .collect();
+    let mut identities = BTreeSet::new();
+    for set in identity_sets {
+        identities.extend(set?);
+    }
+    let planned = entries
+        .par_iter()
+        .map(|(path, alias, len)| -> CoreResult<_> {
+            if *len > 128 << 20 {
+                phase.inc(1);
+                return Ok(None);
             }
+            if *len >= 2 << 20 {
+                phase.item(alias);
+            }
+            let mut out = Vec::new();
+            let result = plan(&fs::read(path)?, alias, &excluded, &identities, 0, &mut out);
+            phase.inc(1);
+            Ok(Some((out, result)))
+        })
+        .collect::<Vec<_>>();
+    let mut catalog = Catalog::default();
+    for item in planned {
+        let Some((planned, result)) = item? else {
+            continue;
+        };
+        for entry in planned {
+            catalog.record(entry, published)?;
         }
+        result?;
+    }
+    catalog.commit()?;
+    let consumed: BTreeSet<_> = catalog.aliases.keys().cloned().collect();
+    let stripped: Vec<CoreResult<()>> = entries
+        .par_iter()
+        .map(|(path, alias, _)| -> CoreResult<()> {
+            let target = published.join("data").join(path.strip_prefix(raw).unwrap());
+            phase.inc(1);
+            if consumed.contains(alias) {
+                if target.is_file() {
+                    fs::remove_file(target)?
+                }
+                return Ok(());
+            }
+            if target.is_file() && fs::metadata(&target)?.len() <= 128 << 20 {
+                let mut b = fs::read(&target)?;
+                if strip(&mut b, alias, &consumed, 0)? {
+                    fs::write(target, b)?
+                }
+            }
+            Ok(())
+        })
+        .collect();
+    for result in stripped {
+        result?;
     }
 
     Ok(())
 }
 
 fn validate_document(document: &Value) -> CoreResult<()> {
-    if document["schema_version"] != 1 {
-        return Err(fail("unsupported CFG document schema"));
-    }
     if document["kind"] == "movie_subtitles" {
+        if document["schema_version"] != super::configs_native::SCHEMA_VERSION {
+            return Err(fail("unsupported subtitle document schema"));
+        }
         for chapter in document["chapters"]
             .as_array()
             .ok_or_else(|| fail("subtitle chapters missing"))?
@@ -857,76 +931,22 @@ fn validate_document(document: &Value) -> CoreResult<()> {
                         return Err(fail("invalid subtitle timing"));
                     }
                 }
-                let mut text = entry.clone();
-                text["type"] = json!("string");
-                text["value"] = entry["text"].clone();
-                validate_document(
-                    &json!({"schema_version":1,"commands":[{"command":"TEXT","args":[text]}]}),
-                )?;
+                if !entry["text"].is_string() {
+                    return Err(fail("invalid subtitle text"));
+                }
+                if let Some(bytes) = entry.get("game_bytes") {
+                    let hex = bytes
+                        .as_str()
+                        .ok_or_else(|| fail("invalid subtitle byte fallback"))?;
+                    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(fail("invalid subtitle byte fallback"));
+                    }
+                }
             }
         }
         return Ok(());
     }
-    if !document["kind"].is_null() {
-        return Err(fail("unknown CFG document kind"));
-    }
-    for command in document["commands"]
-        .as_array()
-        .ok_or_else(|| fail("CFG commands missing"))?
-    {
-        if command["command"].as_str().is_none()
-            && command["tag_index"]
-                .as_i64()
-                .is_none_or(|v| !(0..=i16::MAX as i64).contains(&v))
-        {
-            return Err(fail("CFG command identity missing"));
-        }
-        for argument in command["args"]
-            .as_array()
-            .ok_or_else(|| fail("CFG arguments missing"))?
-        {
-            match argument["type"].as_str() {
-                Some("int") => {
-                    if argument["value"]
-                        .as_i64()
-                        .is_none_or(|v| i32::try_from(v).is_err())
-                    {
-                        return Err(fail("invalid CFG integer"));
-                    }
-                }
-                Some("float") => {
-                    if argument["value"]
-                        .as_f64()
-                        .is_none_or(|v| !(v as f32).is_finite())
-                    {
-                        return Err(fail("invalid CFG float"));
-                    }
-                }
-                Some("string") => {
-                    if !argument["value"].is_string() {
-                        return Err(fail("invalid CFG string"));
-                    }
-                    if let Some(bytes) = argument.get("game_bytes") {
-                        let hex = bytes
-                            .as_str()
-                            .ok_or_else(|| fail("invalid CFG string byte fallback"))?;
-                        if !hex.len().is_multiple_of(2)
-                            || !hex.bytes().all(|b| b.is_ascii_hexdigit())
-                        {
-                            return Err(fail("invalid CFG string byte fallback"));
-                        }
-                    }
-                }
-                Some("invalid") => {
-                    if !argument["value"].is_null() {
-                        return Err(fail("invalid CFG missing-value argument"));
-                    }
-                }
-                _ => return Err(fail("unknown CFG argument type")),
-            }
-        }
-    }
-    Ok(())
+    super::configs_native::validate(document)
 }
 fn audit_payload(b: &[u8], alias: &str, depth: usize) -> CoreResult<()> {
     if depth > 16 {
@@ -948,35 +968,49 @@ fn audit_payload(b: &[u8], alias: &str, depth: usize) -> CoreResult<()> {
     }
     Ok(())
 }
-/// Verifies typed CFG documents and rejects any retained compatibility CFG payloads.
+/// Verifies native configuration documents and rejects any retained compatibility CFG payloads.
 pub fn verify(root: &Path) -> CoreResult<()> {
     let port = root.join("port_data");
     if port.is_dir() {
         let mut all = Vec::new();
         files(&port, &mut all)?;
-        for path in all {
-            if path.extension().is_some_and(|e| e == "json") {
-                let doc: Value = serde_json::from_slice(&fs::read(&path)?)?;
-                if doc["commands"].is_array() || doc["kind"] == "movie_subtitles" {
-                    validate_document(&doc)?;
-                }
-            }
+        all.sort();
+        let checked: Vec<CoreResult<()>> = all
+            .par_iter()
+            .filter(|path| {
+                let name = path.to_string_lossy().to_ascii_lowercase();
+                name.ends_with(".cfg.json") || name.ends_with(".map.json")
+            })
+            .map(|path| -> CoreResult<()> {
+                let doc: Value = serde_json::from_slice(&fs::read(path)?)?;
+                validate_document(&doc).map_err(|e| fail(format!("{}: {e}", path.display())))
+            })
+            .collect();
+        for result in checked {
+            result?;
         }
     }
     let data = root.join("data");
     if data.is_dir() {
         let mut all = Vec::new();
         files(&data, &mut all)?;
-        for path in all {
-            if fs::metadata(&path)?.len() > 128 << 20 {
-                continue;
-            }
-            let alias = path
-                .strip_prefix(&data)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            audit_payload(&fs::read(path)?, &alias, 0)?;
+        all.sort();
+        let audited: Vec<CoreResult<()>> = all
+            .par_iter()
+            .map(|path| -> CoreResult<()> {
+                if fs::metadata(path)?.len() > 128 << 20 {
+                    return Ok(());
+                }
+                let alias = path
+                    .strip_prefix(&data)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                audit_payload(&fs::read(path)?, &alias, 0)
+            })
+            .collect();
+        for result in audited {
+            result?;
         }
     }
     Ok(())
@@ -985,6 +1019,19 @@ pub fn verify(root: &Path) -> CoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn record_alias(
+        catalog: &mut Catalog,
+        raw: &[u8],
+        alias: &str,
+        published: &Path,
+    ) -> CoreResult<()> {
+        let mut out = Vec::new();
+        plan(raw, alias, &BTreeSet::new(), &BTreeSet::new(), 0, &mut out)?;
+        for planned in out {
+            catalog.record(planned, published)?;
+        }
+        Ok(())
+    }
     #[test]
     fn text_types_comments_and_escapes_match_interpreter() {
         let doc =
@@ -1089,22 +1136,28 @@ mod tests {
     }
 
     #[test]
-    fn map_and_cfg_scripts_keep_distinct_physical_paths_and_commands() {
+    fn map_and_cfg_scripts_keep_distinct_physical_paths_and_kinds() {
         let temp = tempfile::tempdir().unwrap();
         let raw = temp.path().join("raw");
         let output = temp.path().join("out");
-        fs::create_dir_all(&raw).unwrap();
-        fs::write(raw.join("room.cfg"), b"WATER_SURFACE_NUM 1;").unwrap();
-        fs::write(raw.join("room.map"), b"PIECE room;").unwrap();
-        convert_tree(&raw, &output, 1).unwrap();
-        let water: Value =
-            serde_json::from_slice(&fs::read(output.join("port_data/room.cfg.json")).unwrap())
-                .unwrap();
-        let map: Value =
-            serde_json::from_slice(&fs::read(output.join("port_data/room.map.json")).unwrap())
-                .unwrap();
-        assert_eq!(water["commands"][0]["command"], "WATER_SURFACE_NUM");
-        assert_eq!(map["commands"][0]["command"], "PIECE");
+        fs::create_dir_all(raw.join("map/r")).unwrap();
+        fs::write(raw.join("map/r/room.cfg"), b"WATER_SURFACE_NUM 1;").unwrap();
+        fs::write(raw.join("map/r/room.map"), b"PARTS \"p\"; PARTS_END;").unwrap();
+        convert_tree(&raw, &output, &Phase::noop()).unwrap();
+        let water: Value = serde_json::from_slice(
+            &fs::read(output.join("port_data/map/r/room.cfg.json")).unwrap(),
+        )
+        .unwrap();
+        let map: Value = serde_json::from_slice(
+            &fs::read(output.join("port_data/map/r/room.map.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(water["kind"], "scene_config");
+        assert_eq!(water["water"]["surface_count"], 1);
+        assert_eq!(map["kind"], "scene_map");
+        assert_eq!(map["parts"][0]["name"], "p");
+        assert!(water.get("commands").is_none() && map.get("commands").is_none());
+        verify(&output).unwrap();
         assert_eq!(
             native_path("outer.pac/room.MAP#entry:2", "json"),
             "outer.pac/room.entry_2.map.json"
@@ -1112,35 +1165,60 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_configuration_output_collision_fails_before_overwrite() {
+    fn unused_retail_scripts_are_consumed_without_a_document() {
         let temp = tempfile::tempdir().unwrap();
-        let mut catalog = BTreeMap::new();
-        convert(
-            b"FIRST 1;",
+        let raw = temp.path().join("raw");
+        let output = temp.path().join("out");
+        fs::create_dir_all(&raw).unwrap();
+        fs::write(raw.join("edit.cfg"), b"CHARA \"a.chr\";").unwrap();
+        convert_tree(&raw, &output, &Phase::noop()).unwrap();
+        assert!(!output.join("port_data/edit.cfg.json").exists());
+        assert!(!output.join("data/edit.cfg").exists());
+    }
+
+    #[test]
+    fn scripts_no_family_claims_fail_conversion() {
+        let mut out = Vec::new();
+        let error = plan(
+            b"TAG 1;",
             "room.cfg",
-            temp.path(),
             &BTreeSet::new(),
-            &mut catalog,
             &BTreeSet::new(),
             0,
-        )
-        .unwrap();
-        let error = convert(
-            b"SECOND 2;",
-            "ROOM.CFG",
-            temp.path(),
-            &BTreeSet::new(),
-            &mut catalog,
-            &BTreeSet::new(),
-            0,
+            &mut out,
         )
         .unwrap_err()
         .to_string();
+        assert!(error.contains("no configuration family"), "{error}");
+    }
+
+    #[test]
+    fn verify_rejects_command_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("port_data")).unwrap();
+        fs::write(
+            temp.path().join("port_data/old.cfg.json"),
+            br#"{"schema_version":1,"commands":[]}"#,
+        )
+        .unwrap();
+        assert!(verify(temp.path()).is_err());
+    }
+
+    #[test]
+    fn unresolved_configuration_output_collision_fails_before_overwrite() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut catalog = Catalog::default();
+        record_alias(&mut catalog, b"SHOP 1;", "menu/shoplst1.cfg", temp.path()).unwrap();
+        catalog.commit().unwrap();
+        let error = record_alias(&mut catalog, b"SHOP 2;", "MENU/SHOPLST1.CFG", temp.path())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("collision"), "{error}");
-        let first: Value =
-            serde_json::from_slice(&fs::read(temp.path().join("port_data/room.cfg.json")).unwrap())
-                .unwrap();
-        assert_eq!(first["commands"][0]["command"], "FIRST");
+        let first: Value = serde_json::from_slice(
+            &fs::read(temp.path().join("port_data/menu/shoplst1.cfg.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first["shops"][0]["id"], 1);
     }
 
     #[test]
@@ -1148,22 +1226,22 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let raw = temp.path().join("raw");
         let output = temp.path().join("out");
-        fs::create_dir_all(&raw).unwrap();
-        fs::create_dir_all(output.join("port_data")).unwrap();
-        fs::write(raw.join("room.cfg"), b"WATER_SURFACE_NUM 1;").unwrap();
+        fs::create_dir_all(raw.join("map")).unwrap();
+        fs::create_dir_all(output.join("port_data/map")).unwrap();
+        fs::write(raw.join("map/room.cfg"), b"WATER_SURFACE_NUM 1;").unwrap();
         fs::write(
-            output.join("port_data/room.cfg.json"),
+            output.join("port_data/map/room.cfg.json"),
             b"earlier converted texture",
         )
         .unwrap();
         assert!(
-            convert_tree(&raw, &output, 1)
+            convert_tree(&raw, &output, &Phase::noop())
                 .unwrap_err()
                 .to_string()
                 .contains("collision")
         );
         assert_eq!(
-            fs::read(output.join("port_data/room.cfg.json")).unwrap(),
+            fs::read(output.join("port_data/map/room.cfg.json")).unwrap(),
             b"earlier converted texture"
         );
     }
@@ -1184,6 +1262,131 @@ mod tests {
         audit_payload(&b, "hero.chr", 0).unwrap();
     }
 
+    /// Calls `visit` with every direct or PACK-contained CFG under a raw tree.
+    fn walk_cfgs(raw: &[u8], alias: &str, depth: usize, visit: &mut dyn FnMut(&str, &[u8])) {
+        if depth > 16 {
+            return;
+        }
+        if is_cfg(alias) {
+            visit(alias, raw);
+            return;
+        }
+        if let Some(members) = pack(raw) {
+            let mut names = BTreeSet::new();
+            for (i, m) in members.iter().enumerate() {
+                if m.size == 0 && !is_cfg(&m.name) {
+                    continue;
+                }
+                let child = if names.insert(m.name.clone()) {
+                    format!("{alias}/{}", m.name)
+                } else {
+                    format!("{alias}/{}#entry:{i}", m.name)
+                };
+                walk_cfgs(&raw[m.start..m.start + m.size], &child, depth + 1, visit);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires extracted retail assets in KZ_CFG_RAW"]
+    fn retail_cfg_family_report() {
+        // Reading the raw tree dominates; KZ_CFG_CACHE keeps the migrated command lists between runs.
+        let cache = std::env::var("KZ_CFG_CACHE").ok().map(PathBuf::from);
+        let mut documents: Vec<(String, Value)> = Vec::new();
+        if let Some(cached) = cache.as_ref().filter(|p| p.is_file()) {
+            let value: Value = serde_json::from_slice(&fs::read(cached).unwrap()).unwrap();
+            for item in value.as_array().unwrap() {
+                documents.push((item[0].as_str().unwrap().into(), item[1].clone()));
+            }
+        } else {
+            let raw = PathBuf::from(std::env::var("KZ_CFG_RAW").expect("KZ_CFG_RAW"));
+            let mut all = Vec::new();
+            files(&raw, &mut all).unwrap();
+            all.sort();
+            let mut identities = BTreeSet::new();
+            let mut scripts = Vec::new();
+            for path in &all {
+                let alias = path
+                    .strip_prefix(&raw)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                identities.insert(alias.to_ascii_lowercase());
+                if fs::metadata(path).unwrap().len() > 128 << 20 {
+                    continue;
+                }
+                let bytes = fs::read(path).unwrap();
+                inventory(&bytes, &alias, &mut identities, 0).unwrap();
+                walk_cfgs(&bytes, &alias, 0, &mut |alias, data| {
+                    if !in_character(alias) && !super::super::audio::owns_config(alias) {
+                        scripts.push((alias.to_owned(), data.to_vec()));
+                    }
+                });
+            }
+            for (alias, data) in &scripts {
+                let mut document = parse(data).unwrap();
+                migrate_references(&mut document, alias, &identities);
+                documents.push((alias.clone(), document));
+            }
+            if let Some(cached) = &cache {
+                let value: Vec<Value> = documents.iter().map(|(a, d)| json!([a, d])).collect();
+                fs::write(cached, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+        }
+        let mut kinds = BTreeMap::<String, usize>::new();
+        let mut failures = Vec::new();
+        let mut stale = Vec::new();
+        let mut dropped = BTreeMap::<String, usize>::new();
+        let filter = std::env::var("KZ_CFG_FILTER").unwrap_or_default();
+        for (alias, document) in &documents {
+            if !alias.contains(filter.as_str()) {
+                continue;
+            }
+            if super::super::configs_native::unused(alias) {
+                *kinds.entry("(unused)".into()).or_default() += 1;
+                continue;
+            }
+            if document["kind"] == "movie_subtitles" {
+                *kinds.entry("movie_subtitles".into()).or_default() += 1;
+                continue;
+            }
+            match super::super::configs_native::build(alias, document) {
+                Ok((native, report)) => {
+                    *kinds
+                        .entry(native["kind"].as_str().unwrap().into())
+                        .or_default() += 1;
+                    for s in report.stale {
+                        stale.push(format!("{alias}: {s}"));
+                    }
+                    for d in report.dropped {
+                        *dropped.entry(d).or_default() += 1;
+                    }
+                    if let Ok(out) = std::env::var("KZ_CFG_DUMP") {
+                        let target = PathBuf::from(out).join(output_path(alias));
+                        save(&target, &native).unwrap();
+                    }
+                }
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        println!("{} scripts", documents.len());
+        for (kind, count) in &kinds {
+            println!("kind {kind}: {count}");
+        }
+        for (name, count) in &dropped {
+            println!("dropped {name}: {count}");
+        }
+        stale.sort();
+        stale.dedup();
+        for s in &stale {
+            println!("stale {s}");
+        }
+        for f in &failures {
+            println!("FAIL {f}");
+        }
+        assert!(failures.is_empty(), "{} scripts failed", failures.len());
+    }
+
     #[test]
     #[ignore = "requires extracted retail assets in KZ_CFG_RAW and isolated KZ_CFG_OUTPUT"]
     fn retail_cfg_audit() {
@@ -1193,7 +1396,7 @@ mod tests {
         if let Some(audio) = std::env::var_os("KZ_CFG_AUDIO_CATALOG") {
             fs::copy(audio, output.join("port_data/audio_catalog.json")).unwrap();
         }
-        convert_tree(&raw, &output, 4).unwrap();
+        convert_tree(&raw, &output, &Phase::noop()).unwrap();
         verify(&output).unwrap();
     }
 }

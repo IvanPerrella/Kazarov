@@ -340,6 +340,19 @@ to that list. The Vulkan loader download
 is pinned and hash-checked when `KZ_VULKAN_RUNTIME_DIR` is not supplied. These
 rules copy program dependencies only; they never include retail game assets.
 
+## Models and actions
+
+`src/rust/models.rs` converts the game's models, skeletons and motions into glTF with
+gameplay sidecars, and `src/rust/actions.rs` names their actions. Every CFG `KEY`
+interval becomes one glTF animation named in English from
+`assets/motion_names.json`; conversion fails when a motion name has no entry. A
+motion that only drives other bundles' models is published into the models the
+game's scripts and code load it onto, never as an animation-only glTF; the scan of
+compiled scripts is in `src/rust/native_scripts.rs`. Each glTF keeps its binary data
+in one `<file>.gltf.bin` beside it. Only ChronicleTwo uses these
+modules; Chronicle's pinned revision does not contain the Rust publisher. Changes
+to the published format bump `data_version.json`.
+
 ## License
 
 Kazarov is released under the MIT License (see `LICENSE`), copyright TheMoonPeople.
