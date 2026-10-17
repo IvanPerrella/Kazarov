@@ -396,6 +396,8 @@ void RecreateRenderTargets();
 void           RecreateSharedTargets();
 LogicalMapping TextureMapping(const Texture &texture);
 bool           FrameShaped(const Texture &texture);
+// A frame target as tall as the logical frame, which also keeps the rows past the frame.
+bool FullHeightFrame(const Texture &texture);
 // What DestroyTexture and DestroyMesh do once no list may draw the resource any more.
 void DestroyDoomedTexture(TextureHandle handle);
 void DestroyDoomedMesh(MeshHandle handle);

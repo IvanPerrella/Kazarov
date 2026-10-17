@@ -81,7 +81,8 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
     keeps the frame's width and shows more above and below). `VisibleLogicalRect(target)` is the
     logical rect the target's pixels cover; the game's culls test against it.
   - **The full-frame rule.** Along each axis on which the target shows past its frame (both on the
-    main target and the targets mapped like it, x on a frame target), a scissor or clear rect, and
+    main target, the targets mapped like it and a full-height frame target, x on another frame
+    target), a scissor or clear rect, and
     every axis-aligned rectangle of a `Quads` or four-vertex strip `Draw2D` whose texture is none, an
     image of the frame (`kPreviousFrame`, a frame target, a target sharing the main depth) or
     another image that shows past its frame, is carried to the target's edge on every side where it
@@ -106,8 +107,9 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
     along an axis, copies them edge to edge along it.
   - **Frame targets** (`CreateRenderTarget(..., frame_target = true)`; the game's `frame_*` grabs)
     are the main target's pixel width with their logical width laid over its logical frame, and
-    rows at the main target's scale, so a grab of the frame keeps its sides. Other render targets
-    keep their logical size at the render scale.
+    rows at the main target's scale, so a grab of the frame keeps its sides. A full-height one (as
+    tall as the logical frame) is the main target's size and keeps the rows above and below as well.
+    Other render targets keep their logical size at the render scale.
 - **`UiAnchor`** (`SetUiAnchor`, `UiAnchorScope`; the default anchors nothing). While one is set,
   each `Draw2D` the UI mapping places on the main target is classified by the centre of its bounds
   against the anchor's four limits and moved, whole and unscaled, by the pixels between the UI

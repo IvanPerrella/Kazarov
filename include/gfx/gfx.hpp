@@ -200,7 +200,8 @@ TextureHandle CreatePalette();
 //
 // A frame target holds copies of the frame (the game's frame grabs). With AspectMode::Fill it is
 // the main target's pixel width and maps its logical width onto the main target's logical frame,
-// so the frame's sides past the logical frame are kept; rows keep the render target's scale.
+// so the frame's sides past the logical frame are kept; rows keep the render target's scale. One as
+// tall as the logical frame is the main target's size and keeps the rows past the frame as well.
 // With AspectMode::Letterbox it is an ordinary render target.
 TextureHandle CreateRenderTarget(uint32_t logical_width, uint32_t logical_height, bool has_alpha,
                                  bool share_main_depth = false, bool frame_target = false);
@@ -614,7 +615,7 @@ private:
 };
 // The logical rect the target's pixels show: its logical frame, or with AspectMode::Fill on the main
 // target (and the targets mapped like it) all of the target, past the frame on its wider axis, and
-// on a frame target the main target's horizontal extent.
+// on a frame target the main target's horizontal extent (and vertical, on a full-height one).
 LogicalRect VisibleLogicalRect(TextureHandle target);
 // Clears the current target within rect (logical; null: all of it). color is GS bytes.
 // A presentation rectangle replaces only the recorded display clear's region.

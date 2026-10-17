@@ -132,12 +132,12 @@ uint32_t ScaledSize(uint32_t logical, float scale) {
     return std::max(1u, static_cast<uint32_t>(std::ceil(static_cast<float>(logical) * scale)));
 }
 
-// What a render target's image measures now: the main target's for one sharing its depth, the main
-// target's width and the main frame's scale in rows for a frame target filling the window, its
-// logical size at the render scale otherwise.
+// What a render target's image measures now: the main target's for one sharing its depth or a
+// full-height frame target filling the window, the main target's width and the main frame's scale in
+// rows for another frame target filling it, its logical size at the render scale otherwise.
 void TargetPixelSize(const Texture &texture, uint32_t &width, uint32_t &height) {
     const Image &main = g.main_color[0];
-    if (texture.shares_main_depth) {
+    if (texture.shares_main_depth || (FrameShaped(texture) && FullHeightFrame(texture))) {
         width = main.width;
         height = main.height;
     } else if (FrameShaped(texture)) {
@@ -172,9 +172,20 @@ bool IsDepthFormat(VkFormat format) {
 
 bool FrameShaped(const Texture &texture) { return texture.frame && FillsWindow(); }
 
+bool FullHeightFrame(const Texture &texture) {
+    return texture.frame && texture.logical_height == g.config.logical_height;
+}
+
 LogicalMapping TextureMapping(const Texture &texture) {
     if (texture.shares_main_depth) {
         return MainMapping(texture.image.width, texture.image.height);
+    }
+    if (FrameShaped(texture) && FullHeightFrame(texture)) {
+        // The image is the main target's as it was allocated; the logical width lies over its logical
+        // frame, which keeps the sides and the rows above and below.
+        LogicalMapping mapping = MainMapping(texture.image.width, texture.image.height);
+        mapping.scale_x = mapping.scale_x * g.config.logical_width / static_cast<float>(texture.logical_width);
+        return mapping;
     }
     if (FrameShaped(texture)) {
         // The logical width lies over the main target's logical frame, whose sides it keeps.

@@ -900,7 +900,10 @@ uint32_t ExtentAxes(TextureHandle handle) {
     if (texture->shares_main_depth) {
         return kAxisX | kAxisY;
     }
-    return texture->frame ? kAxisX : 0;
+    if (!texture->frame) {
+        return 0;
+    }
+    return FullHeightFrame(*texture) ? kAxisX | kAxisY : kAxisX;
 }
 
 LogicalRect LogicalFrame(TextureHandle handle) {
