@@ -120,8 +120,10 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
   made and travels with it in a display list; the shift is taken at render time, so it follows
   the window and `ui_scale` (a HUD scaled past the window is pulled back to its edges). An
   anchored draw is never flanked by the full-frame rule and its scissor stays the frame's unless
-  the anchor's `scissor` flag (`Side(x, y, true)`) moves it with the draw. With
-  `AspectMode::Letterbox` at `ui_scale` 1 the shift is zero.
+  the anchor's `scissor` flag (`Side(x, y, true)`) moves it with the draw. A positive `max_aspect`
+  moves draws to the edges of a centred area no wider than that aspect instead, so a layout made for
+  16:9 stays together on an ultrawide window. With `AspectMode::Letterbox` at `ui_scale` 1 the shift
+  is zero.
 - **`AspectMode::Letterbox`** (`aspect = 4:3`). Nothing is carried past the frame: draws and clears on
   the main target stop at the frame's pixels, so the bars keep what they held, and frame targets are
   ordinary render targets.

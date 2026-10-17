@@ -153,6 +153,27 @@ TEST(GfxGpuMeshDc2, RightAnchoredHudClipsItsAnimationAtTheShiftedFrame) {
     EXPECT_TRUE(fixture.PixelNear(1240, 60, 255, 0, 0));
 }
 
+TEST(GfxGpuMeshDc2, AnchoredHudKeepsInsideItsMaximumAspect) {
+    // 32:9: the 4:3 frame is pixels 800..1760 and a centred 16:9 area pixels 640..1920.
+    GfxFixture fixture(2560, 720, 1.0f, true, kLogicalWidth, kLogicalHeight);
+    gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});
+    fixture.Frame(kBlue, [&] {
+        gfx::DrawState state;
+        state.depth_test = gfx::DepthTest::Always;
+        state.depth_write = false;
+        {
+            gfx::UiAnchorScope anchor(gfx::UiAnchor::Side(-1, -1, false, 16.0f / 9.0f));
+            gfx::Draw2D(gfx::Primitive::Quads, Quad(0, 17, 20, 50, kRed), {}, state);
+        }
+        gfx::UiAnchorScope anchor(gfx::UiAnchor::Side(1, -1, false, 16.0f / 9.0f));
+        gfx::Draw2D(gfx::Primitive::Quads, Quad(492, 17, 20, 50, kRed), {}, state);
+    });
+    EXPECT_TRUE(fixture.PixelNear(20, 60, 0, 0, 255));
+    EXPECT_TRUE(fixture.PixelNear(660, 60, 255, 0, 0));
+    EXPECT_TRUE(fixture.PixelNear(1900, 60, 255, 0, 0));
+    EXPECT_TRUE(fixture.PixelNear(2540, 60, 0, 0, 255));
+}
+
 TEST(GfxGpuMeshDc2, FillScissorCanKeepItsLogicalExtent) {
     GfxFixture fixture(1280, 720, 1.0f, true, kLogicalWidth, kLogicalHeight);
     gfx::SetFrameLayout(gfx::FrameLayout{gfx::AspectMode::Fill, 1.0f});

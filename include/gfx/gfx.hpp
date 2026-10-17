@@ -45,11 +45,14 @@ struct UiAnchor {
     float bottom_from = INFINITY;
     // A piece that clips to its own rectangle must scissor where it is drawn, or the shift clips it away.
     bool scissor = false;
+    // Above zero, the edges a draw moves to are those of a centred area no wider than this aspect (width over
+    // height), so a layout made for that width stays together on wider windows.
+    float max_aspect = 0.0f;
 
     // Every draw to one side: x -1 left, 1 right, y -1 top, 1 bottom, 0 the frame's own place.
-    static constexpr UiAnchor Side(int x, int y, bool follow_scissor = false) {
+    static constexpr UiAnchor Side(int x, int y, bool follow_scissor = false, float max_aspect = 0.0f) {
         return {x < 0 ? INFINITY : -INFINITY, x > 0 ? -INFINITY : INFINITY, y < 0 ? INFINITY : -INFINITY,
-                y > 0 ? -INFINITY : INFINITY, follow_scissor};
+                y > 0 ? -INFINITY : INFINITY, follow_scissor, max_aspect};
     }
 };
 
