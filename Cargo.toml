@@ -28,5 +28,5 @@ libc = "0.2"
 tempfile = "3.27.0"
 
 [build-dependencies]
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }
 cc = "1.2"

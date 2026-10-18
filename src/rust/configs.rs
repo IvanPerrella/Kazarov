@@ -2001,6 +2001,17 @@ pub fn verify(root: &Path) -> CoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_gameplay_preserves_source_decimal() {
+        let Some(document) = embedded_document("chara/e3_donnie.character.json") else {
+            assert_eq!(embedded_documents().count(), 0);
+            return;
+        };
+        let text = std::str::from_utf8(document).unwrap();
+        assert!(text.contains("\"value\":0.029999999329447746"));
+    }
+
     fn record_alias(
         catalog: &mut Catalog,
         raw: &[u8],

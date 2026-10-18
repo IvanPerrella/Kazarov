@@ -13,30 +13,6 @@ fn collect(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn compact_json(bytes: &[u8]) -> Vec<u8> {
-    let mut compact = Vec::with_capacity(bytes.len());
-    let mut in_string = false;
-    let mut escaped = false;
-    for &byte in bytes {
-        if in_string {
-            compact.push(byte);
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-        } else if byte == b'"' {
-            compact.push(byte);
-            in_string = true;
-        } else if !matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
-            compact.push(byte);
-        }
-    }
-    compact
-}
-
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(kazarov_ffmpeg)");
     println!("cargo:rerun-if-env-changed=KAZAROV_FFMPEG_INCLUDE");
@@ -125,7 +101,7 @@ fn main() {
         }
         let path = relative.to_ascii_lowercase();
         let offset = payload.len();
-        let compact = compact_json(&bytes);
+        let compact = serde_json::to_vec(&json).expect("serialize tracked config JSON");
         payload.extend_from_slice(&compact);
         embedded.push((path.clone(), offset, compact.len()));
         gameplay_paths.push(path);
@@ -190,23 +166,4 @@ fn main() {
         serde_json::to_vec(&plan).expect("compact clip plan"),
     )
     .expect("write embedded clip plan");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::compact_json;
-
-    #[test]
-    fn compaction_preserves_numbers_escapes_and_string_whitespace() {
-        let source = br#"{
-            "decimal": 0.03999999910593033,
-            "exponent": -1.2345678901234567e-9,
-            "text": " a \" b \n c ",
-            "slash": "C:\\game\/save",
-            "unicode": "\u263A"
-        }"#;
-        let expected = br#"{"decimal":0.03999999910593033,"exponent":-1.2345678901234567e-9,"text":" a \" b \n c ","slash":"C:\\game\/save","unicode":"\u263A"}"#;
-        assert_eq!(compact_json(source), expected);
-        assert!(serde_json::from_slice::<serde_json::Value>(expected).is_ok());
-    }
 }
