@@ -417,17 +417,11 @@ void ReadGamepad(SDL_Gamepad *gamepad, InputPadState &state) {
                       SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTY),
                       SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTX),
                       SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY)};
-    auto   invert = [&](int x) {
-        if (g_stick_invert_x) {
-            axes[x] = Flip(axes[x]);
-        }
-        if (g_stick_invert_y) {
-            axes[x + 1] = Flip(axes[x + 1]);
-        }
-    };
-    invert(2);
-    if (g_look_left) {
-        invert(0);
+    if (g_stick_invert_x) {
+        axes[2] = Flip(axes[2]);
+    }
+    if (g_stick_invert_y) {
+        axes[3] = Flip(axes[3]);
     }
     StickPairToBytes(axes[0], axes[1], state.left_x, state.left_y);
     StickPairToBytes(axes[2], axes[3], state.right_x, state.right_y);
