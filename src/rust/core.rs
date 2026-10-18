@@ -491,9 +491,11 @@ fn extract_stages(
     phase.set_total(files);
     reporter.done(Stage::Extract);
     let gameplay_plan_sha256 = configs::asset_plan_fingerprint();
+    let gameplay_source_fingerprint = configs::embedded_fingerprint();
     let metadata = serde_json::json!({
         "schema_version":1,"data_version":data_version(),"source":source.to_string_lossy(),
-        "source_sha256":source_sha256,"gameplay_plan_sha256":gameplay_plan_sha256,"jobs":jobs,
+        "source_sha256":source_sha256,"gameplay_plan_sha256":gameplay_plan_sha256,
+        "gameplay_source_fingerprint":gameplay_source_fingerprint,"jobs":jobs,
     });
     let stage = publish::acquire_stage(root, &metadata)?;
     let published = stage.path().join("published");
@@ -535,13 +537,28 @@ fn extract_stages(
     all_jobs.extend(model_plan.into_initial_jobs());
     all_jobs.extend(script_jobs);
     all_jobs.extend(packs::plan_jobs(&inventory, &consumed)?);
+    let gameplay_documents: Vec<_> = configs::embedded_documents().collect();
+    for chunk in gameplay_documents.chunks(128) {
+        let documents = chunk.to_vec();
+        all_jobs.push(artifacts::Job {
+            category: artifacts::Category::Gameplay,
+            label: documents[0].0.to_owned(),
+            work: documents.len() as u64,
+            estimated_bytes: documents.iter().map(|(_, bytes)| bytes.len()).sum(),
+            run: Box::new(move |sink| {
+                for (path, bytes) in documents {
+                    sink.submit(
+                        path,
+                        artifacts::ArtifactBytes::Owned(bytes.to_vec()),
+                        artifacts::Category::Gameplay,
+                    )?;
+                }
+                Ok(())
+            }),
+        });
+    }
     let mut totals = [0u64; 8];
     for job in &all_jobs {
-        if job.category == artifacts::Category::Gameplay {
-            return Err(CoreError(
-                "gameplay generation requires the gameplay command".into(),
-            ));
-        }
         totals[job.category as usize] += job.work;
     }
     totals[artifacts::Category::Model as usize] += model_plan.deferred_work;
@@ -607,6 +624,7 @@ fn extract_stages(
     let marker = serde_json::json!({
         "schema_version":1,"data_version":data_version(),"source_state":initial_state,
         "source_sha256":source_sha256,"gameplay_plan_sha256":gameplay_plan_sha256,
+        "gameplay_source_fingerprint":gameplay_source_fingerprint,
         "texture_sources":texture_sources,
     });
     publish::seal_stream(sink, &published, marker)?;
@@ -683,7 +701,9 @@ pub fn current(source: &Path, data_root: &Path) -> CoreResult<bool> {
     Ok(marker["source_state"] == state
         && marker["source_sha256"].as_str().is_some()
         && marker["gameplay_plan_sha256"].as_str()
-            == Some(configs::asset_plan_fingerprint().as_str()))
+            == Some(configs::asset_plan_fingerprint().as_str())
+        && marker["gameplay_source_fingerprint"].as_str()
+            == Some(configs::embedded_fingerprint().as_str()))
 }
 
 #[cfg(test)]
@@ -748,7 +768,8 @@ mod tests {
         let metadata = serde_json::json!({
             "schema_version":1,"data_version":data_version(),"source":source.to_string_lossy(),
             "source_sha256":source_fingerprint(&source, &Phase::noop()).unwrap(),
-            "gameplay_plan_sha256":configs::asset_plan_fingerprint(),"jobs":2,
+            "gameplay_plan_sha256":configs::asset_plan_fingerprint(),
+            "gameplay_source_fingerprint":configs::embedded_fingerprint(),"jobs":2,
         });
         let stage = publish::acquire_stage(&root, &metadata).unwrap();
         std::fs::create_dir_all(stage.path().join("published/data")).unwrap();
@@ -778,12 +799,18 @@ mod tests {
     fn sealed_stage(published: &Path, state: &serde_json::Value) {
         std::fs::create_dir_all(published.join("data")).unwrap();
         std::fs::write(published.join("data/example.bin"), b"payload").unwrap();
+        for (name, bytes) in configs::embedded_documents() {
+            let path = published.join("data").join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
         publish::finalize_assets(published).unwrap();
         publish::seal(
             published,
             serde_json::json!({
                 "schema_version":1,"data_version":data_version(),"source_state":state,
                 "source_sha256":"source-content", "gameplay_plan_sha256":configs::asset_plan_fingerprint(),
+                "gameplay_source_fingerprint":configs::embedded_fingerprint(),
             }),
             &Phase::noop(),
         )

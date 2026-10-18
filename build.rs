@@ -13,6 +13,30 @@ fn collect(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+fn compact_json(bytes: &[u8]) -> Vec<u8> {
+    let mut compact = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for &byte in bytes {
+        if in_string {
+            compact.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            compact.push(byte);
+            in_string = true;
+        } else if !matches!(byte, b' ' | b'\t' | b'\r' | b'\n') {
+            compact.push(byte);
+        }
+    }
+    compact
+}
+
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(kazarov_ffmpeg)");
     println!("cargo:rerun-if-env-changed=KAZAROV_FFMPEG_INCLUDE");
@@ -47,9 +71,11 @@ fn main() {
             out.join("tracked_configs.rs"),
             "pub(crate) static TRACKED_GAMEPLAY_PATHS: &[&str] = &[];\n\
              pub(crate) static TRACKED_CONFIG_PATHS: &[&str] = &[];\n\
+             pub(crate) static EMBEDDED_GAMEPLAY: &[(&str, usize, usize)] = &[];\n\
              pub(crate) const TRACKED_CONFIG_FINGERPRINT: &str = \"0000000000000000\";\n",
         )
         .expect("write empty gameplay index");
+        fs::write(out.join("gameplay_documents.bin"), []).expect("write empty gameplay data");
         fs::write(
             out.join("character_clip_plan.json"),
             br#"{"schema_version":1,"kind":"character_clips","characters":{}}"#,
@@ -67,6 +93,8 @@ fn main() {
     files.sort();
     let mut generated = String::from("pub(crate) static TRACKED_GAMEPLAY_PATHS: &[&str] = &[\n");
     let mut gameplay_paths = Vec::new();
+    let mut embedded = Vec::new();
+    let mut payload = Vec::new();
     let mut fingerprint: u64 = 0xcbf29ce484222325;
     for file in files {
         let relative = file
@@ -91,16 +119,33 @@ fn main() {
             json["kind"].is_string() && (!standalone || json.get("commands").is_none()),
             "invalid gameplay document: {relative}"
         );
-        for byte in relative.bytes().chain([0]).chain(bytes) {
+        for byte in relative.bytes().chain([0]).chain(bytes.iter().copied()) {
             fingerprint ^= u64::from(byte);
             fingerprint = fingerprint.wrapping_mul(0x100000001b3);
         }
-        gameplay_paths.push(relative.to_ascii_lowercase());
+        let path = relative.to_ascii_lowercase();
+        let offset = payload.len();
+        let compact = compact_json(&bytes);
+        payload.extend_from_slice(&compact);
+        embedded.push((path.clone(), offset, compact.len()));
+        gameplay_paths.push(path);
     }
     gameplay_paths.sort();
+    let before = gameplay_paths.len();
     gameplay_paths.dedup();
+    assert_eq!(
+        gameplay_paths.len(),
+        before,
+        "gameplay paths collide ignoring case"
+    );
     for path in gameplay_paths {
         generated.push_str(&format!("    {path:?},\n"));
+    }
+    generated.push_str("];\n");
+    embedded.sort_by(|a, b| a.0.cmp(&b.0));
+    generated.push_str("pub(crate) static EMBEDDED_GAMEPLAY: &[(&str, usize, usize)] = &[\n");
+    for (path, offset, len) in embedded {
+        generated.push_str(&format!("    ({path:?}, {offset}, {len}),\n"));
     }
     generated.push_str("];\n");
     generated.push_str("pub(crate) static TRACKED_CONFIG_PATHS: &[&str] = &[\n");
@@ -129,6 +174,7 @@ fn main() {
     ));
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     fs::write(out.join("tracked_configs.rs"), generated).expect("write embedded configs");
+    fs::write(out.join("gameplay_documents.bin"), payload).expect("write gameplay data");
     let plan: serde_json::Value = serde_json::from_slice(
         &fs::read(root.join("character_clips.json")).expect("read character clip plan"),
     )
@@ -144,4 +190,23 @@ fn main() {
         serde_json::to_vec(&plan).expect("compact clip plan"),
     )
     .expect("write embedded clip plan");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_json;
+
+    #[test]
+    fn compaction_preserves_numbers_escapes_and_string_whitespace() {
+        let source = br#"{
+            "decimal": 0.03999999910593033,
+            "exponent": -1.2345678901234567e-9,
+            "text": " a \" b \n c ",
+            "slash": "C:\\game\/save",
+            "unicode": "\u263A"
+        }"#;
+        let expected = br#"{"decimal":0.03999999910593033,"exponent":-1.2345678901234567e-9,"text":" a \" b \n c ","slash":"C:\\game\/save","unicode":"\u263A"}"#;
+        assert_eq!(compact_json(source), expected);
+        assert!(serde_json::from_slice::<serde_json::Value>(expected).is_ok());
+    }
 }

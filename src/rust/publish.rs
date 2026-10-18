@@ -664,8 +664,10 @@ pub fn tree_inputs(root: &Path) -> CoreResult<Vec<Input>> {
 
 fn external_config_document(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    super::configs::is_tracked_gameplay(&lower)
-        || lower.ends_with(".cfg.json")
+    if super::configs::is_tracked_gameplay(&lower) {
+        return false;
+    }
+    lower.ends_with(".cfg.json")
         || lower.ends_with(".map.json")
         || lower.ends_with(".character.json")
         || lower.ends_with(".sound/config.json")
@@ -872,6 +874,12 @@ pub fn seal(root: &Path, marker: Value, phase: &Phase) -> CoreResult<zip_archive
 /// Applies the published-asset rules that need only one entry's name and bytes.
 fn audit_entry(name: &str, bytes: &[u8]) -> CoreResult<()> {
     let lower = name.to_ascii_lowercase();
+    if let Some(expected) = super::configs::embedded_document(&lower) {
+        if bytes != expected {
+            return Err(fail(format!("embedded gameplay document changed: {name}")));
+        }
+        return Ok(());
+    }
     if external_config_document(name) {
         return Err(fail(format!(
             "external config document in data archive: {name}"
@@ -915,6 +923,13 @@ pub fn read_marker(root: &Path) -> CoreResult<Value> {
     if marker["layout"] != LAYOUT {
         return Err(fail("data.json does not describe a data.zip layout"));
     }
+    if marker["gameplay_source_fingerprint"].as_str()
+        != Some(super::configs::embedded_fingerprint().as_str())
+    {
+        return Err(fail(
+            "data.json gameplay source fingerprint does not match the extractor",
+        ));
+    }
     Ok(marker)
 }
 
@@ -946,6 +961,11 @@ pub fn verify_with_progress(root: &Path, phase: &Phase) -> CoreResult<u64> {
 fn verify_open_archive(archive: &Archive, marker: &Value, phase: &Phase) -> CoreResult<u64> {
     let view = ArchiveView::new(&archive);
     let names: BTreeSet<String> = view.names().into_iter().collect();
+    for (name, _) in super::configs::embedded_documents() {
+        if !names.contains(name) {
+            return Err(fail(format!("embedded gameplay document missing: {name}")));
+        }
+    }
     let mut records = archive.verify_entries_with_progress(
         &|name, bytes| {
             audit_entry(name, bytes)?;
@@ -1152,10 +1172,16 @@ mod tests {
         fs::write(data.join("audio/sample.wav"), b"RIFF converted PCM").unwrap();
         fs::write(data.join("audio/sample.png"), b"png").unwrap();
         fs::write(data.join("manifest.json"), b"stale manifest").unwrap();
+        for (name, bytes) in super::super::configs::embedded_documents() {
+            let path = data.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
     }
 
     fn marker() -> Value {
-        serde_json::json!({"schema_version":1,"data_version":super::super::data_version()})
+        serde_json::json!({"schema_version":1,"data_version":super::super::data_version(),
+            "gameplay_source_fingerprint":super::super::configs::embedded_fingerprint()})
     }
 
     #[test]
@@ -1168,26 +1194,75 @@ mod tests {
         assert!(!root.join("data/manifest.json").exists());
         let written = seal(&root, marker(), &Phase::noop()).unwrap();
         assert!(root.join("data").exists());
-        assert_eq!(written.entries, 3);
+        assert_eq!(
+            written.entries,
+            3 + super::super::configs::embedded_documents().count() as u64
+        );
         assert_eq!(verify(&root).unwrap(), 1);
         assert!(remove_staged_data(temp.path(), &root, &Phase::noop()).is_err());
         assert!(root.join("data").exists());
         remove_staged_data(&stage, &root, &Phase::noop()).unwrap();
         assert!(!root.join("data").exists());
         let archive = Archive::open(&root.join(ARCHIVE)).unwrap();
-        let names: Vec<&str> = (0..archive.len()).map(|i| archive.name(i)).collect();
+        let names: Vec<&str> = (0..archive.len())
+            .map(|i| archive.name(i))
+            .filter(|name| !super::super::configs::is_tracked_gameplay(name))
+            .collect();
         assert_eq!(
             names,
             ["audio/sample.png", "audio/sample.wav", "script.stb"]
         );
         drop(archive);
         let mut changed = read_marker(&root).unwrap();
+        changed
+            .as_object_mut()
+            .unwrap()
+            .remove("gameplay_source_fingerprint");
+        fs::write(root.join(MARKER), serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(
+            verify(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("gameplay source fingerprint")
+        );
+        changed["gameplay_source_fingerprint"] =
+            super::super::configs::embedded_fingerprint().into();
         changed["output_sha256"] = "0".repeat(64).into();
         fs::write(root.join(MARKER), serde_json::to_vec(&changed).unwrap()).unwrap();
         assert!(verify(&root).unwrap_err().to_string().contains("changed"));
         changed["data_version"] = 8.into();
         fs::write(root.join(MARKER), serde_json::to_vec(&changed).unwrap()).unwrap();
         assert!(verify(&root).is_err());
+    }
+
+    #[test]
+    fn gameplay_documents_are_required_and_match_compiled_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("published");
+        staged_tree(&root);
+        finalize_assets(&root).unwrap();
+        let Some((name, bytes)) = super::super::configs::embedded_documents().next() else {
+            return;
+        };
+        let document = root.join("data").join(name);
+        let mut changed = bytes.to_vec();
+        changed.push(b' ');
+        fs::write(&document, changed).unwrap();
+        seal(&root, marker(), &Phase::noop()).unwrap();
+        assert!(
+            verify(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("embedded gameplay document changed")
+        );
+        fs::remove_file(&document).unwrap();
+        seal(&root, marker(), &Phase::noop()).unwrap();
+        assert!(
+            verify(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("embedded gameplay document missing")
+        );
     }
 
     #[test]

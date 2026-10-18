@@ -2100,14 +2100,6 @@ fn verify_reader(
                     let uri = document[field]
                         .as_str()
                         .ok_or_else(|| fail("sound bundle reference missing"))?;
-                    if matches!(field, "config" | "volume") && gameplay_root.is_none() {
-                        if !super::configs::is_tracked_gameplay(uri) {
-                            return Err(fail(format!(
-                                "untracked loose sound gameplay reference: {uri}"
-                            )));
-                        }
-                        continue;
-                    }
                     let dependency: Value =
                         serde_json::from_slice(&asset(reader, gameplay_root, uri)?)?;
                     let kind = match field {

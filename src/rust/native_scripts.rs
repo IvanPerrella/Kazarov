@@ -416,9 +416,7 @@ pub fn verify_archive(
         let name = script_output_name(resources, alias);
         let actual = reader.read(&name)?;
         let (expected, _) = migrate_checked(resource.bytes(), &lookup, |path| {
-            if lookup.target_exists(path, |candidate| {
-                reader.contains(candidate) || super::configs::is_tracked_gameplay(candidate)
-            }) {
+            if lookup.target_exists(path, |candidate| reader.contains(candidate)) {
                 Ok(())
             } else {
                 Err(fail(format!(

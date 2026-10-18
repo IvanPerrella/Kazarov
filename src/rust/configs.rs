@@ -15,9 +15,29 @@ use std::sync::OnceLock;
 
 include!(concat!(env!("OUT_DIR"), "/tracked_configs.rs"));
 
-/// Returns the build-time fingerprint of loose native config paths and bytes.
+/// Returns the build-time fingerprint of gameplay source paths and bytes.
 pub fn embedded_fingerprint() -> String {
     TRACKED_CONFIG_FINGERPRINT.to_owned()
+}
+
+static GAMEPLAY_DOCUMENTS: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/gameplay_documents.bin"));
+
+/// Iterates over the compact gameplay documents bundled with this extractor.
+pub fn embedded_documents() -> impl Iterator<Item = (&'static str, &'static [u8])> {
+    EMBEDDED_GAMEPLAY
+        .iter()
+        .map(|&(path, offset, len)| (path, &GAMEPLAY_DOCUMENTS[offset..offset + len]))
+}
+
+/// Returns the exact compact payload for a tracked gameplay path.
+pub fn embedded_document(path: &str) -> Option<&'static [u8]> {
+    let lower = path.to_ascii_lowercase();
+    let index = EMBEDDED_GAMEPLAY
+        .binary_search_by_key(&lower.as_str(), |entry| entry.0)
+        .ok()?;
+    let (_, offset, len) = EMBEDDED_GAMEPLAY[index];
+    Some(&GAMEPLAY_DOCUMENTS[offset..offset + len])
 }
 
 /// Digest of only the source-derived animation slicing plan used by asset extraction.
@@ -28,7 +48,7 @@ pub fn asset_plan_fingerprint() -> String {
     ))))
 }
 
-/// True when a relative gameplay path is shipped loose with the PC port.
+/// True when a relative gameplay path is bundled with the extractor.
 pub fn is_tracked_gameplay(path: &str) -> bool {
     let normalized = path.replace('\\', "/").to_ascii_lowercase();
     TRACKED_GAMEPLAY_PATHS

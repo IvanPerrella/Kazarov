@@ -307,9 +307,9 @@ impl AssetSink {
         category: Category,
     ) -> CoreResult<()> {
         let name = name.into();
-        if category == Category::Gameplay {
+        if category == Category::Gameplay && !super::configs::is_tracked_gameplay(&name) {
             let error = fail(format!(
-                "{category:?} [{name}]: gameplay document must remain loose"
+                "{category:?} [{name}]: gameplay document is not tracked"
             ));
             self.record_failure(&error);
             self.cancel();
@@ -317,16 +317,17 @@ impl AssetSink {
         }
         zip_archive::validate_name(&name)?;
         let lower = name.to_ascii_lowercase();
-        if super::configs::is_tracked_gameplay(&lower)
-            || lower.ends_with(".cfg.json")
-            || lower.ends_with(".map.json")
-            || lower.ends_with(".character.json")
-            || lower.ends_with(".sound/config.json")
-            || lower.ends_with(".sound/volume.json")
-            || matches!(lower.as_str(), "snd2/rev.json" | "snd2/map_index.json")
+        if category != Category::Gameplay
+            && (super::configs::is_tracked_gameplay(&lower)
+                || lower.ends_with(".cfg.json")
+                || lower.ends_with(".map.json")
+                || lower.ends_with(".character.json")
+                || lower.ends_with(".sound/config.json")
+                || lower.ends_with(".sound/volume.json")
+                || matches!(lower.as_str(), "snd2/rev.json" | "snd2/map_index.json"))
         {
             let error = fail(format!(
-                "{category:?} [{name}]: gameplay config must remain loose"
+                "{category:?} [{name}]: gameplay config requires the Gameplay category"
             ));
             self.record_failure(&error);
             self.cancel();

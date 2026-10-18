@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 const STAGES: usize = 18;
 const TICK: Duration = Duration::from_millis(80);
-const WEIGHTS: [u32; STAGES] = [2, 1, 1, 2, 70, 2, 4, 1, 1, 1, 1, 0, 0, 13, 1, 0, 0, 0];
+const WEIGHTS: [u32; STAGES] = [2, 1, 1, 2, 69, 2, 4, 1, 1, 1, 1, 0, 0, 13, 1, 0, 1, 0];
 const READY: &str = "Ready — starting game…";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,7 +69,7 @@ impl Stage {
             Stage::Movies => "Converting movies…",
             Stage::Models => "Converting models and animation…",
             Stage::Cleanup => "Removing converted payloads…",
-            Stage::Configs => "Converting configuration…",
+            Stage::Configs => "Bundling gameplay documents…",
             Stage::Scripts => "Converting scripts…",
             Stage::Packs => "Unpacking archives…",
             Stage::Preserved => "Preserving game assets…",
@@ -93,7 +93,7 @@ impl Stage {
             Stage::Movies => "Movies",
             Stage::Models => "Models",
             Stage::Cleanup => "Cleanup",
-            Stage::Configs => "Configs",
+            Stage::Configs => "Gameplay",
             Stage::Scripts => "Scripts",
             Stage::Packs => "Packs",
             Stage::Preserved => "Other assets",
