@@ -253,15 +253,21 @@ file and a rename.
 ## Dark Chronicle's Vu_prog0 meshes
 
 `DrawMeshProg0` and `DrawMeshImmediateProg0` draw through `shaders/mesh_prog0.vert`, taking the
-game's `Prog0Constants` beside the `MeshConstants` (which reads only `mvp` of them). The block is a
-separate per-draw uniform at set 2, so Chronicle's `MeshConstants` stay 400 bytes and its pipeline
-layout is unchanged. `Prog0Constants` is the VU1 memory the game writes: `model_world`, the four
+game's `Prog0Constants` beside the `MeshConstants` (which reads only `mvp` of them). Both are records in
+storage-buffer arrays at set 1 (binding 0 for `MeshConstants`, binding 1 for `Prog0Constants`), one set of
+arrays per transient chunk, bound once per chunk. A skinned draw also carries its `Prog0Palette`, the 32
+bone matrices, as a record at binding 2 that only skinned draws use; a skinned draw without one uses
+identity bones. Each draw's record indices travel in push constants (`PushConstants::mesh_index`,
+`prog0_index` and `palette_index`), so Chronicle's `MeshConstants` stay 400 bytes and plain and prog0 draws
+share one pipeline layout. `Prog0Constants` is the VU1 memory the game writes: `model_world`, the four
 world light directions as x/y/z rows, the light colours, ambient times object alpha, object colour,
 the eye in object space, the clip-or-view block, material diffuse and specular with the exponent,
-four point lights relative to the object origin with their power, the fog quadword (0x3B) and the
-32 bone slots. It is in the VU's units: colours on 128 = 1.0, the material on 1.0. The game copies
+four point lights relative to the object origin with their power, and the fog quadword (0x3B). It is in
+the VU's units: colours on 128 = 1.0, the material on 1.0. The game copies
 what its render-info packet would upload instead of converting units. A display list records the
-block with its draw, and replays it as recorded.
+block with its draw, and replays it as recorded; a skinned draw's palette is recorded beside it. The face
+bits arrive in push constants instead (`PushConstants::face`, from `DrawState::prog0_face`); the block's
+`pad0` is padding.
 
 Dispatch follows the program. The matcap (`kProg0RefSphere`, 0x100) takes its UV from the unblended
 normal. Skinning (0x040) blends the vertices through the bone slots. Then, unless the face is
@@ -291,6 +297,10 @@ Retail quirks kept on purpose, with the spec's names: O-4 (a negative point powe
 magnitude), O-8 (influence 3's normal takes column 1 for its z term), O-9 (the matcap ignores
 skinning), O-10 (the add step's alpha is 128 x vertex alpha squared), O-11 (the exponent is
 2^(n+1), r^16 for the game's 3).
+
+## Transient memory
+
+Transient chunks prefer device-local host-visible memory (ReBAR or unified memory), each in its own allocation capped at a quarter of that heap, and fall back to host memory when there is none, the cap is reached or the driver refuses the allocation. `KZ_TRANSIENT_MEMORY=host` keeps them in host memory for A/B measurement.
 
 ## Readback
 
@@ -336,7 +346,7 @@ renders one.
   its destination (the destination's contents with the grab laid over them), and the draws and
   target changes that follow use the twin, so what is drawn back from the grab (the depth of
   field's blurred bands, the water) lines up with the interpolated scene. The destination itself
-  keeps the canonical grab. With `options.present` it is presented and becomes what `ReadbackFrame` reads. A list
+  keeps the canonical grab. A display frame copies the destination into its twin before the first re-grab only when the grab does not cover the whole destination. With `options.present` it is presented and becomes what `ReadbackFrame` reads. A list
   that draws to the main target before clearing its logical frame starts from the canonical image.
   Display renders are refused once an immediate frame has followed the canonical render (the
   loading screen took the window). `options.overlay` names a second list whose drawing entries run
@@ -406,8 +416,8 @@ renders one.
   vertices are the same grid points in world space, under an identity model, every tick. The shadow
   volumes must not: they are rebuilt in each tick's eye space, so a vertex of one tick is not the
   same point as that vertex of the next.
-  A matched Prog0 draw (`DrawMeshProg0`, `DrawMeshImmediateProg0`) has its 32-bone model-space
-  palette (`Prog0Constants::bones`) blended per bone: translation lerped, rotation slerped from the
+  A matched skinned Prog0 draw (`DrawMeshProg0`, `DrawMeshImmediateProg0` with a `Prog0Palette`) has its
+  32-bone model-space palette blended per bone: translation lerped, rotation slerped from the
   Gram-Schmidt rotation, scale and shear lerped in that rotation's frame. A bone that moved further
   than the draw's teleport distance keeps the newest pose. `no_interpolation` and `CutInterpolation()`
   apply as for other draws. The rest of the block follows the interpolated model and camera:
@@ -463,7 +473,8 @@ Nothing the renderer calls was introduced by Vulkan 1.4, so 1.3 is the floor:
 | `synchronization2` (`vkCmdPipelineBarrier2`, `vkQueueSubmit2`, the `*_2` stages and accesses) | 1.3 feature |
 | Cull mode, front face, topology, depth test/write/compare, stencil test and ops as dynamic state | 1.3 core (no feature bit) |
 | `D32_SFLOAT_S8_UINT` or `D24_UNORM_S8_UINT` as an attachment that copies both ways | format support |
-| `maxPushConstantsSize` of 56 bytes | 1.0 limit (128 guaranteed) |
+| `maxPushConstantsSize` of 72 bytes | 1.0 limit (128 guaranteed) |
+| `maxStorageBufferRange` of 8 MiB and `maxPerStageDescriptorStorageBuffers` of 3 | 1.0 limits (128 MiB and 4 guaranteed) |
 | `VK_KHR_swapchain` and a graphics queue that presents to the window | not when offscreen |
 
 Optional, used when present:
@@ -495,6 +506,24 @@ calls, each forwarding to the device's own. The swapchain keeps the identity tra
 rotation to the compositor; the SUBOPTIMAL results that rotation reports keep the swapchain while the
 surface's capabilities are unchanged. A surface lost while the app is in the background is dropped
 with its swapchain and made again on a later frame. Errors also go to the system log.
+
+## Profiling
+
+Kazarov's renderer instrumentation is compiled in with the `KZ_PORT_TRACY` CMake option, which links `Tracy::TracyClient` into the host library. Without it the macros in `gfx/profile.hpp` compile to nothing. At run time zones record only while `gfx::profile::SetEnabled(true)` is set (the host sets it from its debug-mode gate) and a profiler is connected.
+
+- `KZ_PROFILE_ZONE` and `KZ_PROFILE_PLOT` are CPU zones and plots.
+- `KZ_PROFILE_GPU_ZONE(cmd, name)` scopes a GPU timestamp zone. `KZ_PROFILE_GPU_BEGIN` and `KZ_PROFILE_GPU_END` open and close one across functions (dynamic rendering spans).
+- The GPU context is created in `RendererInit` on the graphics queue and collected when a frame slot's command buffer begins, after its fence wait.
+- GPU zones may only be recorded into command buffers that are always submitted. Tracy reads queries in order, so an unsubmitted one stalls every later GPU zone.
+
+Plots, reset each frame:
+
+- `Kazarov mesh draws`
+- `Kazarov 2D draws`
+- `Kazarov descriptor binds`
+- `Kazarov grab copies`
+- `Kazarov grab pre-copies`
+- `Kazarov transient bytes`
 
 ## Not done here
 

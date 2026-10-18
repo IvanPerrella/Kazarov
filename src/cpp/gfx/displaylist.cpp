@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "gfx/context.hpp"
+#include "gfx/profile.hpp"
 
 namespace gfx {
 
@@ -476,6 +477,7 @@ void MatchInstanced(const DisplayList &list, const DisplayList &previous, const 
 }
 
 void BuildMatches(const DisplayList &list, const DisplayList &previous) {
+    KZ_PROFILE_ZONE("Kazarov BuildMatches");
     MatchCache &cache = list.cache;
     cache.previous_serial = previous.serial;
     cache.match.assign(list.records.size(), -1);
@@ -564,6 +566,22 @@ struct Overrides {
     std::unordered_map<const UpdateMeshEntry *, std::vector<Vertex3D>> poses;
     std::vector<int32_t>                                           prog0_index; // per record, into prog0, or -1
     std::vector<Prog0Constants>                                    prog0;
+    std::vector<int32_t>                                           palette_index; // per record, into palettes, or -1
+    std::vector<Prog0Palette>                                      palettes;
+
+    // Empties every container, so a reused Overrides holds nothing from its previous frame.
+    void Clear() {
+        index.clear();
+        constants.clear();
+        vertex_index.clear();
+        vertices.clear();
+        sprites.clear();
+        poses.clear();
+        prog0_index.clear();
+        prog0.clear();
+        palette_index.clear();
+        palettes.clear();
+    }
 };
 
 bool Invert(const Mat4 &m, Mat4 &out) {
@@ -683,12 +701,6 @@ uint64_t RewriteKey(const UpdateMeshEntry &update) {
     return (static_cast<uint64_t>(update.mesh) << 32) | update.first;
 }
 
-// The last rewrite of each mesh range in a list, and the ranges rewritten more than once.
-struct Rewrites {
-    std::unordered_map<uint64_t, const UpdateMeshEntry *> last;
-    std::unordered_set<uint64_t>                          repeated;
-};
-
 Rewrites ListRewrites(const DisplayList &list) {
     Rewrites rewrites;
     for (const Entry &entry : list.entries) {
@@ -702,6 +714,14 @@ Rewrites ListRewrites(const DisplayList &list) {
     return rewrites;
 }
 
+// Built on first use: a finished list never changes, and each recording is a new DisplayList.
+const Rewrites &CachedRewrites(const DisplayList &list) {
+    if (!list.cache.rewrites) {
+        list.cache.rewrites = ListRewrites(list);
+    }
+    return *list.cache.rewrites;
+}
+
 // A skinned mesh is rewritten every tick in its model's space and drawn under the model's matrix.
 // The matrix is interpolated, and so is everything that hangs from the body by a matrix or vertices
 // of its own (a weapon in the hand, the cloth), so a body left in the tick's pose stands ahead of
@@ -711,6 +731,7 @@ Rewrites ListRewrites(const DisplayList &list) {
 // display buffer), unless a vertex moved further than the draw's teleport distance. Each draw of a
 // mesh shared by several models takes its own rewrite.
 void PosesBetween(const DisplayList &list, const DisplayList &previous, float alpha, Overrides &out) {
+    KZ_PROFILE_ZONE("Kazarov PosesBetween");
     std::vector<const UpdateMeshEntry *> now = RecordPoses(list);
     if (std::ranges::none_of(now, [](const UpdateMeshEntry *pose) { return pose != nullptr; })) {
         return;
@@ -832,6 +853,7 @@ bool MoveProg0(const MeshRecord &record, const Mat4 &view_b, const Mat4 &view_i,
 }
 
 void Interpolated(const DisplayList &list, const DisplayList &previous, float alpha, Overrides &out) {
+    KZ_PROFILE_ZONE("Kazarov Interpolated");
     if (list.cache.previous_serial != previous.serial) {
         BuildMatches(list, previous);
     }
@@ -839,11 +861,14 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
 
     std::vector<Mat4> views(list.cameras.size());
     std::vector<bool> moved(list.cameras.size(), false);
-    for (size_t i = 0; i < list.cameras.size(); i++) {
-        views[i] = list.cameras[i];
-        int32_t before = cache.cameras[i];
-        if (before >= 0 && previous.cameras[before] != list.cameras[i]) {
-            moved[i] = InterpolateView(previous.cameras[before], list.cameras[i], alpha, views[i]);
+    {
+        KZ_PROFILE_ZONE("Kazarov interpolate cameras");
+        for (size_t i = 0; i < list.cameras.size(); i++) {
+            views[i] = list.cameras[i];
+            int32_t before = cache.cameras[i];
+            if (before >= 0 && previous.cameras[before] != list.cameras[i]) {
+                moved[i] = InterpolateView(previous.cameras[before], list.cameras[i], alpha, views[i]);
+            }
         }
     }
 
@@ -877,6 +902,8 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
     out.vertices.clear();
     out.prog0_index.assign(list.records.size(), -1);
     out.prog0.clear();
+    out.palette_index.assign(list.records.size(), -1);
+    out.palettes.clear();
     const Mat4 *last_before = nullptr;
     const Mat4 *last_after = nullptr;
     Mat4        last_model;
@@ -923,20 +950,25 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
             // Camera motion applies to every transformed draw, including newly visible faces
             // and material cuts with no previous pose. Their clip planes and eye must follow it.
             const bool move = model != record.model || moved[record.camera];
-            if (skinned || move) {
-                // The override is built in place and dropped again when nothing in it changed.
-                Prog0Constants &block = out.prog0.emplace_back(newest);
-                if (skinned && match >= 0) {
-                    const MeshEntry &earlier = std::get<MeshEntry>(previous.entries[previous.records[match].entry]);
-                    if (earlier.prog0 >= 0) {
-                        BlendProg0Bones(previous.prog0_blocks[static_cast<size_t>(earlier.prog0)], newest, alpha,
-                                        record.teleport_distance, block);
+            // Overrides are built in place and dropped again when nothing in them changed.
+            if (skinned && match >= 0 && mesh->palette >= 0) {
+                const MeshEntry &earlier = std::get<MeshEntry>(previous.entries[previous.records[match].entry]);
+                if (earlier.prog0 >= 0 && earlier.palette >= 0 &&
+                    (previous.prog0_blocks[static_cast<size_t>(earlier.prog0)].flags & kProg0Skinned) != 0) {
+                    const Prog0Palette &newest_palette = list.palettes[static_cast<size_t>(mesh->palette)];
+                    Prog0Palette       &blended = out.palettes.emplace_back();
+                    BlendProg0Bones(previous.palettes[static_cast<size_t>(earlier.palette)], newest_palette, alpha,
+                                    record.teleport_distance, blended);
+                    if (std::memcmp(&blended, &newest_palette, sizeof blended) != 0) {
+                        out.palette_index[mesh->record] = static_cast<int32_t>(out.palettes.size() - 1);
+                    } else {
+                        out.palettes.pop_back();
                     }
                 }
-                bool bones = skinned && std::memcmp(block.bones, newest.bones, sizeof block.bones) != 0;
-                bool placed =
-                    move && MoveProg0(record, list.cameras[record.camera], views[record.camera], model, block, rebase);
-                if (bones || placed) {
+            }
+            if (move) {
+                Prog0Constants &block = out.prog0.emplace_back(newest);
+                if (MoveProg0(record, list.cameras[record.camera], views[record.camera], model, block, rebase)) {
                     out.prog0_index[mesh->record] = static_cast<int32_t>(out.prog0.size() - 1);
                 } else {
                     out.prog0.pop_back();
@@ -1018,8 +1050,55 @@ TextureHandle GrabbedTwin(TextureHandle texture) {
     return it != g_grab_twins.end() && it->second.active ? it->second.twin : texture;
 }
 
-// dst's twin, created to its shape and holding its contents from this render's first grab on.
-TextureHandle ActivateGrabTwin(TextureHandle dst) {
+// The pixels [low, high) a logical span maps to along one axis, clamped to the image as the transfer
+// clamps them. An extended axis is widened to the whole image by the transfer, so this never
+// overstates what it writes.
+struct PixelSpan {
+    int32_t low;
+    int32_t high;
+};
+
+PixelSpan MappedSpan(int32_t start, int32_t length, float scale, float offset, uint32_t pixels) {
+    auto at = [&](int32_t value) {
+        return std::clamp(static_cast<int32_t>(std::lround(static_cast<float>(value) * scale + offset)), 0,
+                          static_cast<int32_t>(pixels));
+    };
+    int32_t a = at(start);
+    int32_t b = at(start + length);
+    return {std::min(a, b), std::max(a, b)};
+}
+
+// Whether the grab writes every texel of its destination, so the destination's prior contents are
+// never read. A copy writes only the span both images share, and only the first mip is written.
+bool CoversDestination(const CopyEntry &entry, const TextureInfo &info) {
+    std::optional<TextureInfo> src_info = GetTextureInfo(entry.src);
+    if (info.mip_levels > 1 || !src_info || src_info->format != info.format) {
+        return false;
+    }
+    LogicalMapping dst_mapping = GetLogicalMapping(entry.dst);
+    PixelSpan      dst_x = MappedSpan(entry.dst_rect.x, entry.dst_rect.w, dst_mapping.scale_x, dst_mapping.offset_x,
+                                      info.pixel_width);
+    PixelSpan      dst_y = MappedSpan(entry.dst_rect.y, entry.dst_rect.h, dst_mapping.scale_y, dst_mapping.offset_y,
+                                      info.pixel_height);
+    if (dst_x.low != 0 || dst_x.high != static_cast<int32_t>(info.pixel_width) || dst_y.low != 0 ||
+        dst_y.high != static_cast<int32_t>(info.pixel_height)) {
+        return false;
+    }
+    LogicalMapping src_mapping = GetLogicalMapping(entry.src);
+    PixelSpan      src_x = MappedSpan(entry.src_rect.x, entry.src_rect.w, src_mapping.scale_x, src_mapping.offset_x,
+                                      src_info->pixel_width);
+    PixelSpan      src_y = MappedSpan(entry.src_rect.y, entry.src_rect.h, src_mapping.scale_y, src_mapping.offset_y,
+                                      src_info->pixel_height);
+    // A blit stretches whatever the source spans; a copy needs a source at least as large as the destination.
+    bool copy = entry.kind == CopyEntry::Copy;
+    int32_t need_x = copy ? static_cast<int32_t>(info.pixel_width) : 1;
+    int32_t need_y = copy ? static_cast<int32_t>(info.pixel_height) : 1;
+    return src_x.high - src_x.low >= need_x && src_y.high - src_y.low >= need_y;
+}
+
+// dst's twin, created to its shape. Its contents are copied from dst on the first grab unless that
+// grab overwrites them all.
+TextureHandle ActivateGrabTwin(TextureHandle dst, bool needs_contents) {
     std::optional<TextureInfo> info = GetTextureInfo(dst);
     if (!info || dst == kMainTarget || dst == kPreviousFrame || info->shares_main_depth) {
         return kNullTexture;
@@ -1041,8 +1120,11 @@ TextureHandle ActivateGrabTwin(TextureHandle dst) {
         it = g_grab_twins.emplace(dst, GrabTwin{twin, *info, false}).first;
     }
     if (!it->second.active) {
-        CopyTexture(dst, Rect{0, 0, static_cast<int32_t>(info->width), static_cast<int32_t>(info->height)},
-                    it->second.twin, 0, 0);
+        if (needs_contents) {
+            CopyTexture(dst, Rect{0, 0, static_cast<int32_t>(info->width), static_cast<int32_t>(info->height)},
+                        it->second.twin, 0, 0);
+            g.counters.grab_precopies++;
+        }
         it->second.active = true;
     }
     return it->second.twin;
@@ -1053,7 +1135,10 @@ void GrabAgain(const CopyEntry &entry) {
     if (entry.src != kMainTarget && src == entry.src) {
         return;
     }
-    TextureHandle dst = ActivateGrabTwin(entry.dst);
+    std::optional<TextureInfo> info = GetTextureInfo(entry.dst);
+    bool covers = info && CoversDestination(entry, *info);
+    // A self-grab reads the twin it writes, so the twin needs the destination's contents.
+    TextureHandle dst = ActivateGrabTwin(entry.dst, entry.src == entry.dst || !covers);
     if (dst == kNullTexture) {
         return;
     }
@@ -1083,7 +1168,10 @@ uint32_t MeshTint(const MeshEntry &mesh, const DisplayList &list, const Override
     if (list.cache.match[mesh.record] >= 0) {
         return 1; // matched, including unchanged geometry under the display camera
     }
-    return overrides->index[mesh.record] >= 0 || overrides->prog0_index[mesh.record] >= 0 ? 5 : 2;
+    return overrides->index[mesh.record] >= 0 || overrides->prog0_index[mesh.record] >= 0 ||
+                   overrides->palette_index[mesh.record] >= 0
+               ? 5
+               : 2;
 }
 
 const char *MeshReason(const MeshEntry &mesh, const DisplayList &list, const DisplayList *previous,
@@ -1199,13 +1287,17 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
 
 void Replay(const DisplayList &list, bool canonical, const Overrides *overrides, bool host = false,
             bool tint = false, InterpKey suppressed_2d_key = 0) {
+    KZ_PROFILE_ZONE("Kazarov Replay");
     g.replaying = true;
+    // Sources from an earlier replay may sit at addresses this one reuses.
+    g.bound_constants.mesh_source = nullptr;
+    g.bound_constants.prog0_source = nullptr;
     g.quiet = !canonical;
     g.host_draws = host;
-    Rewrites rewrites;
+    const Rewrites *rewrites = nullptr;
     if (!canonical) {
         ResetGrabTwins();
-        rewrites = ListRewrites(list);
+        rewrites = &CachedRewrites(list);
     }
     for (const Entry &entry : list.entries) {
         g.interpolation_tint = 0;
@@ -1248,10 +1340,16 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                     if (prog0 != nullptr && overrides != nullptr && overrides->prog0_index[e.record] >= 0) {
                         prog0 = &overrides->prog0[static_cast<size_t>(overrides->prog0_index[e.record])];
                     }
+                    const Prog0Palette *palette =
+                        e.palette >= 0 ? &list.palettes[static_cast<size_t>(e.palette)] : nullptr;
+                    if (palette != nullptr && overrides != nullptr && overrides->palette_index[e.record] >= 0) {
+                        palette = &overrides->palettes[static_cast<size_t>(overrides->palette_index[e.record])];
+                    }
                     TextureBinding binding = GrabbedBinding(e.binding, canonical);
                     if (e.mesh != kNullMesh) {
                         if (prog0 != nullptr) {
-                            DrawMeshProg0(e.mesh, e.first_index, e.index_count, *constants, *prog0, binding, e.state);
+                            DrawMeshProg0(e.mesh, e.first_index, e.index_count, *constants, *prog0, binding, e.state,
+                                          nullptr, palette);
                         } else {
                             DrawMesh(e.mesh, e.first_index, e.index_count, *constants, binding, e.state);
                         }
@@ -1261,7 +1359,8 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                             vertices = &overrides->vertices[overrides->vertex_index[e.record]];
                         }
                         if (prog0 != nullptr) {
-                            DrawMeshImmediateProg0(*vertices, e.indices, *constants, *prog0, binding, e.state);
+                            DrawMeshImmediateProg0(*vertices, e.indices, *constants, *prog0, binding, e.state,
+                                                   nullptr, palette);
                         } else {
                             DrawMeshImmediate(*vertices, e.indices, *constants, binding, e.state);
                         }
@@ -1305,7 +1404,7 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                             vertices = &pose->second;
                         }
                     }
-                    if (vertices == nullptr && rewrites.repeated.contains(RewriteKey(e))) {
+                    if (vertices == nullptr && rewrites->repeated.contains(RewriteKey(e))) {
                         vertices = &e.vertices;
                     }
                     if (vertices != nullptr) {
@@ -1318,7 +1417,7 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
     // The meshes hold the tick's pose again for whoever draws them next.
     if (!canonical && overrides != nullptr) {
         for (const auto &[update, pose] : overrides->poses) {
-            if (rewrites.last.at(RewriteKey(*update)) == update) {
+            if (rewrites->last.at(RewriteKey(*update)) == update) {
                 UpdateMeshVertices(update->mesh, update->first, update->vertices);
             }
         }
@@ -1485,12 +1584,9 @@ bool InterpolateSprite(const Draw2DEntry &before, const SpriteScene &before_scen
     return true;
 }
 
-void BlendProg0Bones(const Prog0Constants &before, const Prog0Constants &after, float alpha, float teleport_distance,
-                     Prog0Constants &out) {
+void BlendProg0Bones(const Prog0Palette &before, const Prog0Palette &after, float alpha, float teleport_distance,
+                     Prog0Palette &out) {
     out = after;
-    if ((before.flags & kProg0Skinned) == 0 || (after.flags & kProg0Skinned) == 0) {
-        return;
-    }
     for (uint32_t slot = 0; slot < kProg0Bones; slot++) {
         if (std::memcmp(before.bones[slot], after.bones[slot], sizeof after.bones[slot]) == 0) {
             continue;
@@ -1534,7 +1630,17 @@ void RecordEntry(Entry &&entry) {
     list.entries.push_back(std::move(entry));
 }
 
-void RecordMesh(MeshEntry &&entry, const MeshTransform *transform, const Prog0Constants *prog0) {
+// Appends value to pool, or reuses the last element when it is identical: consecutive draws often share a block.
+template <typename T>
+int32_t PoolIndex(std::vector<T> &pool, const T &value) {
+    if (pool.empty() || std::memcmp(&pool.back(), &value, sizeof(T)) != 0) {
+        pool.push_back(value);
+    }
+    return static_cast<int32_t>(pool.size() - 1);
+}
+
+void RecordMesh(MeshEntry &&entry, const MeshTransform *transform, const Prog0Constants *prog0,
+                const Prog0Palette *palette) {
     if (!CanRecordBinding(entry.binding)) {
         return;
     }
@@ -1558,8 +1664,10 @@ void RecordMesh(MeshEntry &&entry, const MeshTransform *transform, const Prog0Co
         NoteScene(list, record);
     }
     if (prog0 != nullptr) {
-        entry.prog0 = static_cast<int32_t>(list.prog0_blocks.size());
-        list.prog0_blocks.push_back(*prog0);
+        entry.prog0 = PoolIndex(list.prog0_blocks, *prog0);
+        if (palette != nullptr) {
+            entry.palette = PoolIndex(list.palettes, *palette);
+        }
     }
     entry.record = static_cast<uint32_t>(list.records.size());
     record.entry = static_cast<uint32_t>(list.entries.size());
@@ -1685,6 +1793,7 @@ void CutCameraInterpolation() {
 }
 
 bool RenderList(const DisplayList &list, float alpha, const RenderOptions &options) {
+    KZ_PROFILE_ZONE("Kazarov RenderList");
     if (list.instance != g.renderer_instance || g.device == VK_NULL_HANDLE) {
         return false;
     }
@@ -1701,22 +1810,29 @@ bool RenderList(const DisplayList &list, float alpha, const RenderOptions &optio
     if (!g.canonical_newest) {
         return false;
     }
-    Overrides overrides;
-    bool      interpolate = options.previous != nullptr && options.previous->instance == g.renderer_instance;
+    // Reused across frames for its capacity; RenderList runs on one thread.
+    static Overrides overrides;
+    overrides.Clear();
+    bool interpolate = options.previous != nullptr && options.previous->instance == g.renderer_instance;
     interpolate = interpolate && alpha < 1.0f && !list.cut;
     if (interpolate) {
+        KZ_PROFILE_ZONE("Kazarov interpolate");
         Interpolated(list, *options.previous, std::max(alpha, 0.0f), overrides);
     }
     if (!OpenListFrame(false, options.present, list.needs_base)) {
         return false;
     }
-    const char *setting = std::getenv("KZ_INTERPOLATION_TINT");
-    bool        tint = options.interpolation_tint || (setting && std::strcmp(setting, "1") == 0);
+    static const bool env_tint = [] {
+        const char *setting = std::getenv("KZ_INTERPOLATION_TINT");
+        return setting && std::strcmp(setting, "1") == 0;
+    }();
+    bool tint = options.interpolation_tint || env_tint;
     if (tint) {
         TraceInterpolation(list, options.previous, interpolate ? &overrides : nullptr, alpha);
     }
     Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint, options.suppressed_2d_key);
     if (options.overlay != nullptr && options.overlay->instance == g.renderer_instance) {
+        KZ_PROFILE_ZONE("Kazarov overlay");
         SetRenderTarget(kMainTarget);
         Replay(*options.overlay, false, nullptr, true, tint);
     }

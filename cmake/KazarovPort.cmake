@@ -108,6 +108,7 @@ function(kz_port_host_library target)
     file(GLOB host_sources CONFIGURE_DEPENDS
         ${KZ_PORT_ROOT}/gfx/*.cpp ${KZ_PORT_ROOT}/audio/*.cpp ${KZ_PORT_ROOT}/platform/*.cpp)
     option(KZ_PORT_BUILD_TIM2 "Build the legacy TIM2 decoder into the host library" ON)
+    option(KZ_PORT_TRACY "Instrument the renderer with Tracy zones (needs a Tracy::TracyClient target)" OFF)
     if(NOT KZ_PORT_BUILD_TIM2)
         list(FILTER host_sources EXCLUDE REGEX "/gfx/tim2\\.cpp$")
     endif()
@@ -124,6 +125,10 @@ function(kz_port_host_library target)
     elseif(ANDROID)
         # gfx's errors go to the Android log, where stderr is not shown.
         target_link_libraries(${target} PUBLIC log)
+    endif()
+    if(KZ_PORT_TRACY)
+        target_link_libraries(${target} PUBLIC Tracy::TracyClient)
+        target_compile_definitions(${target} PUBLIC KZ_PORT_TRACY)
     endif()
     target_compile_options(${target} PRIVATE -Wall -ffunction-sections -fdata-sections)
     # arm64 clang fuses a*b+c into one rounding and x86-64 has no FMA in its baseline. The logical-to-pixel

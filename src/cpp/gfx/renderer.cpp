@@ -17,6 +17,7 @@
 
 #include "gfx/context.hpp"
 #include "gfx/displaylist.hpp"
+#include "gfx/profile.hpp"
 #include "kazarov/log.hpp"
 
 namespace gfx {
@@ -665,6 +666,22 @@ void CreateFrames() {
     Check(vkCreateCommandPool(g.device, &pool, nullptr, &g_oneshot_pool), "vkCreateCommandPool");
 }
 
+#ifdef KZ_PORT_TRACY
+// Tracy records a calibration submission on the given command buffer and waits for it.
+void CreateGpuProfiler() {
+    VkCommandBufferAllocateInfo allocate = {};
+    allocate.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate.commandPool = g_oneshot_pool;
+    allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    Check(vkAllocateCommandBuffers(g.device, &allocate, &cmd), "vkAllocateCommandBuffers");
+    g.tracy_vk = TracyVkContext(g.physical_device, g.device, g.queue, cmd);
+    TracyVkContextName(g.tracy_vk, "Kazarov", 7);
+    vkFreeCommandBuffers(g.device, g_oneshot_pool, 1, &cmd);
+}
+#endif
+
 void RunDeletions(Frame &frame) {
     std::vector<std::function<void()> > deletions;
     deletions.swap(frame.deletions);
@@ -674,6 +691,7 @@ void RunDeletions(Frame &frame) {
 }
 
 void WaitFrame(Frame &frame) {
+    KZ_PROFILE_ZONE("Kazarov WaitFrame");
     if (frame.pending) {
         Check(vkWaitForFences(g.device, 1, &frame.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
         frame.pending = false;
@@ -693,9 +711,11 @@ void AdvanceSlot() {
 }
 
 void Submit(bool with_draw, VkSemaphore wait, VkSemaphore signal) {
+    KZ_PROFILE_ZONE("Kazarov Submit");
     Frame                                 &frame = CurrentFrame();
     std::vector<VkCommandBufferSubmitInfo> commands;
     if (frame.upload_open) {
+        KZ_PROFILE_GPU_END(upload_zone);
         Check(vkEndCommandBuffer(frame.upload_cmd), "vkEndCommandBuffer");
         frame.upload_open = false;
         commands.push_back({VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, frame.upload_cmd, 0});
@@ -766,6 +786,7 @@ VkCommandBuffer UploadCommands() {
     if (!frame.upload_open) {
         BeginCommands(frame.upload_cmd);
         frame.upload_open = true;
+        KZ_PROFILE_GPU_BEGIN(upload_zone, frame.upload_cmd, "Kazarov uploads");
     }
     return frame.upload_cmd;
 }
@@ -931,6 +952,9 @@ void RendererInit(SDL_Window *window, const RendererConfig &config) {
     PickPhysicalDevice();
     CreateDevice();
     CreateFrames();
+#ifdef KZ_PORT_TRACY
+    CreateGpuProfiler();
+#endif
     CreatePipelineLayout();
     InitResources();
     if (g.offscreen || !CreateSwapchain()) {
@@ -956,6 +980,13 @@ void RendererShutdown() {
     }
     g.list.reset();
     vkDeviceWaitIdle(g.device);
+#ifdef KZ_PORT_TRACY
+    // Zones write into their command buffers when they close, so they close before the pools go.
+    g.rendering_zone.reset();
+    g.upload_zone.reset();
+    TracyVkDestroy(g.tracy_vk);
+    g.tracy_vk = nullptr;
+#endif
     for (Frame &frame : g.frames) {
         RunDeletions(frame);
     }
@@ -977,11 +1008,8 @@ void RendererShutdown() {
     }
     vkDestroyDescriptorPool(g.device, g.texture_pool, nullptr);
     vkDestroyDescriptorPool(g.device, g.constants_pool, nullptr);
-    vkDestroyDescriptorPool(g.device, g.prog0_descriptor_pool, nullptr);
     vkDestroyDescriptorSetLayout(g.device, g.texture_set_layout, nullptr);
     vkDestroyDescriptorSetLayout(g.device, g.constants_set_layout, nullptr);
-    vkDestroyDescriptorSetLayout(g.device, g.prog0_set_layout, nullptr);
-    vkDestroyPipelineLayout(g.device, g.prog0_pipeline_layout, nullptr);
     vkDestroyPipelineLayout(g.device, g.pipeline_layout, nullptr);
     for (VkSampler sampler : g.samplers) {
         vkDestroySampler(g.device, sampler, nullptr);
@@ -1024,10 +1052,18 @@ namespace {
 
 bool OpenFrame() {
     BeginCommands(CurrentFrame().draw_cmd);
+#ifdef KZ_PORT_TRACY
+    // Reads back the GPU timestamps of earlier frames; nothing is recorded while profiling is off.
+    if (g.tracy_vk != nullptr && profile::Enabled()) {
+        TracyVkCollect(g.tracy_vk, CurrentFrame().draw_cmd);
+    }
+#endif
     g.in_frame = true;
     g.frame_serial++;
     g.target = kMainTarget;
     g.rendering = false;
+    // Before ResetDrawState, which binds descriptors.
+    g.counters = {};
     ResetDrawState();
     return true;
 }
@@ -1039,6 +1075,7 @@ void FinishFrame() {
 
 // A swapchain image for this frame slot, recreating the swapchain when it is out of date.
 bool AcquireImage(bool targets) {
+    KZ_PROFILE_ZONE("Kazarov AcquireImage");
     if ((g.resize_pending || g.swapchain.handle == VK_NULL_HANDLE) && !RecreateSwapchain(targets)) {
         SubmitUploadsAndWait();
         return false;
@@ -1069,6 +1106,7 @@ bool AcquireImage(bool targets) {
 // Ends the frame's draw commands with source blitted onto the acquired swapchain image, submits
 // and presents.
 void PresentImage(Frame &frame, VkCommandBuffer cmd, Image &source) {
+    KZ_PROFILE_ZONE("Kazarov PresentImage");
     VkImage swapchain = g.swapchain.images[g.image_index];
     Transition(cmd, source, TransferSrc());
     // Chained to the acquire semaphore, which the submit waits on at the transfer stage.
@@ -1081,8 +1119,11 @@ void PresentImage(Frame &frame, VkCommandBuffer cmd, Image &source) {
     region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.dstOffsets[1] = {static_cast<int32_t>(g.swapchain.extent.width),
                             static_cast<int32_t>(g.swapchain.extent.height), 1};
-    vkCmdBlitImage(cmd, source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_NEAREST);
+    {
+        KZ_PROFILE_GPU_ZONE(cmd, "Kazarov swapchain blit");
+        vkCmdBlitImage(cmd, source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_NEAREST);
+    }
     SwapchainBarrier(cmd, swapchain, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                      VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE);
@@ -1112,6 +1153,15 @@ void PresentImage(Frame &frame, VkCommandBuffer cmd, Image &source) {
     }
 }
 
+void PlotFrameCounters() {
+    KZ_PROFILE_PLOT("Kazarov mesh draws", g.counters.mesh_draws);
+    KZ_PROFILE_PLOT("Kazarov 2D draws", g.counters.draws_2d);
+    KZ_PROFILE_PLOT("Kazarov grab copies", g.counters.grab_copies);
+    KZ_PROFILE_PLOT("Kazarov grab pre-copies", g.counters.grab_precopies);
+    KZ_PROFILE_PLOT("Kazarov descriptor binds", g.counters.descriptor_binds);
+    KZ_PROFILE_PLOT("Kazarov transient bytes", g.counters.transient_bytes);
+}
+
 void SubmitWithoutPresent(VkCommandBuffer cmd, Image &main) {
     // Every colour image rests shader-readable between operations; the next frame samples this
     // one as kPreviousFrame.
@@ -1132,6 +1182,7 @@ void PrepareRecording() {
 }
 
 bool OpenListFrame(bool canonical, bool present, bool base) {
+    KZ_PROFILE_ZONE("Kazarov open frame");
     if (canonical) {
         // The game's state is drawn whether or not the window can show it: later ticks sample it.
         if (g.offscreen) {
@@ -1175,12 +1226,17 @@ bool OpenListFrame(bool canonical, bool present, bool base) {
 }
 
 void CloseListFrame(bool canonical, bool present) {
+    KZ_PROFILE_ZONE("Kazarov close frame");
     Frame          &frame = CurrentFrame();
     VkCommandBuffer cmd = frame.draw_cmd;
     EndRendering();
     ReleaseTarget();
+    PlotFrameCounters();
     if (canonical) {
-        RecordDepthQueries(cmd);
+        {
+            KZ_PROFILE_GPU_ZONE(cmd, "Kazarov depth queries");
+            RecordDepthQueries(cmd);
+        }
         SubmitWithoutPresent(cmd, CurrentMainColor());
         FinishFrame();
         g.canonical_newest = true;
@@ -1228,7 +1284,11 @@ void EndFrame() {
     VkCommandBuffer cmd = frame.draw_cmd;
     EndRendering();
     ReleaseTarget();
-    RecordDepthQueries(cmd);
+    PlotFrameCounters();
+    {
+        KZ_PROFILE_GPU_ZONE(cmd, "Kazarov depth queries");
+        RecordDepthQueries(cmd);
+    }
     g.canonical_newest = false;
     g.presented_display = false;
     if (g.offscreen) {

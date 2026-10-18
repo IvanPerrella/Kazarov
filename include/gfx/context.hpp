@@ -11,6 +11,10 @@
 #include "gfx/gfx.hpp"
 #include "gfx/requirements.hpp"
 
+#ifdef KZ_PORT_TRACY
+#include <tracy/TracyVulkan.hpp>
+#endif
+
 namespace gfx::detail {
 
 inline constexpr uint32_t kFramesInFlight = 4;
@@ -121,18 +125,23 @@ struct Mesh {
 struct TransientChunk {
     Buffer          buffer;
     VkDeviceSize    used = 0;
-    // The chunk's MeshConstants at set 1, allocated once the chunk first holds a MeshConstants.
+    // Its memory is device-local and counts against the device-local transient cap.
+    bool            device_local = false;
+    // The chunk's constant records at set 1, allocated once the chunk first holds a record.
     VkDescriptorSet constants_set = VK_NULL_HANDLE;
-    // The chunk's Prog0Constants at set 2, likewise; only with RendererConfig::prog0_meshes.
-    VkDescriptorSet prog0_set = VK_NULL_HANDLE;
 };
 
 struct TransientSpan {
-    VkBuffer        buffer;
-    VkDeviceSize    offset;
-    uint8_t        *data;
-    // The chunk's uniform block set; only from AllocateConstants.
+    VkBuffer     buffer;
+    VkDeviceSize offset;
+    uint8_t     *data;
+};
+
+// A record in the current chunk: its set, its index in that chunk's array, and where to write it.
+struct ConstantRecord {
     VkDescriptorSet set;
+    uint32_t        index;
+    uint8_t        *data;
 };
 
 struct DepthQuery {
@@ -197,6 +206,28 @@ struct BoundState {
     VkDeviceSize vertex_offset = 0;
 };
 
+// The constant records the draw command buffer has bound at set 1, so an identical next draw skips the upload.
+struct BoundConstants {
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkDescriptorSet  set = VK_NULL_HANDLE; // the chunk set bound at set 1
+    bool             mesh_valid = false;
+    bool             prog0_valid = false;
+    bool             palette_valid = false;
+    // Only valid during a display list replay, whose blocks sit still; otherwise the source is a temporary.
+    const void      *mesh_source = nullptr;
+    const void      *prog0_source = nullptr;
+    const void      *palette_source = nullptr;
+    MeshConstants    mesh;
+    Prog0Constants   prog0;
+    Prog0Palette     palette;
+    VkDescriptorSet  mesh_set = VK_NULL_HANDLE;    // chunk set holding the bound mesh record
+    VkDescriptorSet  prog0_set = VK_NULL_HANDLE;   // chunk set holding the bound prog0 record
+    VkDescriptorSet  palette_set = VK_NULL_HANDLE; // chunk set holding the bound palette record
+    uint32_t         mesh_index = 0;
+    uint32_t         prog0_index = 0;
+    uint32_t         palette_index = 0;
+};
+
 struct BlendMapping {
     uint16_t slot;      // index into the precompiled blend states
     uint8_t  transform; // what the shader writes as source colour, kSourceTransform*
@@ -219,6 +250,10 @@ struct PushConstants {
     uint32_t flags;
     uint32_t alpha; // ref 0-7, func 8-10, fix 16-23, ta0 24-31
     uint32_t fog_color;
+    uint32_t face; // Prog0Face bits of a prog0 mesh draw
+    uint32_t mesh_index;  // record of the draw's MeshConstants in its chunk's array
+    uint32_t prog0_index; // record of the draw's Prog0Constants, prog0 draws only
+    uint32_t palette_index; // record of a skinned draw's Prog0Palette, skinned draws only
 };
 
 enum PushFlags : uint32_t {
@@ -252,6 +287,16 @@ enum TextureMode : uint32_t {
     kTextureRgba,
     kTexturePalette,
     kTextureModeCount,
+};
+
+// Per-frame renderer work counts, plotted to the profiler when a frame closes.
+struct FrameCounters {
+    uint32_t mesh_draws = 0;
+    uint32_t draws_2d = 0;
+    uint32_t grab_copies = 0;
+    uint32_t grab_precopies = 0;
+    uint32_t descriptor_binds = 0;
+    uint64_t transient_bytes = 0;
 };
 
 struct Context {
@@ -298,13 +343,10 @@ struct Context {
     VkSampler                    samplers[kSamplerCount] = {};
     VkDescriptorSetLayout        texture_set_layout = VK_NULL_HANDLE;
     VkDescriptorSetLayout        constants_set_layout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout        prog0_set_layout = VK_NULL_HANDLE;
     VkDescriptorPool             texture_pool = VK_NULL_HANDLE;
     VkDescriptorPool             constants_pool = VK_NULL_HANDLE;
-    VkDescriptorPool             prog0_descriptor_pool = VK_NULL_HANDLE;
     VkDescriptorSet              texture_set = VK_NULL_HANDLE;
     VkPipelineLayout             pipeline_layout = VK_NULL_HANDLE;
-    VkPipelineLayout             prog0_pipeline_layout = VK_NULL_HANDLE;
     VkPipelineCache              pipeline_cache = VK_NULL_HANDLE;
     std::vector<VkPipeline>      pipelines;
     uint32_t                     blend_slot_count = 0;
@@ -320,6 +362,8 @@ struct Context {
     TextureHandle target = kMainTarget;
     bool          rendering = false;
     BoundState    bound;
+
+    BoundConstants bound_constants;
 
     std::array<DepthQuery, kDepthQueryCount> depth_queries;
 
@@ -346,6 +390,15 @@ struct Context {
     // The newest main_color image is a canonical render no immediate frame has followed.
     bool canonical_newest = false;
     bool presented_display = false;
+
+    FrameCounters counters;
+
+#ifdef KZ_PORT_TRACY
+    tracy::VkCtx                       *tracy_vk = nullptr;      // GPU timestamp context on the graphics queue
+    // Unique pointers rather than optionals: VkCtxScope is not assignable, and Context is assigned in RendererInit.
+    std::unique_ptr<tracy::VkCtxScope> rendering_zone;           // open dynamic-rendering span
+    std::unique_ptr<tracy::VkCtxScope> upload_zone;              // open frame upload command buffer
+#endif
 
     uint32_t validation_messages = 0;
 };
@@ -381,8 +434,8 @@ void     DestroyMainTargets();
 
 // memory.cpp
 TransientSpan AllocateTransient(VkDeviceSize size, VkDeviceSize alignment);
-// A MeshConstants block, or a Prog0Constants one when prog0, with the set that binds it.
-TransientSpan AllocateConstants(bool prog0);
+// A record of MeshConstants or Prog0Constants (stride bytes) in the current chunk.
+ConstantRecord AllocateConstantRecord(VkDeviceSize stride);
 // The source of a copy into a buffer or image.
 TransientSpan AllocateStaging(VkDeviceSize size);
 void          ResetTransients(Frame &frame);
