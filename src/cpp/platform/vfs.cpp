@@ -263,6 +263,154 @@ private:
 };
 
 /**
+ * Combines mounted trees into stable flattened indexes, with later mounts taking precedence.
+ */
+class OverlayMount final : public Mount {
+public:
+    explicit OverlayMount(std::vector<std::shared_ptr<const Mount> > mounts) : child_mounts(std::move(mounts)) {
+        for (const auto &mount : child_mounts) {
+            if (!mount) {
+                continue;
+            }
+            for (std::size_t index = 0; index < mount->Count(); ++index) {
+                const auto name = mount->Name(index);
+                if (!SafeRelative(name)) {
+                    throw std::runtime_error("unsafe overlay entry: " + name);
+                }
+                const auto key = FoldKey(name);
+                if (const auto found = entry_index.find(key); found != entry_index.end()) {
+                    flat_entries[found->second] = {mount, index, name};
+                } else {
+                    entry_index.emplace(key, flat_entries.size());
+                    flat_entries.push_back({mount, index, name});
+                }
+            }
+        }
+    }
+
+    std::size_t Count() const override {
+        const std::shared_lock lock(entry_mutex);
+        return flat_entries.size();
+    }
+
+    std::string Name(std::size_t index) const override { return EntryAt(index).name; }
+
+    std::string Display(std::size_t index) const override {
+        const auto entry = EntryAt(index);
+        return entry.mount->Display(entry.index);
+    }
+
+    std::optional<std::size_t> Find(std::string_view relative) const override {
+        if (!SafeRelative(relative)) {
+            return std::nullopt;
+        }
+        const auto key = FoldKey(relative);
+        // Recheck children so a newly created file in a later mount overrides an earlier entry.
+        for (auto mount = child_mounts.rbegin(); mount != child_mounts.rend(); ++mount) {
+            if (!*mount) {
+                continue;
+            }
+            const auto child = (*mount)->Find(relative);
+            if (!child) {
+                continue;
+            }
+            const std::unique_lock lock(entry_mutex);
+            if (const auto found = entry_index.find(key); found != entry_index.end()) {
+                auto &entry = flat_entries[found->second];
+                if (entry.mount != *mount || entry.index != *child) {
+                    entry = {*mount, *child, (*mount)->Name(*child)};
+                }
+                return found->second;
+            }
+            const auto index = flat_entries.size();
+            entry_index.emplace(key, index);
+            flat_entries.push_back({*mount, *child, (*mount)->Name(*child)});
+            return index;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<std::uint64_t> Size(std::size_t index) const override {
+        const auto entry = EntryAt(index);
+        return entry.mount->Size(entry.index);
+    }
+
+    bool Read(std::size_t index, std::vector<std::uint8_t> &bytes, std::uint64_t max_bytes) const override {
+        const auto entry = EntryAt(index);
+        return entry.mount->Read(entry.index, bytes, max_bytes);
+    }
+
+    bool ReadInto(std::size_t index, void *buffer, std::size_t size) const override {
+        const auto entry = EntryAt(index);
+        return entry.mount->ReadInto(entry.index, buffer, size);
+    }
+
+    bool ReadPrefix(std::size_t index, std::span<std::uint8_t> out) const override {
+        const auto entry = EntryAt(index);
+        return entry.mount->ReadPrefix(entry.index, out);
+    }
+
+    std::string Stamp(std::size_t index) const override {
+        const auto entry = EntryAt(index);
+        return entry.mount->Stamp(entry.index);
+    }
+
+    std::optional<StoredRange> Stored(std::size_t index) const override {
+        const auto entry = EntryAt(index);
+        return entry.mount->Stored(entry.index);
+    }
+
+    std::optional<fs::path> HostPath(std::size_t index) const override {
+        const auto entry = EntryAt(index);
+        return entry.mount->HostPath(entry.index);
+    }
+
+    std::vector<Member> List(std::string_view directory) const override {
+        if (!directory.empty() && !SafeRelative(directory)) {
+            return {};
+        }
+        std::unordered_map<std::string, Member> members;
+        for (const auto &mount : child_mounts) {
+            if (!mount) {
+                continue;
+            }
+            for (auto member : mount->List(directory)) {
+                members.insert_or_assign(FoldKey(member.name), std::move(member));
+            }
+        }
+        std::vector<Member> result;
+        result.reserve(members.size());
+        for (auto &[key, member] : members) {
+            result.push_back(std::move(member));
+        }
+        std::sort(result.begin(), result.end(), [](const Member &a, const Member &b) {
+            return FoldKey(a.name) < FoldKey(b.name);
+        });
+        return result;
+    }
+
+private:
+    /**
+     * One winning child entry at a stable flattened index.
+     */
+    struct Entry {
+        std::shared_ptr<const Mount> mount; /**< Child mount holding the entry. */
+        std::size_t                  index; /**< Index inside the child mount. */
+        std::string                  name;  /**< Relative name in the winning child. */
+    };
+
+    Entry EntryAt(std::size_t index) const {
+        const std::shared_lock lock(entry_mutex);
+        return flat_entries.at(index);
+    }
+
+    std::vector<std::shared_ptr<const Mount> >           child_mounts; /**< Child mounts, lowest priority first. */
+    mutable std::shared_mutex                            entry_mutex;  /**< Guards newly found files and overrides. */
+    mutable std::deque<Entry>                            flat_entries; /**< Flattened stable entry indexes. */
+    mutable std::unordered_map<std::string, std::size_t> entry_index;  /**< Case-folded names mapped to indexes. */
+};
+
+/**
  * Serves one host file, which may not exist yet.
  */
 class HostFileMount final : public Mount {
@@ -407,6 +555,10 @@ std::shared_ptr<const Mount> OpenDirectories(const std::vector<fs::path> &roots,
 
 std::shared_ptr<const Mount> OpenDirectory(const fs::path &root, bool unique) {
     return OpenDirectories({root}, unique);
+}
+
+std::shared_ptr<const Mount> Overlay(std::vector<std::shared_ptr<const Mount> > mounts) {
+    return std::make_shared<OverlayMount>(std::move(mounts));
 }
 
 Ref HostFile(const fs::path &path) {
