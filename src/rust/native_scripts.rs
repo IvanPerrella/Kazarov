@@ -1,10 +1,13 @@
 //! Migrates compiled-script resource operands to directly published native files.
+use super::artifacts::{ArtifactBytes, AssetSink, Category, Job};
+use super::inventory::Inventory as ResourceInventory;
 use super::progress::Phase;
 use super::{CoreError, CoreResult};
 use rayon::prelude::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 fn fail(message: impl Into<String>) -> CoreError {
     CoreError(message.into())
@@ -199,6 +202,7 @@ fn normalize(value: &str) -> String {
 struct Inventory {
     paths: BTreeMap<String, String>,
     leaves: BTreeMap<String, BTreeSet<String>>,
+    target_paths: BTreeMap<String, BTreeSet<String>>,
     profiles: BTreeMap<String, BTreeSet<String>>,
 }
 impl Inventory {
@@ -208,6 +212,20 @@ impl Inventory {
         for (leaf, targets) in other.leaves {
             self.leaves.entry(leaf).or_default().extend(targets);
         }
+        for (target, paths) in other.target_paths {
+            self.target_paths.entry(target).or_default().extend(paths);
+        }
+    }
+    fn target_exists(&self, target: &str, exists: impl Fn(&str) -> bool) -> bool {
+        if exists(target) {
+            return true;
+        }
+        if target.contains('/') {
+            return false;
+        }
+        self.target_paths
+            .get(&normalize(target))
+            .is_some_and(|paths| paths.iter().any(|path| exists(path)))
     }
     fn resource(&self, text: &str) -> Option<String> {
         let key = normalize(text);
@@ -248,6 +266,203 @@ impl Inventory {
         }
         None
     }
+}
+
+fn planned_lookup(
+    resources: &ResourceInventory,
+    converted_aliases: &HashSet<String>,
+    profiles: &BTreeMap<String, BTreeSet<String>>,
+) -> Inventory {
+    let mut lookup = Inventory {
+        profiles: profiles
+            .iter()
+            .map(|(alias, names)| {
+                (
+                    alias.to_ascii_lowercase(),
+                    names.iter().map(|name| name.to_ascii_lowercase()).collect(),
+                )
+            })
+            .collect(),
+        ..Inventory::default()
+    };
+    for alias in resources.names() {
+        let normalized_alias = alias.to_ascii_lowercase();
+        let character_nested = normalized_alias.split('/').any(|part| {
+            part.split('#')
+                .next()
+                .unwrap_or(part)
+                .trim_end_matches('_')
+                .ends_with(".chr")
+        });
+        let ext = alias
+            .split("#entry:")
+            .next()
+            .unwrap_or(alias)
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let extension = match ext.as_str() {
+            "chr" | "mds" | "mdt" | "mot" | "wgt" | "bbp" => Some("gltf"),
+            "cfg" | "map" | "clo" | "img" | "tm2" => Some("json"),
+            "snd" => Some("sound.json"),
+            "pss" => Some("mp4"),
+            "bin" if normalized_alias == "snd2/rev.bin" => Some("json"),
+            "txt" if normalized_alias == "snd2/map_index.txt" => Some("json"),
+            _ => None,
+        };
+        let Some(extension) = extension else { continue };
+        if ext == "clo"
+            || (character_nested
+                && matches!(ext.as_str(), "cfg" | "map" | "img" | "tm2")
+                && !super::configs::is_tracked(alias))
+        {
+            continue;
+        }
+        if !converted_aliases.contains(alias) && !super::configs::is_tracked(alias) {
+            continue;
+        }
+        let path = super::configs::native_path(alias, extension);
+        lookup.paths.insert(normalized_alias, path.clone());
+        let leaf = alias
+            .rsplit('/')
+            .next()
+            .unwrap_or(alias)
+            .to_ascii_lowercase();
+        let target = if ext == "pss" {
+            path.clone()
+        } else {
+            path.rsplit('/').next().unwrap_or(&path).to_owned()
+        };
+        lookup
+            .target_paths
+            .entry(normalize(&target))
+            .or_default()
+            .insert(path);
+        lookup.leaves.entry(leaf).or_default().insert(target);
+    }
+    lookup
+}
+
+fn script_output_name(resources: &ResourceInventory, alias: &str) -> String {
+    let normalized_alias = alias.to_ascii_lowercase();
+    let nested_character = normalized_alias
+        .split('/')
+        .any(|part| part.split('#').next().unwrap_or(part).ends_with(".chr"));
+    if nested_character {
+        super::configs::native_path(alias, "stb")
+    } else if alias.contains('/') && resources.roots().iter().all(|root| root.alias != alias) {
+        super::packs::published_leaf_path(alias)
+    } else {
+        alias.to_owned()
+    }
+}
+
+/// Plans final compiled-script bytes from immutable retail references and native asset names.
+pub fn plan_jobs(
+    resources: &ResourceInventory,
+    converted_aliases: &HashSet<String>,
+    profiles: &BTreeMap<String, BTreeSet<String>>,
+) -> CoreResult<(HashSet<String>, Vec<Job>)> {
+    let lookup = Arc::new(planned_lookup(resources, converted_aliases, profiles));
+    let mut consumed = HashSet::new();
+    let mut jobs = Vec::new();
+    for resource in resources.leaves() {
+        if !is_valid_script(resource.bytes()) {
+            continue;
+        }
+        let alias = resource.alias.clone();
+        let name = script_output_name(resources, &alias);
+        consumed.insert(alias.clone());
+        let resource = resource.clone();
+        let lookup = lookup.clone();
+        jobs.push(Job {
+            category: Category::Script,
+            label: alias,
+            work: resource.len().max(1) as u64,
+            estimated_bytes: resource.len().saturating_mul(2),
+            run: Box::new(move |sink: &AssetSink| {
+                let (bytes, _) = migrate(resource.bytes(), &lookup)?;
+                sink.submit(name, ArtifactBytes::Owned(bytes), Category::Script)
+            }),
+        });
+    }
+    Ok((consumed, jobs))
+}
+
+pub fn verify_archive_work(resources: &ResourceInventory) -> u64 {
+    resources
+        .leaves()
+        .iter()
+        .filter(|resource| is_valid_script(resource.bytes()))
+        .count() as u64
+}
+
+/// Recomputes every retained compiled script and checks its final archived bytes.
+pub fn verify_archive(
+    resources: &ResourceInventory,
+    converted_aliases: &HashSet<String>,
+    profiles: &BTreeMap<String, BTreeSet<String>>,
+    reader: &dyn super::publish::ArchiveReader,
+    phase: &Phase,
+) -> CoreResult<()> {
+    let lookup = planned_lookup(resources, converted_aliases, profiles);
+    let mut character_scripts = BTreeMap::<String, BTreeSet<String>>::new();
+    for resource in resources.leaves() {
+        if !is_valid_script(resource.bytes()) {
+            continue;
+        }
+        let alias = &resource.alias;
+        let name = script_output_name(resources, alias);
+        let actual = reader.read(&name)?;
+        let (expected, _) = migrate_checked(resource.bytes(), &lookup, |path| {
+            if lookup.target_exists(path, |candidate| {
+                reader.contains(candidate) || super::configs::is_tracked_gameplay(candidate)
+            }) {
+                Ok(())
+            } else {
+                Err(fail(format!(
+                    "script resource target is absent: {alias} -> {path}"
+                )))
+            }
+        })?;
+        if actual != expected || !is_valid_script(&actual) {
+            return Err(fail(format!(
+                "native VM script differs from source migration: {alias}"
+            )));
+        }
+        let parts: Vec<_> = alias.split('/').collect();
+        if let Some(parent) = (0..parts.len().saturating_sub(1)).rev().find(|index| {
+            parts[*index]
+                .to_ascii_lowercase()
+                .split('#')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches('_')
+                .ends_with(".chr")
+        }) {
+            let character = parts[..=parent].join("/");
+            if !character_scripts.contains_key(&character) {
+                let game_path = super::configs::native_path(&character, "game.json");
+                let game: serde_json::Value = serde_json::from_slice(&reader.read(&game_path)?)?;
+                let scripts = game["resources"]["scripts"]
+                    .as_array()
+                    .ok_or_else(|| fail(format!("character omits script list: {character}")))?
+                    .iter()
+                    .filter_map(|script| script["path"].as_str().map(str::to_owned))
+                    .collect();
+                character_scripts.insert(character.clone(), scripts);
+            }
+            let native = super::configs::native_path(alias, "stb");
+            if !character_scripts[&character].contains(&native) {
+                return Err(fail(format!(
+                    "character omits native VM script resource: {alias}"
+                )));
+            }
+        }
+        phase.inc(1);
+    }
+    Ok(())
 }
 #[derive(Clone, Copy)]
 enum Token {
@@ -350,6 +565,14 @@ fn profile_arguments(
     Ok(locations)
 }
 fn migrate(b: &[u8], inventory: &Inventory) -> CoreResult<(Vec<u8>, usize)> {
+    migrate_checked(b, inventory, |_| Ok(()))
+}
+
+fn migrate_checked(
+    b: &[u8],
+    inventory: &Inventory,
+    mut validate_resource: impl FnMut(&str) -> CoreResult<()>,
+) -> CoreResult<(Vec<u8>, usize)> {
     let (code, functions) = decode(b)?;
     let profile_locations = profile_arguments(b, code, &functions, inventory)?;
     let mut replacements = BTreeMap::new();
@@ -369,12 +592,12 @@ fn migrate(b: &[u8], inventory: &Inventory) -> CoreResult<(Vec<u8>, usize)> {
                 .as_ref()
                 .filter(|(at, _)| *at + 12 == insn.at)
                 .map(|(_, name)| name.as_str());
-            let replacement = if profile_locations.contains(&insn.at) {
-                Some(key.trim_end_matches(".cfg").to_owned())
+            let (replacement, resource_target) = if profile_locations.contains(&insn.at) {
+                (Some(key.trim_end_matches(".cfg").to_owned()), false)
+            } else if let Some(profile) = inventory.profile(text, character) {
+                (Some(profile), false)
             } else {
-                inventory
-                    .profile(text, character)
-                    .or_else(|| inventory.resource(text))
+                (inventory.resource(text), true)
             };
             previous_character = if key.ends_with(".chr") {
                 Some((insn.at, key))
@@ -382,6 +605,9 @@ fn migrate(b: &[u8], inventory: &Inventory) -> CoreResult<(Vec<u8>, usize)> {
                 None
             };
             if let Some(replacement) = replacement.filter(|v| v.as_bytes() != bytes) {
+                if resource_target {
+                    validate_resource(&replacement)?;
+                }
                 replacements.insert(insn.at, replacement);
             }
         }
@@ -491,7 +717,7 @@ fn inventory_resource(
     };
     if let Some(extension) = extension {
         let path = super::configs::native_path(alias, extension);
-        if assets.join(&path).is_file() {
+        if assets.join(&path).is_file() || super::configs::is_tracked(alias) {
             inventory.paths.insert(alias.to_owned(), path.clone());
             let leaf = Path::new(alias)
                 .file_name()
@@ -580,36 +806,52 @@ fn migrate_container(
 }
 /// Rewrites resource operands in retained bytecode after native assets have been published.
 pub fn convert_tree(raw: &Path, published: &Path, phase: &Phase) -> CoreResult<()> {
-    let assets = published.join("port_data");
-    let mut raw_files = Vec::new();
-    gather(raw, &mut raw_files)?;
+    convert_source(
+        &super::archive::SourceTree::directory(raw)?,
+        published,
+        phase,
+    )
+}
+
+pub fn convert_source(
+    source: &super::archive::SourceTree,
+    published: &Path,
+    phase: &Phase,
+) -> CoreResult<()> {
+    let assets = published.join("data");
+    let mut raw_files: Vec<&str> = source
+        .names()
+        .filter(|name| {
+            !matches!(*name, "sound/sound.dat" | "sound/sound.hd3")
+                && !name.ends_with(".pss")
+                && !name.ends_with(".wav")
+        })
+        .collect();
     raw_files.sort();
     let mut files = Vec::new();
     if published.join("data").is_dir() {
         gather(&published.join("data"), &mut files)?;
     }
-    let mut native = Vec::new();
-    if assets.is_dir() {
-        gather(&assets, &mut native)?;
+    files.retain(|path| {
+        !matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("png" | "wav" | "mp4" | "gltf" | "json")
+        ) && !path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".gltf.bin"))
+    });
+    let work = super::archive::compatibility_work_path(published, "");
+    if work.is_dir() {
+        gather(&work, &mut files)?;
     }
-    files.extend(
-        native
-            .into_iter()
-            .filter(|p| p.extension().is_some_and(|v| v == "stb")),
-    );
     files.sort();
     phase.set_total((raw_files.len() + files.len()) as u64);
     let locals: Vec<CoreResult<Inventory>> = raw_files
         .par_iter()
         .map(|p| -> CoreResult<Inventory> {
-            let alias = p
-                .strip_prefix(raw)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/")
-                .to_ascii_lowercase();
+            let alias = p.to_ascii_lowercase();
             let mut local = Inventory::default();
-            inventory_resource(&fs::read(p)?, &alias, &assets, &mut local, 0)?;
+            inventory_resource(&source.read(p)?, &alias, &assets, &mut local, 0)?;
             phase.inc(1);
             Ok(local)
         })
@@ -678,21 +920,34 @@ fn script_sources(
 
 /// Checks retained VM source coverage and exact deterministic operand migration before cache reuse.
 pub fn verify_tree(raw: &Path, published: &Path, phase: &Phase) -> CoreResult<()> {
-    let assets = published.join("port_data");
-    let mut files = Vec::new();
-    gather(raw, &mut files)?;
+    verify_source(
+        &super::archive::SourceTree::directory(raw)?,
+        published,
+        phase,
+    )
+}
+
+pub fn verify_source(
+    source: &super::archive::SourceTree,
+    published: &Path,
+    phase: &Phase,
+) -> CoreResult<()> {
+    let assets = published.join("data");
+    let mut files: Vec<&str> = source
+        .names()
+        .filter(|name| {
+            !matches!(*name, "sound/sound.dat" | "sound/sound.hd3")
+                && !name.ends_with(".pss")
+                && !name.ends_with(".wav")
+        })
+        .collect();
     files.sort();
     phase.set_total(files.len() as u64);
     let locals = files
         .par_iter()
-        .map(|source| -> CoreResult<_> {
-            let alias = source
-                .strip_prefix(raw)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/")
-                .to_ascii_lowercase();
-            let bytes = fs::read(source)?;
+        .map(|name| -> CoreResult<_> {
+            let alias = name.to_ascii_lowercase();
+            let bytes = source.read(name)?;
             let mut inventory = Inventory::default();
             inventory_resource(&bytes, &alias, &assets, &mut inventory, 0)?;
             let mut local = BTreeMap::new();
@@ -1032,6 +1287,25 @@ pub(crate) fn event_script_fixture(calls: &[(i32, &[ScriptArg])]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_migrated_targets_resolve_to_published_source_paths() {
+        let mut inventory = Inventory::default();
+        inventory.target_paths.insert(
+            "e110_mints.gltf".into(),
+            BTreeSet::from([
+                "event/e100/e110/e110_mints.gltf".into(),
+                "event/e100/e110/_e110_data.pak/e110_mints.gltf".into(),
+            ]),
+        );
+        let published = BTreeSet::from(["event/e100/e110/e110_mints.gltf".to_owned()]);
+        assert!(inventory.target_exists("e110_mints.gltf", |path| published.contains(path)));
+        assert!(!inventory.target_exists("missing.gltf", |path| published.contains(path)));
+        assert!(
+            !inventory.target_exists("elsewhere/e110_mints.gltf", |path| published.contains(path))
+        );
+    }
+
     #[test]
     fn actor_loads_follow_constant_actors_and_globals_set_only_to_constants() {
         let load = |ext: i32, path: &'static str, actor: ScriptArg<'static>| {
@@ -1122,10 +1396,9 @@ mod tests {
         super::super::packs::convert_tree(&raw, &published, &Phase::noop()).unwrap();
         verify_tree(&raw, &published, &Phase::noop()).unwrap();
         assert_eq!(fs::read(published.join("data/test.stb")).unwrap(), script);
-        let game: serde_json::Value = serde_json::from_slice(
-            &fs::read(published.join("port_data/effects.game.json")).unwrap(),
-        )
-        .unwrap();
+        let game: serde_json::Value =
+            serde_json::from_slice(&fs::read(published.join("data/effects.game.json")).unwrap())
+                .unwrap();
         assert_eq!(game["resources"]["scripts"].as_array().unwrap().len(), 23);
         assert_eq!(
             game["profiles"]["info"]["commands"][0]["args"][0]["kind"],
@@ -1133,9 +1406,9 @@ mod tests {
         );
         assert!(!game["profiles"]["info"]["commands"][0]["args"][0]["index"].is_null());
         fs::remove_file(published.join("data/test.stb")).unwrap();
-        fs::create_dir_all(published.join("port_data/test.stb")).unwrap();
+        fs::create_dir_all(published.join("data/test.stb")).unwrap();
         fs::write(
-            published.join("port_data/test.stb/pack.json"),
+            published.join("data/test.stb/pack.json"),
             b"{\"schema_version\":1,\"kind\":\"asset_directory\"}",
         )
         .unwrap();
@@ -1218,6 +1491,7 @@ mod tests {
         Inventory {
             paths: BTreeMap::from([("chara/hero.chr".into(), "chara/hero.gltf".into())]),
             leaves: BTreeMap::new(),
+            target_paths: BTreeMap::new(),
             profiles: BTreeMap::from([("chara/hero.chr".into(), BTreeSet::from(["info".into()]))]),
         }
     }

@@ -321,11 +321,14 @@ need a portal backend for their desktop. The setup window uses eframe/egui with
 OpenGL and supports X11 and Wayland. Linux build dependencies are included in the
 toolchain image (`pkg-config`, X11, Wayland, xkbcommon and EGL development files).
 
-Extraction runs on a worker thread. `extract_with_progress` reports weighted
-phases: source checking (0–5%), raw files (5–40%), conversion (40–90%), final
-texture manifests and publication (90–100%). Percentages measure completed work,
-not estimated elapsed time. Concurrent callbacks are coalesced monotonically by
-the window. Only successful publication reaches 100%; then setup closes and
+Extraction runs on a worker thread. `extract_with_progress` reports planned work
+for the ISO read, asset planning, concurrent texture, model, audio, movie, script
+and retained-asset conversion, ZIP streaming, final archive verification and
+transactional publication. Model publication has the largest progress share because
+it determines the conversion tail; the ETA is withheld when critical model work
+stops advancing. Percentages measure completed work, not estimated elapsed time.
+Concurrent callbacks are coalesced monotonically by the window. Only successful
+publication reaches 100%; then setup closes and
 returns to the caller automatically. Errors allow retry. Closing is disabled
 while extraction is active so publishing is never abandoned mid-operation.
 

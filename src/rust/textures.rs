@@ -1,3 +1,5 @@
+use super::archive::ResourceRef;
+use super::artifacts::{ArtifactBytes, AssetSink, Category, Job};
 use super::progress::Phase;
 use super::{CoreError, CoreResult};
 use rayon::prelude::*;
@@ -176,6 +178,15 @@ fn decode_palette(raw: &[u8], image_type: u8, clut_type: u8) -> CoreResult<Vec<u
     Ok(out)
 }
 fn parse_picture(b: &[u8], offset: usize, swizzled: bool, no_image: bool) -> CoreResult<Picture> {
+    parse_picture_mode(b, offset, swizzled, no_image, true)
+}
+fn parse_picture_mode(
+    b: &[u8],
+    offset: usize,
+    swizzled: bool,
+    no_image: bool,
+    decode_pixels: bool,
+) -> CoreResult<Picture> {
     let h = slice(b, offset, 0x30)?;
     let mut total = u32le(h, 0)? as usize;
     let clut_size = u32le(h, 4)? as usize;
@@ -207,13 +218,17 @@ fn parse_picture(b: &[u8], offset: usize, swizzled: bool, no_image: bool) -> Cor
             if position + needed > offset + header_size + image_size {
                 return Err(fail("TIM2 mip extends beyond image"));
             }
-            levels.push(decode_level(
-                slice(b, position, needed)?,
-                w,
-                h,
-                kind,
-                swizzled,
-            )?);
+            let raw = slice(b, position, needed)?;
+            levels.push(if decode_pixels || kind >= 4 {
+                decode_level(raw, w, h, kind, swizzled)?
+            } else {
+                Level {
+                    width: w,
+                    height: h,
+                    pixels: Vec::new(),
+                    indexed: false,
+                }
+            });
             position += if mips > 1 {
                 u32le(b, offset + 0x40 + i * 4)? as usize
             } else {
@@ -245,6 +260,14 @@ fn parse_picture(b: &[u8], offset: usize, swizzled: bool, no_image: bool) -> Cor
     })
 }
 fn parse_tim2(b: &[u8], swizzled: bool, no_image: bool) -> CoreResult<Vec<Picture>> {
+    parse_tim2_mode(b, swizzled, no_image, true)
+}
+fn parse_tim2_mode(
+    b: &[u8],
+    swizzled: bool,
+    no_image: bool,
+    decode_pixels: bool,
+) -> CoreResult<Vec<Picture>> {
     let h = slice(b, 0, 16)?;
     if &h[..4] != b"TIM2" || h[5] > 1 {
         return Err(fail("invalid TIM2 header"));
@@ -256,14 +279,14 @@ fn parse_tim2(b: &[u8], swizzled: bool, no_image: bool) -> CoreResult<Vec<Pictur
     let mut position = if h[5] != 0 { 0x80 } else { 16 };
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        let picture = parse_picture(b, position, swizzled, no_image)?;
+        let picture = parse_picture_mode(b, position, swizzled, no_image, decode_pixels)?;
         position += picture.size;
         out.push(picture);
     }
     Ok(out)
 }
 fn tim2_extent(b: &[u8]) -> CoreResult<usize> {
-    let pictures = parse_tim2(b, false, false)?;
+    let pictures = parse_tim2_mode(b, false, false, false)?;
     let first = if b[5] != 0 { 0x80 } else { 16 };
     if pictures.len() == 1 {
         let h = slice(b, first, 0x30)?;
@@ -358,37 +381,6 @@ fn hex_digest(digest: &[u8]) -> String {
         out.push(char::from(HEX[(byte & 0xf) as usize]));
     }
     out
-}
-fn file_hash(path: &Path) -> CoreResult<String> {
-    use std::io::Read;
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    Ok(hex_digest(&hasher.finalize()))
-}
-fn copy_hashed(source: &Path, target: &Path) -> CoreResult<String> {
-    use std::io::{Read, Write};
-    let mut input = fs::File::open(source)?;
-    let mut output = fs::File::create(target)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 4 << 20];
-    loop {
-        let count = input.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-        output.write_all(&buffer[..count])?;
-    }
-    fs::set_permissions(target, fs::metadata(source)?.permissions())?;
-    Ok(hex_digest(&hasher.finalize()))
 }
 fn png_rgba(width: usize, height: usize, pixels: &[u8]) -> CoreResult<Vec<u8>> {
     if pixels.len() != width * height * 4 {
@@ -610,23 +602,19 @@ fn possible_texture(len: u64, name: &str) -> CoreResult<bool> {
         "large file requires explicit texture audit: {name}"
     )))
 }
-fn write_if_changed(path: &Path, content: &[u8]) -> CoreResult<String> {
-    let digest = hex_digest(&Sha256::digest(content));
-    if path.is_file() && file_hash(path)? == digest {
-        return Ok(digest);
+fn write_output(path: &Path, content: &[u8]) -> CoreResult<()> {
+    if path.is_dir() {
+        return Err(fail(format!(
+            "asset path is a directory: {}",
+            path.display()
+        )));
     }
     fs::create_dir_all(path.parent().ok_or_else(|| fail("no output parent"))?)?;
-    for attempt in 0..30 {
+    for attempt in 0..4 {
         match fs::write(path, content) {
-            Ok(()) => return Ok(digest),
-            Err(error)
-                if attempt < 29
-                    && matches!(
-                        error.kind(),
-                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput
-                    ) =>
-            {
-                std::thread::sleep(std::time::Duration::from_secs(1));
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < 3 && error.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
             }
             Err(error) => return Err(error.into()),
         }
@@ -693,26 +681,42 @@ struct Unit {
     sources: Vec<Value>,
     pictures: Vec<PictureRecord>,
     pairs: Vec<(String, String, String)>,
-    written: BTreeMap<String, String>,
-    data_hashes: BTreeMap<String, String>,
+    written: BTreeSet<String>,
     asset_counts: BTreeMap<String, usize>,
     raster_origins: BTreeMap<String, (String, usize)>,
+    edits: BTreeMap<String, TextureEdit>,
+    variants: Vec<VariantEmission>,
+    record_variants: bool,
+    plan_only: bool,
 }
+pub enum TextureEdit {
+    Remove,
+    Replace(Vec<u8>),
+}
+struct VariantEmission {
+    names: Vec<String>,
+    picture: Picture,
+    palette: Vec<u8>,
+}
+type RasterWriter<'a> = dyn Fn(&str, usize, usize, &[u8]) -> CoreResult<()> + Sync + 'a;
 impl Unit {
     fn new() -> Self {
         Self {
             sources: Vec::new(),
             pictures: Vec::new(),
             pairs: Vec::new(),
-            written: BTreeMap::new(),
-            data_hashes: BTreeMap::new(),
+            written: BTreeSet::new(),
             asset_counts: BTreeMap::new(),
             raster_origins: BTreeMap::new(),
+            edits: BTreeMap::new(),
+            variants: Vec::new(),
+            record_variants: false,
+            plan_only: false,
         }
     }
     fn write_asset(
         &mut self,
-        output: &Path,
+        write: &RasterWriter<'_>,
         document: &str,
         pixels: &[u8],
         w: usize,
@@ -724,15 +728,14 @@ impl Unit {
             .ok_or_else(|| fail("invalid document path"))?;
         let relative = format!("{stem}_{count}.png");
         *count += 1;
-        let content = png_rgba(w, h, pixels)?;
-        let digest = write_if_changed(&output.join("port_data").join(&relative), &content)?;
-        self.written.insert(relative.clone(), digest);
+        write(&relative, w, h, pixels)?;
+        self.written.insert(relative.clone());
         Ok(relative)
     }
     #[allow(clippy::too_many_arguments)]
     fn convert_pictures(
         &mut self,
-        output: &Path,
+        write: &RasterWriter<'_>,
         key: &str,
         name: &str,
         pictures: Vec<Picture>,
@@ -751,13 +754,14 @@ impl Unit {
             };
             let mut levels = Vec::new();
             for level in &picture.levels {
-                let rgba = if level.indexed {
+                let rgba = if self.plan_only {
+                    Vec::new()
+                } else if level.indexed {
                     colorize(&level.pixels, picture.palette.as_ref().unwrap())
                 } else {
                     level.pixels.clone()
                 };
-                let asset =
-                    self.write_asset(output, &document, &rgba, level.width, level.height)?;
+                let asset = self.write_asset(write, &document, &rgba, level.width, level.height)?;
                 levels.push(relative_raster(&logical_document, &asset)?);
             }
             let mut entry = json!({"type":"texture","name":name,"header":ordinal,"picture":index,
@@ -783,7 +787,7 @@ impl Unit {
     }
     fn transform(
         &mut self,
-        output: &Path,
+        write: &RasterWriter<'_>,
         original: &[u8],
         key: &str,
         depth: usize,
@@ -814,10 +818,15 @@ impl Unit {
                     collect_pairs(key, &script, &mut self.pairs);
                     converted.push(json!({"type":"cfg","name":e.name,"script":script}));
                 } else {
-                    let pictures = parse_tim2(&original[e.offset..], e.swizzled, e.no_image)?;
+                    let pictures = parse_tim2_mode(
+                        &original[e.offset..],
+                        e.swizzled,
+                        e.no_image,
+                        !self.plan_only,
+                    )?;
                     let metadata = json!({"block":e.block,"swizzled":e.swizzled,"clamp":e.clamp,"no_image":e.no_image});
                     converted.extend(self.convert_pictures(
-                        output,
+                        write,
                         key,
                         &e.name,
                         pictures,
@@ -833,7 +842,7 @@ impl Unit {
             return Ok(None);
         }
         if original.starts_with(b"TIM2") {
-            let pictures = parse_tim2(original, false, false)?;
+            let pictures = parse_tim2_mode(original, false, false, !self.plan_only)?;
             let stem = Path::new(key)
                 .file_stem()
                 .and_then(|x| x.to_str())
@@ -841,7 +850,7 @@ impl Unit {
             let source_idx = self.sources.len();
             let metadata = json!({"block":0,"swizzled":false,"clamp":0,"no_image":false});
             let entries =
-                self.convert_pictures(output, key, stem, pictures, &metadata, 0, source_idx, 0)?;
+                self.convert_pictures(write, key, stem, pictures, &metadata, 0, source_idx, 0)?;
             self.sources
                 .push(json!({"source":key,"kind":"tm2","entries":entries}));
             return Ok(None);
@@ -877,17 +886,22 @@ impl Unit {
                     );
                 }
                 match self.transform(
-                    output,
+                    write,
                     &original[start..start + size],
                     &child_key,
                     depth + 1,
                 )? {
                     None => {
+                        self.edits.insert(child_key, TextureEdit::Remove);
                         result[start..start + size].fill(0);
                         result[size_field..size_field + 4].fill(0);
                         changed = true;
                     }
                     Some(next) if next != original[start..start + size] => {
+                        if parse_pack(&original[start..start + size]).is_none() {
+                            self.edits
+                                .insert(child_key, TextureEdit::Replace(next.clone()));
+                        }
                         if next.len() != size {
                             return Err(fail("PACK member size changed"));
                         }
@@ -930,7 +944,7 @@ impl Unit {
                     );
                 }
                 if self
-                    .transform(output, &candidate[..size], &child_key, depth + 1)?
+                    .transform(write, &candidate[..size], &child_key, depth + 1)?
                     .is_none()
                 {
                     result[at..at + size].fill(0);
@@ -957,6 +971,289 @@ pub struct ConversionReport {
     pub pngs: u64,
     pub documents: Vec<ConvertedTextureDocument>,
 }
+
+/// Metadata and independent raster jobs planned from the shared source image.
+pub struct TexturePlan {
+    pub documents: Vec<ConvertedTextureDocument>,
+    pub png_names: BTreeSet<String>,
+    pub consumed: BTreeSet<String>,
+    replacement_jobs: BTreeMap<String, String>,
+    jobs: Vec<Job>,
+}
+
+impl TexturePlan {
+    pub fn into_jobs(self) -> Vec<Job> {
+        self.jobs
+    }
+
+    /// Omits documents embedded into character metadata while retaining PNGs they may reference.
+    pub fn into_jobs_without_documents(
+        self,
+        embedded: &BTreeSet<String>,
+        model_owned: &BTreeSet<String>,
+    ) -> Vec<Job> {
+        let mut names: BTreeSet<String> = self
+            .documents
+            .iter()
+            .filter(|document| embedded.contains(&document.source_alias))
+            .map(|document| document.document_path.clone())
+            .collect();
+        names.extend(
+            self.replacement_jobs
+                .iter()
+                .filter(|(alias, _)| model_owned.contains(*alias))
+                .map(|(_, name)| name.clone()),
+        );
+        self.jobs
+            .into_iter()
+            .filter(|job| job.category != Category::Texture || !names.contains(&job.label))
+            .collect()
+    }
+}
+
+/// Resolves palette variants and final names before any archive writer is started.
+pub fn plan_source(inventory: &super::inventory::Inventory) -> CoreResult<TexturePlan> {
+    let mut state = Unit::new();
+    state.record_variants = true;
+    state.plan_only = true;
+    let mut roots = Vec::new();
+    let no_write = |_: &str, _: usize, _: usize, _: &[u8]| Ok(());
+    let planned: Vec<CoreResult<Option<Unit>>> = inventory
+        .roots()
+        .par_iter()
+        .map(|resource| plan_root_resource(inventory, resource))
+        .collect();
+    for (resource, result) in inventory.roots().iter().zip(planned) {
+        let Some(unit) = result? else { continue };
+        let base = state.sources.len();
+        for mut record in unit.pictures {
+            record.source_idx += base;
+            state.pictures.push(record);
+        }
+        state.sources.extend(unit.sources);
+        state.pairs.extend(unit.pairs);
+        state.written.extend(unit.written);
+        for (document, count) in unit.asset_counts {
+            if state.asset_counts.insert(document.clone(), count).is_some() {
+                return Err(fail(format!("asset collision: {document}")));
+            }
+        }
+        for (name, edit) in unit.edits {
+            if state.edits.insert(name.clone(), edit).is_some() {
+                return Err(fail(format!("texture scrub collision: {name}")));
+            }
+        }
+        roots.push(resource.clone());
+    }
+    bake_variants(&mut state, &no_write, &|name| inventory.get(name).is_some())?;
+    let mut documents = Vec::with_capacity(state.sources.len());
+    let mut document_names = BTreeSet::new();
+    let mut aliases = BTreeSet::new();
+    let mut jobs = Vec::new();
+    for entry in &state.sources {
+        let alias = entry["source"]
+            .as_str()
+            .ok_or_else(|| fail("texture source missing"))?;
+        let name = document_path(alias)?;
+        if !aliases.insert(alias.to_ascii_lowercase())
+            || !document_names.insert(name.to_ascii_lowercase())
+        {
+            return Err(fail(format!("document collision: {name}")));
+        }
+        let document = runtime_document(entry)?;
+        let bytes = serde_json::to_vec(&document)?;
+        let job_name = name.clone();
+        jobs.push(Job {
+            category: Category::Texture,
+            label: job_name.clone(),
+            work: 1,
+            estimated_bytes: bytes.len(),
+            run: Box::new(move |sink| {
+                sink.submit(job_name, ArtifactBytes::Owned(bytes), Category::Texture)
+            }),
+        });
+        documents.push(ConvertedTextureDocument {
+            source_alias: alias.to_owned(),
+            document_path: name,
+            document,
+        });
+    }
+    let png_names = state.written.clone();
+    for resource in roots {
+        let label = resource.alias.clone();
+        let estimate = resource.len().saturating_mul(3).max(1 << 20);
+        jobs.push(Job {
+            category: Category::Texture,
+            label,
+            work: 1 + (resource.len() as u64).div_ceil(256 << 10),
+            estimated_bytes: estimate,
+            run: Box::new(move |sink| emit_base_rasters(&resource, sink)),
+        });
+    }
+    for variant in state.variants {
+        let label = variant.names.first().cloned().unwrap_or_default();
+        let estimate = variant
+            .picture
+            .levels
+            .iter()
+            .map(|level| level.width.saturating_mul(level.height).saturating_mul(4))
+            .sum();
+        jobs.push(Job {
+            category: Category::Texture,
+            label,
+            work: 1,
+            estimated_bytes: estimate,
+            run: Box::new(move |sink| emit_variant(variant, sink)),
+        });
+    }
+    let roots: BTreeSet<&str> = inventory
+        .roots()
+        .iter()
+        .map(|resource| resource.alias.as_str())
+        .collect();
+    let mut consumed = BTreeSet::new();
+    let mut replacement_jobs = BTreeMap::new();
+    for (alias, edit) in state.edits {
+        consumed.insert(alias.clone());
+        if let TextureEdit::Replace(bytes) = edit {
+            let name = if roots.contains(alias.as_str()) {
+                alias.clone()
+            } else {
+                super::packs::published_leaf_path(&alias)
+            };
+            let estimated_bytes = bytes.len();
+            replacement_jobs.insert(alias, name.clone());
+            jobs.push(Job {
+                category: Category::Texture,
+                label: name.clone(),
+                work: 1 + (estimated_bytes as u64).div_ceil(256 << 10),
+                estimated_bytes,
+                run: Box::new(move |sink| {
+                    sink.submit(name, ArtifactBytes::Owned(bytes), Category::Texture)
+                }),
+            });
+        }
+    }
+    Ok(TexturePlan {
+        documents,
+        png_names,
+        consumed,
+        replacement_jobs,
+        jobs,
+    })
+}
+
+fn plan_root_resource(
+    inventory: &super::inventory::Inventory,
+    resource: &ResourceRef,
+) -> CoreResult<Option<Unit>> {
+    let key = resource.alias.as_str();
+    if key == "manifest.txt" || audio_owned_root(inventory, key) {
+        return Ok(None);
+    }
+    let texture_extension = Path::new(key)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("img") || extension.eq_ignore_ascii_case("tm2")
+        });
+    let mut unit = Unit::new();
+    unit.plan_only = true;
+    if texture_extension && resource.is_empty() {
+        unit.sources
+            .push(json!({"source":key,"kind":"empty","entries":[]}));
+        unit.edits.insert(key.to_owned(), TextureEdit::Remove);
+        return Ok(Some(unit));
+    }
+    if !possible_texture(resource.len() as u64, key)? {
+        return Ok(None);
+    }
+    if !resource.bytes().windows(4).any(|signature| {
+        signature == b"TIM2"
+            || signature == b"IMG\0"
+            || signature == b"IM2\0"
+            || signature == b"IM3\0"
+    }) {
+        if texture_extension {
+            return Err(fail(format!(
+                "unrecognized standalone texture format: {key}"
+            )));
+        }
+        return Ok(None);
+    }
+    let no_write = |_: &str, _: usize, _: usize, _: &[u8]| Ok(());
+    let transformed = unit.transform(&no_write, resource.bytes(), key, 0)?;
+    if transformed.is_some() && texture_extension {
+        return Err(fail(format!(
+            "unrecognized standalone texture format: {key}"
+        )));
+    }
+    if let Some(next) = transformed {
+        if parse_pack(resource.bytes()).is_none() && next != resource.bytes() {
+            unit.edits
+                .insert(key.to_owned(), TextureEdit::Replace(next));
+        }
+    } else {
+        unit.edits.insert(key.to_owned(), TextureEdit::Remove);
+    }
+    Ok(Some(unit))
+}
+
+fn audio_owned_root(inventory: &super::inventory::Inventory, key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "sound/sound.dat" | "sound/sound.hd3" | "snd2/rev.bin" | "snd2/map_index.txt"
+    ) {
+        return true;
+    }
+    if ["snd", "hd", "bd", "sq", "mid", "wav", "pss"]
+        .contains(&lower.rsplit('.').next().unwrap_or(""))
+    {
+        return true;
+    }
+    let path = Path::new(key);
+    ["cfg", "vol"].contains(
+        &path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or(""),
+    ) && ["hd", "sq", "mid"].iter().any(|extension| {
+        inventory
+            .get(
+                &path
+                    .with_extension(extension)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            )
+            .is_some()
+    })
+}
+
+fn emit_base_rasters(resource: &ResourceRef, sink: &AssetSink) -> CoreResult<()> {
+    let write = |name: &str, width: usize, height: usize, pixels: &[u8]| {
+        sink.submit(
+            name,
+            ArtifactBytes::Owned(png_rgba(width, height, pixels)?),
+            Category::Texture,
+        )
+    };
+    Unit::new().transform(&write, resource.bytes(), &resource.alias, 0)?;
+    Ok(())
+}
+
+fn emit_variant(variant: VariantEmission, sink: &AssetSink) -> CoreResult<()> {
+    for (name, level) in variant.names.into_iter().zip(variant.picture.levels) {
+        let rgba = colorize(&level.pixels, &variant.palette);
+        sink.submit(
+            name,
+            ArtifactBytes::Owned(png_rgba(level.width, level.height, &rgba)?),
+            Category::Texture,
+        )?;
+    }
+    Ok(())
+}
+#[cfg(test)]
 fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> CoreResult<()> {
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
@@ -968,39 +1265,23 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Cor
     }
     Ok(())
 }
-fn prune_unmanifested(root: &Path, allowed: &BTreeSet<String>) -> CoreResult<()> {
-    fn visit(root: &Path, dir: &Path, allowed: &BTreeSet<String>) -> CoreResult<()> {
-        for entry in fs::read_dir(dir)? {
-            let path = entry?.path();
-            if path.is_dir() {
-                visit(root, &path, allowed)?;
-                if fs::read_dir(&path)?.next().is_none() {
-                    fs::remove_dir(&path)?;
-                }
-            } else if path.is_file() {
-                let relative = path
-                    .strip_prefix(root)
-                    .map_err(|e| fail(e.to_string()))?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if !allowed.contains(&relative) {
-                    fs::remove_file(path)?;
-                }
-            }
-        }
-        Ok(())
-    }
-    visit(root, root, allowed)
-}
-fn process_file(raw: &Path, output: &Path, path: &Path, phase: &Phase) -> CoreResult<Unit> {
+fn process_file(
+    source: &super::archive::SourceTree,
+    output: &Path,
+    key: &str,
+    phase: &Phase,
+) -> CoreResult<Unit> {
+    let write = |name: &str, width: usize, height: usize, pixels: &[u8]| {
+        let content = png_rgba(width, height, pixels)?;
+        write_output(&output.join("data").join(name), &content)
+    };
     let mut unit = Unit::new();
-    let relative = path.strip_prefix(raw).map_err(|e| fail(e.to_string()))?;
-    let key = relative.to_string_lossy().replace('\\', "/");
-    let texture_extension = path
+    let relative = Path::new(key);
+    let texture_extension = relative
         .extension()
         .and_then(|s| s.to_str())
         .is_some_and(|s| s.eq_ignore_ascii_case("img") || s.eq_ignore_ascii_case("tm2"));
-    let len = fs::metadata(path)?.len();
+    let len = source.len(key)?;
     if texture_extension && len == 0 {
         unit.sources
             .push(json!({"source":key,"kind":"empty","entries":[]}));
@@ -1009,10 +1290,14 @@ fn process_file(raw: &Path, output: &Path, path: &Path, phase: &Phase) -> CoreRe
     if len >= 4 << 20 {
         phase.item(&key);
     }
+    if super::audio::owns_source(source, key)? {
+        return Ok(unit);
+    }
     let target = output.join("data").join(relative);
-    let digest = if possible_texture(len, &key)? {
-        let original = fs::read(path)?;
-        let transformed = unit.transform(output, &original, &key, 0)?;
+    if possible_texture(len, &key)? {
+        let original = source.read(key)?;
+        let is_pack = parse_pack(&original).is_some();
+        let transformed = unit.transform(&write, &original, key, 0)?;
         let Some(bytes) = transformed else {
             return Ok(unit);
         };
@@ -1021,25 +1306,29 @@ fn process_file(raw: &Path, output: &Path, path: &Path, phase: &Phase) -> CoreRe
                 "unrecognized standalone texture format: {key}"
             )));
         }
-        let digest = write_if_changed(&target, &bytes)?;
-        audit_payload(&bytes, &key)?;
-        digest
+        let destination = if is_pack {
+            super::archive::compatibility_work_path(output, key)
+        } else {
+            target
+        };
+        write_output(&destination, &bytes)?;
     } else {
         fs::create_dir_all(target.parent().ok_or_else(|| fail("no data parent"))?)?;
-        if target.is_file() {
-            let digest = file_hash(path)?;
-            if file_hash(&target)? != digest {
-                fs::copy(path, &target)?;
-            }
-            digest
-        } else {
-            copy_hashed(path, &target)?
+        if target.exists() {
+            return Err(fail(format!(
+                "retained source collides with native asset: {}",
+                target.display()
+            )));
         }
-    };
-    unit.data_hashes.insert(key, digest);
+        source.copy(key, &target)?;
+    }
     Ok(unit)
 }
-fn bake_variants(state: &mut Unit, output: &Path, raw: &Path) -> CoreResult<()> {
+fn bake_variants(
+    state: &mut Unit,
+    write: &RasterWriter<'_>,
+    contains: &dyn Fn(&str) -> bool,
+) -> CoreResult<()> {
     let mut by_source: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, record) in state.pictures.iter().enumerate() {
@@ -1060,7 +1349,7 @@ fn bake_variants(state: &mut Unit, output: &Path, raw: &Path) -> CoreResult<()> 
             .filter(|parent| {
                 let mut ancestor = *parent;
                 loop {
-                    if raw.join(ancestor).is_file() {
+                    if contains(ancestor) {
                         return true;
                     }
                     let Some((next, _)) = ancestor.rsplit_once('/') else {
@@ -1152,12 +1441,25 @@ fn bake_variants(state: &mut Unit, output: &Path, raw: &Path) -> CoreResult<()> 
             continue;
         }
         let mut levels = Vec::new();
+        let mut assets = Vec::new();
         let logical_document = document_path(&dest.source)?;
         for level in &dest.picture.levels {
-            let rgba = colorize(&level.pixels, &source_palette);
+            let rgba = if state.plan_only {
+                Vec::new()
+            } else {
+                colorize(&level.pixels, &source_palette)
+            };
             let asset =
-                state.write_asset(output, &dest.document, &rgba, level.width, level.height)?;
+                state.write_asset(write, &dest.document, &rgba, level.width, level.height)?;
+            assets.push(asset.clone());
             levels.push(relative_raster(&logical_document, &asset)?);
+        }
+        if state.record_variants {
+            state.variants.push(VariantEmission {
+                names: assets,
+                picture: dest.picture.clone(),
+                palette: source_palette,
+            });
         }
         state.sources[dest.source_idx]["entries"][dest.entry_idx]["variants"]
             .as_array_mut()
@@ -1280,21 +1582,46 @@ pub fn convert_tree_with_progress(
     jobs: usize,
     phase: &Phase,
 ) -> CoreResult<ConversionReport> {
+    let source = super::archive::SourceTree::directory(raw)?;
+    convert_source_with_progress(&source, output, jobs, phase)
+}
+
+pub fn convert_source_with_progress(
+    source: &super::archive::SourceTree,
+    output: &Path,
+    jobs: usize,
+    phase: &Phase,
+) -> CoreResult<ConversionReport> {
     if jobs == 0 || jobs > 64 {
         return Err(fail("jobs must be between 1 and 64"));
     }
     fs::create_dir_all(output.join("data"))?;
-    fs::create_dir_all(output.join("port_data"))?;
-    let mut files = Vec::new();
-    collect_files(raw, raw, &mut files)?;
+    let mut files: Vec<&str> = source
+        .names()
+        .filter(|name| *name != "manifest.txt")
+        .collect();
     files.sort();
-    phase.set_total(files.len() as u64 + 2);
+    let work: Vec<u64> = files
+        .iter()
+        .map(|name| -> CoreResult<u64> {
+            if super::audio::owns_source(source, name)? {
+                return Ok(1);
+            }
+            let bytes = source.len(name)?.min(8 << 20);
+            Ok(1 + bytes.div_ceil(256 << 10))
+        })
+        .collect::<CoreResult<_>>()?;
+    let scan_work: u64 = work.iter().sum();
+    let finalize_work = (scan_work / 20).max(1);
+    let total = scan_work + finalize_work;
+    phase.set_total(total);
     let results: Vec<_> = files
         .par_iter()
-        .map(|p| {
-            let result = process_file(raw, output, p, phase);
+        .zip(work.par_iter())
+        .map(|(p, units)| {
+            let result = process_file(source, output, p, phase);
             if result.is_ok() {
-                phase.inc(1);
+                phase.inc(*units);
             }
             result
         })
@@ -1312,14 +1639,13 @@ pub fn convert_tree_with_progress(
                 state.pictures.extend(unit.pictures);
                 state.pairs.extend(unit.pairs);
                 state.written.extend(unit.written);
-                state.data_hashes.extend(unit.data_hashes);
                 for (document, count) in unit.asset_counts {
                     if state.asset_counts.insert(document.clone(), count).is_some() {
                         errors.push(format!("asset collision: {document}"));
                     }
                 }
             }
-            Err(error) => errors.push(format!("{}: {error}", path.display())),
+            Err(error) => errors.push(format!("{path}: {error}")),
         }
     }
     if !errors.is_empty() {
@@ -1334,8 +1660,12 @@ pub fn convert_tree_with_progress(
                 .join("; ")
         )));
     }
-    bake_variants(&mut state, output, raw)?;
-    phase.inc(1);
+    let write = |name: &str, width: usize, height: usize, pixels: &[u8]| {
+        let content = png_rgba(width, height, pixels)?;
+        write_output(&output.join("data").join(name), &content)
+    };
+    bake_variants(&mut state, &write, &|name| source.contains(name))?;
+    phase.inc(finalize_work / 2);
     let mut documents = BTreeSet::new();
     let mut aliases = BTreeSet::new();
     let mut converted_documents = Vec::with_capacity(state.sources.len());
@@ -1358,19 +1688,18 @@ pub fn convert_tree_with_progress(
             document,
         });
     }
-    let digests: Vec<CoreResult<String>> = writes
+    let results: Vec<CoreResult<()>> = writes
         .par_iter()
-        .map(|(path, content)| write_if_changed(&output.join("port_data").join(path), content))
+        .map(|(path, content)| write_output(&output.join("data").join(path), content))
         .collect();
-    for ((path, _), digest) in writes.into_iter().zip(digests) {
-        state.written.insert(path, digest?);
+    for ((path, _), result) in writes.into_iter().zip(results) {
+        result?;
+        state.written.insert(path);
     }
-    let pngs = state.written.keys().filter(|k| k.ends_with(".png")).count() as u64;
-    let expected_port: BTreeSet<String> = state.written.keys().cloned().collect();
-    let expected_data: BTreeSet<String> = state.data_hashes.keys().cloned().collect();
-    prune_unmanifested(&output.join("port_data"), &expected_port)?;
-    prune_unmanifested(&output.join("data"), &expected_data)?;
-    phase.inc(1);
+    let pngs = state.written.iter().filter(|k| k.ends_with(".png")).count() as u64;
+    // Other conversion stages share this data tree. Stale assets are discarded
+    // when the incomplete published stage is rebuilt, never by a global prune.
+    phase.set_done(total);
     Ok(ConversionReport {
         sources: converted_documents.len() as u64,
         pngs,
@@ -1409,7 +1738,7 @@ fn asset_relative(document_path: &str, reference: &str) -> CoreResult<String> {
             "" | "." => return Err(fail(format!("invalid texture asset path: {reference}"))),
             ".." => {
                 if parts.pop().is_none() {
-                    return Err(fail("texture asset escapes port_data"));
+                    return Err(fail("texture asset escapes data"));
                 }
             }
             _ => parts.push(part.to_owned()),
@@ -1477,14 +1806,14 @@ pub fn remove_embedded(
     consumed: &BTreeSet<String>,
     referenced: &BTreeSet<String>,
 ) -> CoreResult<()> {
-    let port = published.join("port_data");
+    let port = published.join("data");
     let canonical_port = fs::canonicalize(&port)?;
     let check_file = |relative: &str| -> CoreResult<(PathBuf, PathBuf)> {
         direct_relative(relative)?;
         let path = port.join(relative);
         let canonical = fs::canonicalize(&path)?;
         if !canonical.starts_with(&canonical_port) || !path.is_file() {
-            return Err(fail(format!("texture path escapes port_data: {relative}")));
+            return Err(fail(format!("texture path escapes data: {relative}")));
         }
         Ok((path, canonical))
     };
@@ -1577,18 +1906,38 @@ pub fn remove_embedded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_owned_scrubbed_motion_is_not_published_as_retained_texture_data() {
+        let motion = "event/e100/e106/e106_mints.chr/e106_mints.mot".to_owned();
+        let image = "event/e100/e106/e106_mints.chr/mints.png".to_owned();
+        let make_job = |label: String| Job {
+            category: Category::Texture,
+            label,
+            work: 1,
+            estimated_bytes: 1,
+            run: Box::new(|_| Ok(())),
+        };
+        let plan = TexturePlan {
+            documents: Vec::new(),
+            png_names: BTreeSet::from([image.clone()]),
+            consumed: BTreeSet::from([motion.clone()]),
+            replacement_jobs: BTreeMap::from([(motion.clone(), motion.clone())]),
+            jobs: vec![make_job(motion.clone()), make_job(image.clone())],
+        };
+        let jobs =
+            plan.into_jobs_without_documents(&BTreeSet::new(), &BTreeSet::from([motion.clone()]));
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].label, image);
+    }
+
     fn assert_inventory(output: &Path, report: &ConversionReport) {
         assert_eq!(report.sources as usize, report.documents.len());
-        assert!(!output.join("port_data/catalog.json").exists());
-        assert!(!output.join("port_data/manifest.json").exists());
+        assert!(!output.join("data/catalog.json").exists());
+        assert!(!output.join("data/manifest.json").exists());
         assert!(!output.join("data/manifest.json").exists());
         let mut paths = Vec::new();
-        collect_files(
-            &output.join("port_data"),
-            &output.join("port_data"),
-            &mut paths,
-        )
-        .unwrap();
+        collect_files(&output.join("data"), &output.join("data"), &mut paths).unwrap();
         assert_eq!(
             paths
                 .iter()
@@ -1598,7 +1947,7 @@ mod tests {
         );
         for item in &report.documents {
             let saved: Value = serde_json::from_slice(
-                &fs::read(output.join("port_data").join(&item.document_path)).unwrap(),
+                &fs::read(output.join("data").join(&item.document_path)).unwrap(),
             )
             .unwrap();
             assert_eq!(saved, item.document);
@@ -1608,7 +1957,7 @@ mod tests {
     #[test]
     fn embedded_cleanup_preserves_png_shared_with_unconsumed_document() {
         let temp = tempfile::tempdir().unwrap();
-        let port = temp.path().join("port_data");
+        let port = temp.path().join("data");
         fs::create_dir_all(port.join("a")).unwrap();
         fs::create_dir_all(port.join("b")).unwrap();
         let first = json!({"schema_version":3,"groups":[0],"entries":[
@@ -1650,7 +1999,7 @@ mod tests {
     #[test]
     fn embedded_cleanup_keeps_png_referenced_by_model_images() {
         let temp = tempfile::tempdir().unwrap();
-        let port = temp.path().join("port_data");
+        let port = temp.path().join("data");
         fs::create_dir_all(port.join("a")).unwrap();
         let document = json!({"schema_version":3,"groups":[0],"entries":[
             {"name":"first","pictures":[{"levels":["a_0.png","a_1.png"]}]}
@@ -1678,7 +2027,7 @@ mod tests {
     #[test]
     fn embedded_cleanup_rejects_escape_before_deleting_anything() {
         let temp = tempfile::tempdir().unwrap();
-        let port = temp.path().join("port_data");
+        let port = temp.path().join("data");
         fs::create_dir_all(port.join("a")).unwrap();
         let document = json!({"schema_version":3,"groups":[0],"entries":[
             {"name":"first","pictures":[{"levels":["../../outside.png"]}]}
@@ -1851,32 +2200,21 @@ mod tests {
         for offset in offsets {
             assert!(
                 output
-                    .join(format!(
-                        "port_data/bundle.pac/embedded-offset-{offset}_0.png"
-                    ))
+                    .join(format!("data/bundle.pac/embedded-offset-{offset}_0.png"))
                     .is_file()
             );
         }
         super::super::configs::convert_tree(&raw, &output, &Phase::noop()).unwrap();
-        let empty: Value = serde_json::from_slice(
-            &fs::read(output.join("port_data/bundle.pac/scoop.cfg.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(empty["kind"], "scoop_texts");
-        assert_eq!(empty["entries"], json!([]));
+        assert!(!output.join("data/bundle.pac/scoop.cfg.json").exists());
         super::super::packs::convert_tree(&raw, &output, &Phase::noop()).unwrap();
-        assert!(!output.join("port_data/bundle.pac/frametex.img").exists());
-        assert!(
-            !output
-                .join("port_data/bundle.pac/inner.pac/nested.img")
-                .exists()
-        );
+        assert!(!output.join("data/bundle.pac/frametex.img").exists());
+        assert!(!output.join("data/bundle.pac/inner.pac/nested.img").exists());
         assert_eq!(
-            fs::read(output.join("port_data/bundle.pac/keep.bin")).unwrap(),
+            fs::read(output.join("data/bundle.pac/keep.bin")).unwrap(),
             b"unchanged"
         );
         assert_eq!(
-            fs::read(output.join("port_data/bundle.pac/zero.bin")).unwrap(),
+            fs::read(output.join("data/bundle.pac/zero.bin")).unwrap(),
             [0; 4]
         );
         super::super::packs::verify(&output).unwrap();
@@ -1930,7 +2268,7 @@ mod tests {
         assert_eq!(report.sources, 2);
         assert_inventory(&out, &report);
         let document: Value =
-            serde_json::from_slice(&fs::read(out.join("port_data/UPPER.json")).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(out.join("data/UPPER.json")).unwrap()).unwrap();
         assert_eq!(
             document
                 .as_object()
@@ -1953,7 +2291,7 @@ mod tests {
             "copy_variant"
         );
         let empty: Value =
-            serde_json::from_slice(&fs::read(out.join("port_data/empty.json")).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(out.join("data/empty.json")).unwrap()).unwrap();
         assert_eq!(empty, json!({"schema_version":3,"groups":[0],"entries":[]}));
         assert!(document.get("original").is_none());
     }
@@ -2048,12 +2386,8 @@ mod tests {
         fs::write(raw.join("bundle.pac"), pack).unwrap();
         let output = root.join("published");
         let report = convert_tree(&raw, &output, 2).unwrap();
-        assert!(output.join("port_data/bundle.pac/same.json").is_file());
-        assert!(
-            output
-                .join("port_data/bundle.pac/same-entry-1.json")
-                .is_file()
-        );
+        assert!(output.join("data/bundle.pac/same.json").is_file());
+        assert!(output.join("data/bundle.pac/same-entry-1.json").is_file());
         assert_inventory(&output, &report);
         fs::remove_dir_all(root).unwrap();
     }
@@ -2123,7 +2457,7 @@ mod tests {
         assert_inventory(&out, &report);
     }
     #[test]
-    fn cfg_only_bundle_and_stale_png_are_handled() {
+    fn cfg_only_bundle_preserves_unrelated_staged_files() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2147,23 +2481,22 @@ mod tests {
         assert_eq!(first.sources, 1);
         assert_eq!(first.pngs, 0);
         assert_inventory(&output, &first);
-        let bundle = output.join("port_data/cfg.json");
+        let bundle = output.join("data/cfg.json");
         assert!(bundle.is_file());
         let source: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
         assert_eq!(
             source,
             json!({"schema_version":3,"groups":[],"entries":[{"name":"#cfg","script":[{"command":"TEX_ANIME_DATA_END","args":[]}]}]})
         );
-        let stale = output.join("port_data/stale.png");
+        let stale = output.join("data/stale.png");
         fs::write(&stale, b"obsolete").unwrap();
-        let stale_dir = output.join("port_data/obsolete.img");
+        let stale_dir = output.join("data/obsolete.img");
         fs::create_dir(&stale_dir).unwrap();
         fs::write(stale_dir.join("catalog.json"), b"obsolete").unwrap();
         let second = convert_tree(&raw, &output, 2).unwrap();
         assert_eq!(second.pngs, 0);
-        assert!(!stale.exists());
-        assert!(!stale_dir.exists());
-        assert_inventory(&output, &second);
+        assert!(stale.exists());
+        assert!(stale_dir.exists());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

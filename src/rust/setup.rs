@@ -51,9 +51,7 @@ impl Setup {
         *self.progress.lock().unwrap() = Progress::default();
         let progress = self.progress.clone();
         let output = self.output.clone();
-        let jobs = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(32);
+        let jobs = std::thread::available_parallelism().map_or(1, usize::from);
         match std::thread::Builder::new()
             .name("game-data-extraction".into())
             .stack_size(16 * 1024 * 1024)

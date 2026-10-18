@@ -22,6 +22,11 @@ rayon = "1.12.0"
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 zstd = { version = "0.14.2", default-features = false }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[build-dependencies]
+serde_json = "1.0.154"
+cc = "1.2"

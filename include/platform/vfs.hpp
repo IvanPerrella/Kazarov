@@ -185,6 +185,11 @@ std::shared_ptr<const Mount> OpenDirectories(const std::vector<std::filesystem::
 std::shared_ptr<const Mount> OpenDirectory(const std::filesystem::path &root, bool unique = false);
 
 /**
+ * Combines mounts in priority order, with later mounts overriding equal names ignoring ASCII case.
+ */
+std::shared_ptr<const Mount> Overlay(std::vector<std::shared_ptr<const Mount> > mounts);
+
+/**
  * Refers to one host file by path, whether or not it exists yet.
  */
 Ref HostFile(const std::filesystem::path &path);
