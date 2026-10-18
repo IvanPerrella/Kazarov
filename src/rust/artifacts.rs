@@ -307,7 +307,7 @@ impl AssetSink {
         category: Category,
     ) -> CoreResult<()> {
         let name = name.into();
-        if category == Category::Gameplay && !super::configs::is_tracked_gameplay(&name) {
+        if category == Category::Gameplay && super::configs::gameplay_digest(&name).is_none() {
             let error = fail(format!(
                 "{category:?} [{name}]: gameplay document is not tracked"
             ));
@@ -318,7 +318,8 @@ impl AssetSink {
         zip_archive::validate_name(&name)?;
         let lower = name.to_ascii_lowercase();
         if category != Category::Gameplay
-            && (super::configs::is_tracked_gameplay(&lower)
+            && (lower.starts_with("gameplay/")
+                || super::configs::is_tracked_gameplay(&lower)
                 || lower.ends_with(".cfg.json")
                 || lower.ends_with(".map.json")
                 || lower.ends_with(".character.json")

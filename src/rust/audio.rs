@@ -2016,7 +2016,7 @@ pub fn verify_files(root: &Path, names: &BTreeSet<String>, phase: &Phase) -> Cor
     )
 }
 
-/// Validates audio documents and media directly from the finished ZIP plus loose gameplay files.
+/// Validates audio documents and media directly from the finished asset archive.
 pub fn verify_archive(reader: &dyn super::publish::ArchiveReader, phase: &Phase) -> CoreResult<()> {
     let names = reader.names().into_iter().collect();
     verify_reader(reader, None, &names, phase)
@@ -2039,6 +2039,7 @@ fn verify_reader(
             return Ok(None);
         }
         let bytes = asset(reader, gameplay_root, name)?;
+        let name = name.strip_prefix("gameplay/").unwrap_or(name);
         let document = match serde_json::from_slice::<Value>(&bytes) {
             Ok(document) => document,
             Err(error) => {
@@ -2230,7 +2231,10 @@ fn verify_reader(
         {
             return Err(fail("invalid audio asset path"));
         }
-        if reader.contains(name) {
+        let gameplay = format!("gameplay/{name}");
+        if reader.contains(&gameplay) {
+            reader.read(&gameplay)
+        } else if reader.contains(name) {
             reader.read(name)
         } else if let Some(root) = gameplay_root.filter(|_| {
             name.ends_with(".sound/config.json")
@@ -2709,6 +2713,29 @@ mod tests {
     }
 
     #[test]
+    fn archived_gameplay_scene_tables_validate_their_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir_all(root.join("gameplay/snd2")).unwrap();
+        let table = root.join("gameplay/snd2/rev.json");
+        let archive_path = temp.path().join("data.zip");
+        for kind in ["scene_reverb", "wrong_kind"] {
+            fs::write(
+                &table,
+                serde_json::to_vec(&json!({"schema_version":1,"kind":kind,"rows":[]})).unwrap(),
+            )
+            .unwrap();
+            super::super::zip_archive::pack_directory(&root, &archive_path).unwrap();
+            let archive = super::super::zip_archive::Archive::open(&archive_path).unwrap();
+            let result = verify_archive(
+                &super::super::publish::ArchiveView::new(&archive),
+                &Phase::noop(),
+            );
+            assert_eq!(result.is_ok(), kind == "scene_reverb");
+        }
+    }
+
+    #[test]
     fn direct_bundle_preserves_member_order_and_resource_references() {
         let temp = tempfile::tempdir().unwrap();
         let raw = temp.path().join("raw");
@@ -2758,6 +2785,22 @@ mod tests {
         );
         assert!(!stage.join("data/test.snd").exists());
         assert!(!stage.join("data/audio_catalog.json").exists());
+        fs::create_dir_all(stage.join("data/gameplay/test.sound")).unwrap();
+        for name in ["config.json", "volume.json"] {
+            fs::rename(
+                stage.join("data/test.sound").join(name),
+                stage.join("data/gameplay/test.sound").join(name),
+            )
+            .unwrap();
+        }
+        let archive_path = temp.path().join("data.zip");
+        super::super::zip_archive::pack_directory(&stage.join("data"), &archive_path).unwrap();
+        let archive = super::super::zip_archive::Archive::open(&archive_path).unwrap();
+        verify_archive(
+            &super::super::publish::ArchiveView::new(&archive),
+            &Phase::noop(),
+        )
+        .unwrap();
         fs::remove_file(stage.join("data/test.sound/effects/z.json")).unwrap();
         assert!(verify(&stage).is_err());
     }

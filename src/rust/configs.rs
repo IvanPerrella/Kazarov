@@ -16,39 +16,87 @@ use std::sync::OnceLock;
 include!(concat!(env!("OUT_DIR"), "/tracked_configs.rs"));
 
 /// Returns the build-time fingerprint of gameplay source paths and bytes.
-pub fn embedded_fingerprint() -> String {
+pub fn source_fingerprint() -> String {
     TRACKED_CONFIG_FINGERPRINT.to_owned()
 }
 
-static GAMEPLAY_DOCUMENTS: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/gameplay_documents.bin"));
-
-/// Iterates over the compact gameplay documents bundled with this extractor.
-pub fn embedded_documents() -> impl Iterator<Item = (&'static str, &'static [u8])> {
-    EMBEDDED_GAMEPLAY
-        .iter()
-        .map(|&(path, offset, len)| (path, &GAMEPLAY_DOCUMENTS[offset..offset + len]))
+/// Lists archive paths and content digests of the required gameplay documents.
+pub fn gameplay_manifest() -> &'static [(&'static str, [u8; 32])] {
+    GAMEPLAY_DOCUMENTS
 }
 
-/// Returns the exact compact payload for a tracked gameplay path.
-pub fn embedded_document(path: &str) -> Option<&'static [u8]> {
+/// Returns the expected content digest of a gameplay archive entry.
+pub fn gameplay_digest(path: &str) -> Option<&'static [u8; 32]> {
     let lower = path.to_ascii_lowercase();
-    let index = EMBEDDED_GAMEPLAY
+    let index = GAMEPLAY_DOCUMENTS
         .binary_search_by_key(&lower.as_str(), |entry| entry.0)
         .ok()?;
-    let (_, offset, len) = EMBEDDED_GAMEPLAY[index];
-    Some(&GAMEPLAY_DOCUMENTS[offset..offset + len])
+    Some(&GAMEPLAY_DOCUMENTS[index].1)
+}
+
+/// Checks a gameplay document against its build-time content digest.
+pub fn verify_gameplay_document(path: &str, bytes: &[u8]) -> CoreResult<()> {
+    let expected = gameplay_digest(path)
+        .ok_or_else(|| fail(format!("untracked gameplay document: {path}")))?;
+    if Sha256::digest(bytes).as_slice() != expected {
+        return Err(fail(format!("gameplay document changed: {path}")));
+    }
+    Ok(())
+}
+
+/// Reads the required gameplay entries from an external data archive.
+fn read_gameplay_archive(path: &Path) -> CoreResult<Vec<(&'static str, Vec<u8>)>> {
+    let archive = super::zip_archive::Archive::open(path)?;
+    let entries: BTreeMap<_, _> = (0..archive.len())
+        .map(|index| (archive.name(index).to_ascii_lowercase(), index))
+        .collect();
+    gameplay_manifest()
+        .iter()
+        .map(|&(name, _)| {
+            let index = entries
+                .get(name)
+                .ok_or_else(|| fail(format!("gameplay document missing: {name}")))?;
+            let bytes = archive.read(*index)?;
+            verify_gameplay_document(name, &bytes)?;
+            Ok((name, bytes))
+        })
+        .collect()
+}
+
+/// Loads gameplay from the packaged seed or a matching completed data archive.
+pub fn gameplay_documents(root: Option<&Path>) -> CoreResult<Vec<(&'static str, Vec<u8>)>> {
+    if gameplay_manifest().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut candidates = Vec::new();
+    if let Some(directory) = std::env::current_exe()?.parent() {
+        candidates.push(directory.join("assets/data.zip"));
+        candidates.push(directory.join("data.zip"));
+    }
+    if let Some(root) = root {
+        candidates.push(root.join("data.zip"));
+    }
+    #[cfg(test)]
+    candidates.push(PathBuf::from(env!("OUT_DIR")).join("data.zip"));
+    let mut failures = Vec::new();
+    for path in candidates {
+        match read_gameplay_archive(&path) {
+            Ok(documents) => return Ok(documents),
+            Err(error) => failures.push(format!("{}: {error}", path.display())),
+        }
+    }
+    Err(fail(format!(
+        "matching gameplay data.zip is required beside the executable: {}",
+        failures.join("; ")
+    )))
 }
 
 /// Digest of only the source-derived animation slicing plan used by asset extraction.
 pub fn asset_plan_fingerprint() -> String {
-    hex(&Sha256::digest(include_bytes!(concat!(
-        env!("OUT_DIR"),
-        "/character_clip_plan.json"
-    ))))
+    gameplay_digest("gameplay/character_clips.json").map_or_else(String::new, |digest| hex(digest))
 }
 
-/// True when a relative gameplay path is bundled with the extractor.
+/// True when a relative gameplay path belongs to the tracked source tree.
 pub fn is_tracked_gameplay(path: &str) -> bool {
     let normalized = path.replace('\\', "/").to_ascii_lowercase();
     TRACKED_GAMEPLAY_PATHS
@@ -1369,33 +1417,49 @@ fn decode_key_action(value: &Value) -> CoreResult<super::actions::KeyAction> {
     })
 }
 
-/// Returns the checked-in, build-embedded action plan without reading gameplay files.
+/// Character animation plans decoded from the external gameplay archive.
+static CHARACTER_PLANS: OnceLock<BTreeMap<String, CharacterPlan>> = OnceLock::new();
+
+/// Initializes model-slicing metadata from a verified external gameplay document.
+pub fn initialize_character_plans(documents: &[(&str, Vec<u8>)]) -> CoreResult<()> {
+    if CHARACTER_PLANS.get().is_some() {
+        return Ok(());
+    }
+    let Some((name, bytes)) = documents
+        .iter()
+        .find(|(name, _)| *name == "gameplay/character_clips.json")
+    else {
+        if gameplay_manifest().is_empty() {
+            let _ = CHARACTER_PLANS.set(BTreeMap::new());
+            return Ok(());
+        }
+        return Err(fail("gameplay character clip plan missing"));
+    };
+    verify_gameplay_document(name, bytes)?;
+    let document: Value = serde_json::from_slice(bytes)?;
+    if document["schema_version"] != 1 || document["kind"] != "character_clips" {
+        return Err(fail("unsupported character clip plan"));
+    }
+    let plans = document["characters"]
+        .as_object()
+        .ok_or_else(|| fail("character clip plans missing"))?
+        .iter()
+        .map(|(alias, value)| Ok((alias.clone(), decode_character_plan(value)?)))
+        .collect::<CoreResult<BTreeMap<_, _>>>()?;
+    let _ = CHARACTER_PLANS.set(plans);
+    Ok(())
+}
+
+/// Returns the character action plan loaded from the external gameplay archive.
 pub(crate) fn profile_actions_for(
     character_alias: &str,
 ) -> CoreResult<Option<&'static CharacterPlan>> {
-    static PLANS: OnceLock<BTreeMap<String, CharacterPlan>> = OnceLock::new();
-    let plans = PLANS.get_or_init(|| {
-        let document: Value = serde_json::from_slice(include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/character_clip_plan.json"
-        )))
-        .expect("checked-in character clip plan is valid JSON");
-        assert_eq!(
-            document["schema_version"], 1,
-            "unsupported character clip plan"
-        );
-        document["characters"]
-            .as_object()
-            .expect("character clip plans missing")
-            .iter()
-            .map(|(alias, value)| {
-                (
-                    alias.clone(),
-                    decode_character_plan(value).expect("valid character clip plan"),
-                )
-            })
-            .collect()
-    });
+    if CHARACTER_PLANS.get().is_none() {
+        initialize_character_plans(&gameplay_documents(None)?)?;
+    }
+    let plans = CHARACTER_PLANS
+        .get()
+        .ok_or_else(|| fail("character clip plans not initialized"))?;
     Ok(plans.get(character_alias))
 }
 
@@ -2024,13 +2088,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_gameplay_preserves_source_decimal() {
-        let Some(document) = embedded_document("chara/e3_donnie.character.json") else {
-            assert_eq!(embedded_documents().count(), 0);
+    fn archived_gameplay_preserves_source_decimal() {
+        let documents = gameplay_documents(None).unwrap();
+        let Some((_, document)) = documents
+            .iter()
+            .find(|(name, _)| *name == "gameplay/chara/e3_donnie.character.json")
+        else {
+            assert_eq!(documents.len(), 0);
             return;
         };
         let text = std::str::from_utf8(document).unwrap();
         assert!(text.contains("\"value\":0.029999999329447746"));
+    }
+
+    #[test]
+    fn gameplay_archive_requires_namespace_and_matching_contents() {
+        let Some(&(name, _)) = gameplay_manifest().first() else {
+            return;
+        };
+        assert!(name.starts_with("gameplay/"));
+        assert!(gameplay_digest(name.strip_prefix("gameplay/").unwrap()).is_none());
+        assert!(verify_gameplay_document(name, b"{}").is_err());
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("input");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("unrelated.json"), b"{}").unwrap();
+        let archive = temp.path().join("data.zip");
+        super::super::zip_archive::pack_directory(&root, &archive).unwrap();
+        assert!(
+            read_gameplay_archive(&archive)
+                .unwrap_err()
+                .to_string()
+                .contains("gameplay document missing")
+        );
     }
 
     fn record_alias(

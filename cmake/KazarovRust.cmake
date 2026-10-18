@@ -18,6 +18,11 @@ FetchContent_MakeAvailable(corrosion)
 
 get_filename_component(KZ_RUST_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/../Cargo.toml" ABSOLUTE)
 corrosion_import_crate(MANIFEST_PATH ${KZ_RUST_MANIFEST} CRATES kazarov_core)
+# Keep the build's seed separate from a completed extraction in the build directory.
+set(KZ_GAMEPLAY_ARCHIVE "${CMAKE_BINARY_DIR}/assets/data.zip")
+corrosion_set_env_vars(kazarov_core "KAZAROV_GAMEPLAY_ARCHIVE=${KZ_GAMEPLAY_ARCHIVE}")
+include(GNUInstallDirs)
+install(FILES "${KZ_GAMEPLAY_ARCHIVE}" DESTINATION ${CMAKE_INSTALL_BINDIR})
 include("${CMAKE_CURRENT_LIST_DIR}/KazarovFfmpeg.cmake")
 kz_ffmpeg(kazarov_core INTERFACE)
 if(DEFINED KAZAROV_GAMEPLAY_ROOT)
