@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -767,21 +768,48 @@ void SetBoneRows(const Mat4 &m, float (&rows)[3][4]) {
 // Re-bases a block recorded at view_b and model_b onto view_i and model_i. The clip goes through
 // inverse(eye_b) so the game's left factor (fit * world clip, or the view) is kept whichever of the two
 // clip_or_view holds. False, block untouched, when either eye transform is singular.
+// The eye transforms MoveProg0 last derived, kept for the draws that follow with the same matrices: a
+// visual's faces are drawn one after another under one transform.
+struct Prog0Rebase {
+    Mat4 view_b = {};
+    Mat4 view_i = {};
+    Mat4 middle = {};
+    Mat4 model_b = {};
+    Mat4 model_i = {};
+    bool valid = false;
+    bool invertible = false;
+    Mat4 back_b = {};    // inverse of the tick's eye transform
+    Mat4 eye_i = {};     // the interpolated eye transform
+    Mat4 to_object = {}; // the tick's eye space back to the interpolated object space
+};
+
 bool MoveProg0(const MeshRecord &record, const Mat4 &view_b, const Mat4 &view_i, const Mat4 &model_i,
-               Prog0Constants &block) {
-    Mat4 eye_b = Multiply(Multiply(view_b, record.middle), record.model);
-    Mat4 eye_i = Multiply(Multiply(view_i, record.middle), model_i);
-    Mat4 back_b = {};
-    Mat4 back_i = {};
-    if (!Invert(eye_b, back_b) || !Invert(eye_i, back_i)) {
+               Prog0Constants &block, Prog0Rebase &rebase) {
+    if (!rebase.valid || rebase.view_b != view_b || rebase.view_i != view_i || rebase.middle != record.middle ||
+        rebase.model_b != record.model || rebase.model_i != model_i) {
+        rebase.view_b = view_b;
+        rebase.view_i = view_i;
+        rebase.middle = record.middle;
+        rebase.model_b = record.model;
+        rebase.model_i = model_i;
+        rebase.valid = true;
+        Mat4 eye_b = Multiply(Multiply(view_b, record.middle), record.model);
+        rebase.eye_i = Multiply(Multiply(view_i, record.middle), model_i);
+        Mat4 back_i = {};
+        rebase.invertible = Invert(eye_b, rebase.back_b) && Invert(rebase.eye_i, back_i);
+        if (rebase.invertible) {
+            rebase.to_object = Multiply(back_i, eye_b);
+        }
+    }
+    if (!rebase.invertible) {
         return false;
     }
-    Mat4 clip = Multiply(Multiply(ToMat4(block.clip_or_view), back_b), eye_i);
+    Mat4 clip = Multiply(Multiply(ToMat4(block.clip_or_view), rebase.back_b), rebase.eye_i);
     std::memcpy(block.clip_or_view, clip.data(), sizeof block.clip_or_view);
 
     // The camera is an object-space point: it goes to eye space under the tick's transform and back
     // under the interpolated one. A projective middle leaves w != 1, so the point is homogenised.
-    Mat4        to_object = Multiply(back_i, eye_b);
+    const Mat4 &to_object = rebase.to_object;
     const float camera[4] = {block.eye[0], block.eye[1], block.eye[2], 1.0f};
     float       h[4];
     for (int r = 0; r < 4; r++) {
@@ -854,6 +882,13 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
     Mat4        last_model;
     Mat3        last_delta = {};
     bool        last_turned = false;
+    Prog0Rebase rebase;
+    // Draws under one camera share their world-to-clip matrix; it is rebuilt only when the camera,
+    // projection or middle matrix changes.
+    std::optional<uint32_t> clip_camera;
+    Mat4                    clip_projection = {};
+    Mat4                    clip_middle = {};
+    Mat4                    world_to_clip = {};
     for (const Entry &entry : list.entries) {
         const MeshEntry *mesh = std::get_if<MeshEntry>(&entry);
         if (mesh == nullptr) {
@@ -884,29 +919,40 @@ void Interpolated(const DisplayList &list, const DisplayList &previous, float al
         const Mat3 &delta = last_delta;
         if (mesh->prog0 >= 0) {
             const Prog0Constants &newest = list.prog0_blocks[static_cast<size_t>(mesh->prog0)];
-            Prog0Constants        block = newest;
-            if (match >= 0) {
-                const MeshEntry &earlier = std::get<MeshEntry>(previous.entries[previous.records[match].entry]);
-                if (earlier.prog0 >= 0) {
-                    BlendProg0Bones(previous.prog0_blocks[static_cast<size_t>(earlier.prog0)], newest, alpha,
-                                    record.teleport_distance, block);
-                }
-            }
-            bool bones = std::memcmp(block.bones, newest.bones, sizeof block.bones) != 0;
+            const bool            skinned = (newest.flags & kProg0Skinned) != 0;
             // Camera motion applies to every transformed draw, including newly visible faces
             // and material cuts with no previous pose. Their clip planes and eye must follow it.
-            bool placed = (model != record.model || moved[record.camera]) &&
-                          MoveProg0(record, list.cameras[record.camera], views[record.camera], model, block);
-            if (bones || placed) {
-                out.prog0_index[mesh->record] = static_cast<int32_t>(out.prog0.size());
-                out.prog0.push_back(block);
+            const bool move = model != record.model || moved[record.camera];
+            if (skinned || move) {
+                // The override is built in place and dropped again when nothing in it changed.
+                Prog0Constants &block = out.prog0.emplace_back(newest);
+                if (skinned && match >= 0) {
+                    const MeshEntry &earlier = std::get<MeshEntry>(previous.entries[previous.records[match].entry]);
+                    if (earlier.prog0 >= 0) {
+                        BlendProg0Bones(previous.prog0_blocks[static_cast<size_t>(earlier.prog0)], newest, alpha,
+                                        record.teleport_distance, block);
+                    }
+                }
+                bool bones = skinned && std::memcmp(block.bones, newest.bones, sizeof block.bones) != 0;
+                bool placed =
+                    move && MoveProg0(record, list.cameras[record.camera], views[record.camera], model, block, rebase);
+                if (bones || placed) {
+                    out.prog0_index[mesh->record] = static_cast<int32_t>(out.prog0.size() - 1);
+                } else {
+                    out.prog0.pop_back();
+                }
             }
         }
         if (!turned && !moved[record.camera]) {
             continue;
         }
+        if (clip_camera != record.camera || clip_projection != record.projection || clip_middle != record.middle) {
+            clip_camera = record.camera;
+            clip_projection = record.projection;
+            clip_middle = record.middle;
+            world_to_clip = Multiply(Multiply(record.projection, views[record.camera]), record.middle);
+        }
         MeshConstants constants = mesh->constants;
-        Mat4          world_to_clip = Multiply(Multiply(record.projection, views[record.camera]), record.middle);
         Mat4          mvp = Multiply(world_to_clip, Multiply(model, record.local));
         std::memcpy(constants.mvp, mvp.data(), sizeof(constants.mvp));
         if (turned) {
