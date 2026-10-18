@@ -22,6 +22,7 @@ inline void SetEnabled(bool value) { enabled.store(value, std::memory_order_rela
 
 #ifdef KZ_PORT_TRACY
 #define KZ_PROFILE_ZONE(name) ZoneNamedN(kz_profile_zone, name, ::gfx::profile::Enabled())
+#define KZ_PROFILE_THREAD(name) tracy::SetThreadName(name)
 #define KZ_PROFILE_PLOT(name, value)                      \
     do {                                                  \
         if (::gfx::profile::Enabled())                    \
@@ -44,6 +45,7 @@ inline void SetEnabled(bool value) { enabled.store(value, std::memory_order_rela
 #define KZ_PROFILE_GPU_END(slot) ::gfx::detail::g.slot.reset()
 #else
 #define KZ_PROFILE_ZONE(name)
+#define KZ_PROFILE_THREAD(name)
 #define KZ_PROFILE_PLOT(name, value) \
     do {                             \
     } while (false)

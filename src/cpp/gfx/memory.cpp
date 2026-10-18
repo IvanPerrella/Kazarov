@@ -184,6 +184,7 @@ void ReturnToBlock(Block &block, VkDeviceSize offset, VkDeviceSize size) {
 
 Allocation AllocateMemory(const VkMemoryRequirements &requirements, VkMemoryPropertyFlags required,
                           VkMemoryPropertyFlags preferred, bool linear) {
+    AssertDeviceThread(__func__);
     uint32_t   type = FindMemoryType(requirements.memoryTypeBits, required, preferred);
     Allocation allocation;
     allocation.size = requirements.size;
@@ -230,6 +231,7 @@ Allocation AllocateMemory(const VkMemoryRequirements &requirements, VkMemoryProp
 }
 
 void FreeMemory(Allocation &allocation) {
+    AssertDeviceThread(__func__);
     if (allocation.memory == VK_NULL_HANDLE) {
         return;
     }
@@ -415,6 +417,7 @@ void ResetChunks(std::vector<TransientChunk> &chunks, uint32_t &current, VkDevic
 } // namespace
 
 TransientSpan AllocateTransient(VkDeviceSize size, VkDeviceSize alignment) {
+    AssertDeviceThread(__func__);
     g.counters.transient_bytes += size;
     Frame &frame = CurrentFrame();
     return AllocateFromChunks(frame.chunks, frame.chunk, size, alignment, kTransientChunkSize,
@@ -437,6 +440,7 @@ ConstantRecord AllocateConstantRecord(VkDeviceSize stride) {
 }
 
 TransientSpan AllocateStaging(VkDeviceSize size) {
+    AssertDeviceThread(__func__);
     Frame &frame = CurrentFrame();
     return AllocateFromChunks(frame.staging_chunks, frame.staging_chunk, size, 16, kStagingChunkSize,
                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false);

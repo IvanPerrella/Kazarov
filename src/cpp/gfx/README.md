@@ -26,13 +26,35 @@ else is internal. No game header is reachable from here: `platform/`, `gfx/` and
   `--offscreen` forces it.
 - `RendererResize()` after the window's pixel size changes (`WindowPollEvents` does it); the
   swapchain and main target follow at the next `BeginFrame`. Main-target contents are lost.
-- Single-threaded: call everything from one thread.
+- Threads: the caller and the device worker split the work; see Threads below.
 - Textures, palettes, meshes and render targets can be created, updated and destroyed at any time,
   inside or outside a frame. Destruction is deferred until the GPU is done with them; a handle is
   dead as soon as it is destroyed outside a recording (handles carry a generation). When the texture
   or mesh table is full, a create outside a frame or recording first runs the pending destructions.
   The table sizes are the build maximums, which `RendererConfig::texture_slots` and `mesh_slots`
   can lower (for tests).
+
+## Threads
+
+- Three modes, from `RendererConfig::render_thread` or `KZ_RENDER_THREAD=off|lockstep|async` (the
+  variable wins): Off (default) runs everything on the caller; Lockstep and Async run device work on
+  a worker. Android is always Off.
+- Device-thread rule: device work runs on the worker. Recording stays on the caller. A public call
+  that touches the device is forwarded to the worker and waited for, or run inline when the caller
+  is the worker or holds a `RenderLease`.
+- `RenderLease` parks the worker and holds it off the device, so the holder runs device work inline.
+  The game holds one per tick around its canonical render and other per-tick device work.
+- Idle hook (`SetRenderIdleHook`, Async only): the worker calls it when the queue is empty and no
+  lease is wanted. It runs on the worker and must only call `gfx` functions. Its return value is how
+  long the worker sleeps before calling it again; zero calls again at once. `WakeRenderThread` and
+  any dispatch or lease end the sleep early.
+- The worker never recreates the swapchain. A display frame from the idle hook that finds the
+  swapchain out of date or pending a resize fails and leaves the swapchain to the game thread's next
+  recording.
+- A stale handle to a slot the worker reuses for a grab twin resolves to nothing, because the
+  generation no longer matches.
+- `KZ_GFX_THREAD_CHECKS` (on in builds without `NDEBUG`) makes every device function fail fast when called off the device thread.
+- A GPU timestamp zone must begin and end on one thread, so the frame upload zone is only recorded in Off.
 
 ## Spaces
 

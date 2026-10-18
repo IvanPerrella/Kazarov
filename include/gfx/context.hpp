@@ -15,6 +15,10 @@
 #include <tracy/TracyVulkan.hpp>
 #endif
 
+#ifndef NDEBUG
+#define KZ_GFX_THREAD_CHECKS 1
+#endif
+
 namespace gfx::detail {
 
 inline constexpr uint32_t kFramesInFlight = 4;
@@ -324,7 +328,6 @@ struct Context {
     uint32_t                      anisotropy_level = 0;
     PFN_vkCmdSetColorWriteMaskEXT cmd_set_color_write_mask = nullptr;
     Swapchain                     swapchain;
-    bool                          resize_pending = false;
 
     std::array<Frame, kFramesInFlight> frames;
     uint32_t                           frame_slot = 0;
@@ -378,13 +381,6 @@ struct Context {
     bool                         interp_no_interpolation = false;
     float                        interp_teleport_distance = INFINITY;
     bool                         interp_blend_vertices = false;
-    bool                         replaying = false;
-    bool                         display_pass = false;
-    // Errors are reported by the canonical render; display renders of the same list stay quiet.
-    uint32_t interpolation_tint = 0; // display replay only, packed into push flags bits 8-10
-    bool  quiet = false;
-    // The list being replayed is the host's own 2D, which the full-frame rule leaves as drawn.
-    bool  host_draws = false;
     Image display_color;
     Image display_depth;
     // The newest main_color image is a canonical render no immediate frame has followed.
@@ -399,11 +395,39 @@ struct Context {
     std::unique_ptr<tracy::VkCtxScope> rendering_zone;           // open dynamic-rendering span
     std::unique_ptr<tracy::VkCtxScope> upload_zone;              // open frame upload command buffer
 #endif
-
-    uint32_t validation_messages = 0;
 };
 
 extern Context g;
+
+// Flags a thread sets around its own replay or frame; the other thread must never see them.
+// quiet: errors are reported by the canonical render, so display renders of the same list stay quiet.
+// host_draws: the list being replayed is the host's own 2D, which the full-frame rule leaves as drawn.
+// interpolation_tint: display replay only, packed into push flags bits 8-10.
+struct ThreadFlags {
+    bool     replaying = false;
+    bool     display_pass = false;
+    bool     quiet = false;
+    bool     host_draws = false;
+    bool     in_idle_hook = false;
+    uint32_t interpolation_tint = 0;
+};
+
+extern thread_local ThreadFlags tls;
+
+// thread.cpp
+// Runs fn on the device thread: inline when the caller is one, else queued to the worker and waited for.
+void RunOnRenderThread(const std::function<void()> &fn);
+void Dispatch(std::function<void()> fn);
+// Waits until the worker has run every queued command.
+void Drain();
+// The worker exists and this is it.
+bool OnWorkerThread();
+// OnRenderThread(), also true before StartRenderThread and after StopRenderThread; what device calls assert.
+bool DeviceThreadAllowed();
+void StartRenderThread(RenderThreadMode mode);
+void StopRenderThread();
+// Fatal unless DeviceThreadAllowed(). Compiled to nothing unless KZ_GFX_THREAD_CHECKS.
+void AssertDeviceThread(const char *what);
 
 // renderer.cpp
 // Frames of RenderList: a canonical one draws into main_color and harvests depth queries, a
@@ -412,6 +436,8 @@ extern Context g;
 bool OpenListFrame(bool canonical, bool present, bool base);
 // The main targets take the window's size before a tick records draws laid out for them.
 void            PrepareRecording();
+// PrepareRecording, dispatched only when it has work; callable from the game thread while it records.
+void            PrepareRecordingFromCaller();
 void            CloseListFrame(bool canonical, bool present);
 Frame          &CurrentFrame();
 VkCommandBuffer UploadCommands();
@@ -431,6 +457,8 @@ Image   &PreviousFrameImage();
 uint32_t PreviousFrameSlot();
 void     CreateMainTargets();
 void     DestroyMainTargets();
+// Whether a game frame is open between OpenFrame and its submit or present (not an idle-hook frame).
+bool GameFrameOpen();
 
 // memory.cpp
 TransientSpan AllocateTransient(VkDeviceSize size, VkDeviceSize alignment);
@@ -480,6 +508,8 @@ VkPipelineLayout PipelineLayoutOf(PipelineFamily family);
 // displaylist.cpp
 // The public resource calls that record instead of executing while a list is recorded.
 bool RecordingCalls();
+// The list being recorded, or nullptr; readable from the worker while the game thread records.
+const DisplayList *RecordingList();
 
 // draw.cpp
 void           EndRendering();

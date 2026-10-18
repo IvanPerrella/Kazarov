@@ -1,6 +1,7 @@
 #include "gfx/displaylist.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -53,6 +54,8 @@ struct RecordingSizes {
 
 std::array<RecordingSizes, 2> g_recording_sizes;
 size_t                        g_recording_kind = 0;
+// Read by the worker, which must not touch g.list while the game thread records.
+std::atomic<const DisplayList *> g_recording_list{nullptr};
 
 struct Quat {
     float x, y, z, w;
@@ -343,6 +346,8 @@ void BlendVertices(const std::vector<Vertex3D> &a, const std::vector<Vertex3D> &
 // drawn changes with the camera's culling, so the n-th draw of one tick is not the n-th of the next.
 // Keys seen so since the last cut.
 std::unordered_set<InterpKey> g_instanced_keys;
+// Cuts recorded so far. Each list keeps the count it was finished at; see BuildMatches.
+uint64_t g_cut_generation = 0;
 
 // How far one place of an instanced key may move in a tick and still be the same place.
 constexpr float kInstanceStep = 25.0f;
@@ -478,6 +483,12 @@ void MatchInstanced(const DisplayList &list, const DisplayList &previous, const 
 
 void BuildMatches(const DisplayList &list, const DisplayList &previous) {
     KZ_PROFILE_ZONE("Kazarov BuildMatches");
+    // The first list finished after a cut clears the keys seen before it.
+    static uint64_t seen = 0;
+    if (list.cut_generation != seen) {
+        g_instanced_keys.clear();
+        seen = list.cut_generation;
+    }
     MatchCache &cache = list.cache;
     cache.previous_serial = previous.serial;
     cache.match.assign(list.records.size(), -1);
@@ -1287,20 +1298,21 @@ void TraceInterpolation(const DisplayList &list, const DisplayList *previous, co
 
 void Replay(const DisplayList &list, bool canonical, const Overrides *overrides, bool host = false,
             bool tint = false, InterpKey suppressed_2d_key = 0) {
+    AssertDeviceThread(__func__);
     KZ_PROFILE_ZONE("Kazarov Replay");
-    g.replaying = true;
+    tls.replaying = true;
     // Sources from an earlier replay may sit at addresses this one reuses.
     g.bound_constants.mesh_source = nullptr;
     g.bound_constants.prog0_source = nullptr;
-    g.quiet = !canonical;
-    g.host_draws = host;
+    tls.quiet = !canonical;
+    tls.host_draws = host;
     const Rewrites *rewrites = nullptr;
     if (!canonical) {
         ResetGrabTwins();
         rewrites = &CachedRewrites(list);
     }
     for (const Entry &entry : list.entries) {
-        g.interpolation_tint = 0;
+        tls.interpolation_tint = 0;
         std::visit(
             [&](const auto &e) {
                 using T = std::decay_t<decltype(e)>;
@@ -1323,13 +1335,13 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
                         }
                     }
                     if (tint && !canonical && CurrentRenderTarget() == kMainTarget) {
-                        g.interpolation_tint = overrides && overrides->sprites.contains(&e) ? 4 : (e.state.depth_test == DepthTest::Always || e.state.screen_space) ? 3
-                                                                                                                                                                    : 2;
+                        tls.interpolation_tint = overrides && overrides->sprites.contains(&e) ? 4 : (e.state.depth_test == DepthTest::Always || e.state.screen_space) ? 3
+                                                                                                                                                                      : 2;
                     }
                     Draw2DSided(e.primitive, *vertices, GrabbedBinding(e.binding, canonical), *state, side);
                 } else if constexpr (std::is_same_v<T, MeshEntry>) {
                     if (tint && !canonical && CurrentRenderTarget() == kMainTarget) {
-                        g.interpolation_tint = MeshTint(e, list, overrides);
+                        tls.interpolation_tint = MeshTint(e, list, overrides);
                     }
                     const MeshConstants *constants = &e.constants;
                     if (overrides != nullptr && overrides->index[e.record] >= 0) {
@@ -1422,10 +1434,10 @@ void Replay(const DisplayList &list, bool canonical, const Overrides *overrides,
             }
         }
     }
-    g.interpolation_tint = 0;
-    g.replaying = false;
-    g.quiet = false;
-    g.host_draws = false;
+    tls.interpolation_tint = 0;
+    tls.replaying = false;
+    tls.quiet = false;
+    tls.host_draws = false;
 }
 
 } // namespace
@@ -1605,7 +1617,9 @@ void BlendProg0Bones(const Prog0Palette &before, const Prog0Palette &after, floa
     }
 }
 
-bool RecordingCalls() { return g.list != nullptr; }
+bool RecordingCalls() { return !tls.replaying && !OnWorkerThread() && g.list != nullptr; }
+
+const DisplayList *RecordingList() { return g_recording_list.load(); }
 
 void RecordEntry(Entry &&entry) {
     DisplayList &list = *g.list;
@@ -1696,12 +1710,17 @@ DisplayList::~DisplayList() {
     if (instance != g.renderer_instance || g.device == VK_NULL_HANDLE) {
         return;
     }
-    for (TextureHandle texture : doomed_textures) {
-        DestroyDoomedTexture(texture);
+    if (doomed_textures.empty() && doomed_meshes.empty()) {
+        return;
     }
-    for (MeshHandle mesh : doomed_meshes) {
-        DestroyDoomedMesh(mesh);
-    }
+    RunOnRenderThread([this] {
+        for (TextureHandle texture : doomed_textures) {
+            DestroyDoomedTexture(texture);
+        }
+        for (MeshHandle mesh : doomed_meshes) {
+            DestroyDoomedMesh(mesh);
+        }
+    });
 }
 
 MeshTransform IdentityMeshTransform() {
@@ -1741,12 +1760,13 @@ void BeginRecording(RecordingKind kind) {
     if (g.list != nullptr) {
         return;
     }
-    if (g.in_frame) {
+    if (GameFrameOpen()) {
         Error("BeginRecording inside a frame");
         return;
     }
-    PrepareRecording();
+    PrepareRecordingFromCaller();
     g.list = std::make_shared<DisplayList>();
+    g_recording_list.store(g.list.get());
     g_recording_kind = kind == RecordingKind::Overlay ? 1 : 0;
     const auto &sizes = g_recording_sizes[g_recording_kind];
     if (sizes.instance == g.renderer_instance) {
@@ -1767,7 +1787,9 @@ void BeginRecording(RecordingKind kind) {
 DisplayListRef EndRecording() {
     std::shared_ptr<DisplayList> list = std::move(g.list);
     g.list = nullptr;
+    g_recording_list.store(nullptr);
     if (list != nullptr) {
+        list->cut_generation = g_cut_generation;
         // Leave the usual geometric-growth slack for small visibility changes.
         // Derive it from size, so a smaller scene does not retain a high-water mark.
         auto capacity = [](size_t size) { return size == 0 ? size_t{0} : std::bit_ceil(size); };
@@ -1783,7 +1805,7 @@ void CutInterpolation() {
     if (g.list != nullptr) {
         g.list->cut = true;
     }
-    g_instanced_keys.clear();
+    ++g_cut_generation;
 }
 
 void CutCameraInterpolation() {
@@ -1797,47 +1819,53 @@ bool RenderList(const DisplayList &list, float alpha, const RenderOptions &optio
     if (list.instance != g.renderer_instance || g.device == VK_NULL_HANDLE) {
         return false;
     }
-    if (g.in_frame || g.list != nullptr) {
+    // Read on the game thread: the worker must not look at the list the game thread records.
+    if (GameFrameOpen() || RecordingCalls()) {
         Error("RenderList inside a frame");
         return false;
     }
-    if (options.canonical) {
-        OpenListFrame(true, false, false);
-        Replay(list, true, nullptr);
-        CloseListFrame(true, false);
-        return true;
-    }
-    if (!g.canonical_newest) {
-        return false;
-    }
-    // Reused across frames for its capacity; RenderList runs on one thread.
-    static Overrides overrides;
-    overrides.Clear();
-    bool interpolate = options.previous != nullptr && options.previous->instance == g.renderer_instance;
-    interpolate = interpolate && alpha < 1.0f && !list.cut;
-    if (interpolate) {
-        KZ_PROFILE_ZONE("Kazarov interpolate");
-        Interpolated(list, *options.previous, std::max(alpha, 0.0f), overrides);
-    }
-    if (!OpenListFrame(false, options.present, list.needs_base)) {
-        return false;
-    }
-    static const bool env_tint = [] {
-        const char *setting = std::getenv("KZ_INTERPOLATION_TINT");
-        return setting && std::strcmp(setting, "1") == 0;
-    }();
-    bool tint = options.interpolation_tint || env_tint;
-    if (tint) {
-        TraceInterpolation(list, options.previous, interpolate ? &overrides : nullptr, alpha);
-    }
-    Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint, options.suppressed_2d_key);
-    if (options.overlay != nullptr && options.overlay->instance == g.renderer_instance) {
-        KZ_PROFILE_ZONE("Kazarov overlay");
-        SetRenderTarget(kMainTarget);
-        Replay(*options.overlay, false, nullptr, true, tint);
-    }
-    CloseListFrame(false, options.present);
-    return true;
+    bool rendered = false;
+    RunOnRenderThread([&] {
+        if (options.canonical) {
+            OpenListFrame(true, false, false);
+            Replay(list, true, nullptr);
+            CloseListFrame(true, false);
+            rendered = true;
+            return;
+        }
+        if (!g.canonical_newest) {
+            return;
+        }
+        // Reused across frames for its capacity; RenderList runs on one thread.
+        static Overrides overrides;
+        overrides.Clear();
+        bool interpolate = options.previous != nullptr && options.previous->instance == g.renderer_instance;
+        interpolate = interpolate && alpha < 1.0f && !list.cut;
+        if (interpolate) {
+            KZ_PROFILE_ZONE("Kazarov interpolate");
+            Interpolated(list, *options.previous, std::max(alpha, 0.0f), overrides);
+        }
+        if (!OpenListFrame(false, options.present, list.needs_base)) {
+            return;
+        }
+        static const bool env_tint = [] {
+            const char *setting = std::getenv("KZ_INTERPOLATION_TINT");
+            return setting && std::strcmp(setting, "1") == 0;
+        }();
+        bool tint = options.interpolation_tint || env_tint;
+        if (tint) {
+            TraceInterpolation(list, options.previous, interpolate ? &overrides : nullptr, alpha);
+        }
+        Replay(list, false, interpolate ? &overrides : nullptr, options.host, tint, options.suppressed_2d_key);
+        if (options.overlay != nullptr && options.overlay->instance == g.renderer_instance) {
+            KZ_PROFILE_ZONE("Kazarov overlay");
+            SetRenderTarget(kMainTarget);
+            Replay(*options.overlay, false, nullptr, true, tint);
+        }
+        CloseListFrame(false, options.present);
+        rendered = true;
+    });
+    return rendered;
 }
 
 DisplayListStats ListStats(const DisplayList &list) {

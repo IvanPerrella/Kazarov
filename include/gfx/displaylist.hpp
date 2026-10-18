@@ -162,6 +162,7 @@ struct DisplayList {
     std::vector<MeshHandle>         doomed_meshes;
     bool                            cut = false;
     bool                            camera_cut = false;
+    uint64_t                                   cut_generation = 0; // CutInterpolation calls before this list was finished
     // A draw reaches the main target before a clear covers its logical frame, so whatever the
     // target held shows through; a display render starts from the canonical image.
     bool                                    needs_base = false;

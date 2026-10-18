@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -63,6 +64,18 @@ enum class PresentMode : uint8_t {
     Immediate,
 };
 
+// Which thread owns device work. Off: the caller, as before. Lockstep: a worker thread runs every device call
+// while the caller waits, so the result is that of Off. Async: the worker also renders display frames from the
+// host's idle hook while the game thread records.
+enum class RenderThreadMode : uint8_t {
+    Off,
+    Lockstep,
+    Async,
+};
+
+// "off", "lockstep" or "async" (any case); nullopt for anything else.
+std::optional<RenderThreadMode> ParseRenderThreadMode(std::string_view text);
+
 struct RendererConfig {
     const char *app_name = "";
     // The game's 2D space. 2D draws, scissors and main-target rectangles are given in it and mapped
@@ -99,6 +112,8 @@ struct RendererConfig {
     // Lowers the texture and mesh tables for tests; 0 is the build maximum, larger values are clamped to it.
     uint32_t texture_slots = 0;
     uint32_t mesh_slots = 0;
+    // KZ_RENDER_THREAD=off|lockstep|async in the environment overrides this.
+    RenderThreadMode render_thread = RenderThreadMode::Off;
 };
 
 // What RendererInit settled on, from the config and the device.
@@ -119,6 +134,30 @@ RendererFeatures ActiveRendererFeatures();
 // Vulkan window; without it a headless run renders offscreen. Callable before RendererInit.
 bool HeadlessSurfaceAvailable();
 void RendererShutdown();
+// The mode RendererInit settled on.
+RenderThreadMode ActiveRenderThreadMode();
+// True on the thread that may touch the device now: any thread in Off, the worker, or the holder of a RenderLease.
+bool OnRenderThread();
+
+// Parks the worker (after the command or idle-hook call it is in) and lets the holding thread run device work
+// inline until the lease is released. A no-op in Off, and when the holder already holds one or is the worker.
+class RenderLease {
+public:
+    RenderLease();
+    ~RenderLease();
+    RenderLease(const RenderLease &) = delete;
+    RenderLease &operator=(const RenderLease &) = delete;
+
+private:
+    bool acquired_ = false;
+};
+
+// Async only: called on the worker whenever its queue is empty and no lease is held or wanted. Returns how long the
+// worker may sleep before calling again; zero calls again at once. Any Dispatch, lease or WakeRenderThread wakes it
+// early. Ignored in Off and Lockstep.
+using RenderIdleHook = std::chrono::steady_clock::duration (*)(void *user);
+void SetRenderIdleHook(RenderIdleHook hook, void *user);
+void WakeRenderThread();
 // The window's pixel size changed; the swapchain and main target follow at the next BeginFrame.
 void RendererResize();
 // The swapchain is recreated with the mode at the next BeginFrame or tick render.
