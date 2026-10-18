@@ -517,6 +517,18 @@ fn is_cfg(alias: &str) -> bool {
     name.ends_with(".cfg") || name.ends_with(".map")
 }
 pub(crate) fn native_path(alias: &str, extension: &str) -> String {
+    let leaf = alias
+        .rsplit('/')
+        .next()
+        .unwrap_or(alias)
+        .split('#')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if extension == "json" && (leaf.ends_with(".img") || leaf.ends_with(".tm2")) {
+        return super::textures::document_path(alias)
+            .expect("texture aliases have a valid native path");
+    }
     let extension = if extension == "gltf"
         && matches!(alias, "etc/gsys.pak/a_mu.mds" | "etc/gsys.pak/sukkopu.mds")
     {
@@ -730,7 +742,16 @@ fn migrate_references(document: &mut Value, source: &str, identities: &BTreeSet<
                     identity.rsplit('/').next() == Some(lower.rsplit('/').next().unwrap())
                 });
             if exists {
-                arg["value"] = json!(native_path(&normalized, replacement));
+                // These operands name members of the map or sky's already-selected PACK.
+                let path = if matches!(command.as_str(), "IMG" | "SKY_IMG")
+                    && matches!(ext, "img" | "tm2")
+                {
+                    super::textures::legacy_document_path(&normalized)
+                        .expect("texture member aliases have valid native names")
+                } else {
+                    native_path(&normalized, replacement)
+                };
+                arg["value"] = json!(path);
                 arg.as_object_mut().unwrap().remove("game_bytes");
             }
         }
@@ -2073,6 +2094,7 @@ mod tests {
     fn shift_jis_text_is_readable_unicode() {
         assert_eq!(string_argument(&[0x93, 0xfa, 0x96, 0x7b])["value"], "日本");
     }
+
     #[test]
     fn missing_terminator_drops_incomplete_argument() {
         let d = parse(b"TAG 1,2").unwrap();
@@ -2098,6 +2120,27 @@ mod tests {
         assert_eq!(doc["commands"][3]["args"][1]["value"], "OPEN.mp4");
         assert_eq!(doc["commands"][4]["args"][1]["value"], "TUTO/VTUTO1.mp4");
     }
+    #[test]
+    fn generated_map_and_sky_texture_names_remain_logical_pack_members() {
+        let identities = BTreeSet::from([
+            "map/a/a01/a01ia.img".into(),
+            "map/d/d04/b01/d04b01.sky/sky0.img".into(),
+        ]);
+        let mut map = parse(br#"IMG "a01ia.img";"#).unwrap();
+        migrate_references(&mut map, "map/a/a01/a01ia.map", &identities);
+        let (map, _) = super::super::configs_native::build("map/a/a01/a01ia.map", &map).unwrap();
+        assert_eq!(map["info"]["texture_packs"], json!(["a01ia.json"]));
+        let mut sky = parse(br#"SKY_IMG 0,"sky0.img";"#).unwrap();
+        migrate_references(&mut sky, "map/d/d04/b01/d04b01.sky/info.cfg", &identities);
+        let (sky, _) =
+            super::super::configs_native::build("map/d/d04/b01/d04b01.sky/info.cfg", &sky).unwrap();
+        assert_eq!(sky["images"], json!([{"band":0,"file":"sky0.json"}]));
+        assert_eq!(
+            native_path("map/a/a01/a01ia.img", "json"),
+            "textures/map/a/a01/a01ia.json"
+        );
+    }
+
     #[test]
     fn physical_paths_preserve_pack_context_and_disambiguate_embedded_members() {
         assert_eq!(

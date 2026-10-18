@@ -323,7 +323,7 @@ fn safe_component(input: &str) -> String {
     }
     out
 }
-pub(super) fn document_path(key: &str) -> CoreResult<String> {
+pub(super) fn legacy_document_path(key: &str) -> CoreResult<String> {
     let mut raw: Vec<String> = key
         .split('/')
         .filter(|p| !p.is_empty())
@@ -373,6 +373,225 @@ pub(super) fn document_path(key: &str) -> CoreResult<String> {
     }
     Ok(path)
 }
+/// Places texture metadata below the texture root, flattening container directories.
+pub(super) fn document_path(key: &str) -> CoreResult<String> {
+    let legacy = legacy_document_path(key)?;
+    let mut parts = vec!["textures".to_owned()];
+    let mut character = None;
+    let raw: Vec<_> = key.split('/').filter(|part| !part.is_empty()).collect();
+    for (index, component) in raw.iter().enumerate() {
+        let base = component.split('#').next().unwrap();
+        if base == "." || base == ".." {
+            parts.push(safe_component(base));
+        } else if let Some((_, extension)) = base.rsplit_once('.') {
+            if extension.eq_ignore_ascii_case("chr") || extension.eq_ignore_ascii_case("chr_") {
+                character = Some(safe_component(base));
+            }
+        } else if index + 1 < raw.len() {
+            parts.push(safe_component(base));
+        }
+    }
+    let leaf = legacy.rsplit('/').next().unwrap();
+    parts.push(if let Some(owner) = character {
+        let stem = owner.rsplit_once('.').unwrap().0;
+        let suffix = if owner.to_ascii_lowercase().ends_with(".chr_") {
+            "_"
+        } else {
+            ""
+        };
+        format!("{stem}{suffix}-{leaf}")
+    } else {
+        leaf.to_owned()
+    });
+    let path = parts.join("/");
+    if path.len() > 160 {
+        return Ok(format!(
+            "textures/long-path-{}.json",
+            &hex_digest(&Sha256::digest(key.as_bytes()))[..24]
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
+/// Immutable paths shared by document planning and parallel raster emission.
+struct TextureLayout {
+    documents: BTreeMap<String, String>,
+    pngs: BTreeMap<String, String>,
+}
+impl TextureLayout {
+    fn new(state: &Unit) -> CoreResult<Self> {
+        let mut used = BTreeSet::new();
+        let mut documents = BTreeMap::new();
+        let mut sources: Vec<_> = state
+            .sources
+            .iter()
+            .map(|source| source["source"].as_str().unwrap())
+            .collect();
+        sources.sort_by_key(|alias| {
+            let parents = alias.rsplit_once('/').map_or("", |(parents, _)| parents);
+            let nested = parents.split('/').any(|part| part.contains('.')) || alias.contains('#');
+            (nested, *alias)
+        });
+        for alias in sources {
+            let candidate = document_path(alias)?;
+            documents.insert(alias.to_owned(), Self::reserve(candidate, alias, &mut used));
+        }
+        let mut origins = BTreeMap::new();
+        for source in &state.sources {
+            let alias = source["source"].as_str().unwrap();
+            for png in picture_assets(&legacy_document_path(alias)?, &runtime_document(source)?)? {
+                origins.entry(png).or_insert(alias);
+            }
+        }
+        let mut pngs = BTreeMap::new();
+        let mut counts = BTreeMap::<String, usize>::new();
+        let mut owners = BTreeMap::<String, String>::new();
+        let mut owner_names = BTreeSet::new();
+        for old in &state.written {
+            let alias = origins
+                .get(old)
+                .copied()
+                .ok_or_else(|| fail(format!("unreferenced planned PNG: {old}")))?;
+            let components: Vec<_> = alias.split('/').collect();
+            let owner_index = components.iter().rposition(|part| {
+                let lower = part.split('#').next().unwrap().to_ascii_lowercase();
+                lower.ends_with(".chr") || lower.ends_with(".chr_")
+            });
+            let candidate = if let Some(index) = owner_index {
+                let owner = safe_component(components[index].split('#').next().unwrap());
+                let base = document_path(alias)?;
+                let folder = base.rsplit_once('/').unwrap().0;
+                let raw_owner = components[index].split("#offset:").next().unwrap();
+                let identity = format!("{}/{raw_owner}@{folder}", components[..index].join("/"));
+                let stem = if let Some(stem) = owners.get(&identity) {
+                    stem.clone()
+                } else {
+                    let suffix = if owner.to_ascii_lowercase().ends_with(".chr_") {
+                        "_"
+                    } else {
+                        ""
+                    };
+                    let marker = raw_owner
+                        .split_once("#entry:")
+                        .map(|(_, entry)| format!("-entry-{}", safe_component(entry)))
+                        .unwrap_or_default();
+                    let candidate = format!(
+                        "{folder}/{}{suffix}{marker}.png",
+                        owner.rsplit_once('.').unwrap().0
+                    );
+                    let reserved = Self::reserve(candidate, &identity, &mut owner_names);
+                    let stem = reserved.strip_suffix(".png").unwrap().to_owned();
+                    owners.insert(identity, stem.clone());
+                    stem
+                };
+                let count = counts.entry(stem.clone()).or_default();
+                let path = format!("{stem}_{count}.png");
+                *count += 1;
+                path
+            } else {
+                let legacy = legacy_document_path(alias)?;
+                let stem = legacy.strip_suffix(".json").unwrap();
+                if let Some(suffix) = old.strip_prefix(stem) {
+                    format!(
+                        "{}{suffix}",
+                        documents[alias].strip_suffix(".json").unwrap()
+                    )
+                } else {
+                    // Shared wrapper rasters use their original physical texture identity.
+                    document_path(&old.replace(".png", ".img"))?.replace(".json", ".png")
+                }
+            };
+            pngs.insert(old.clone(), Self::reserve(candidate, old, &mut used));
+        }
+        Ok(Self { documents, pngs })
+    }
+    fn reserve(candidate: String, identity: &str, used: &mut BTreeSet<String>) -> String {
+        let candidate = if candidate.len() > 160 {
+            let extension = candidate.rsplit_once('.').unwrap().1;
+            format!(
+                "textures/long-path-{}.{extension}",
+                &hex_digest(&Sha256::digest(identity.as_bytes()))[..24]
+            )
+        } else {
+            candidate
+        };
+        if used.insert(candidate.to_ascii_lowercase()) {
+            return candidate;
+        }
+        let (stem, extension) = candidate.rsplit_once('.').unwrap();
+        let digest = hex_digest(&Sha256::digest(identity.as_bytes()));
+        let mut ordinal = 0;
+        loop {
+            let result = format!("{stem}-{}-{ordinal}.{extension}", &digest[..12]);
+            let result = if result.len() > 160 {
+                format!("textures/long-path-{}-{ordinal}.{extension}", &digest[..24])
+            } else {
+                result
+            };
+            if used.insert(result.to_ascii_lowercase()) {
+                return result;
+            }
+            ordinal += 1;
+        }
+    }
+    fn document(&self, alias: &str, document: &mut Value) -> CoreResult<()> {
+        fn visit(
+            value: &mut Value,
+            old: &str,
+            new: &str,
+            pngs: &BTreeMap<String, String>,
+        ) -> CoreResult<()> {
+            match value {
+                Value::Object(object) => {
+                    for (key, value) in object {
+                        if key == "levels" {
+                            for level in value
+                                .as_array_mut()
+                                .ok_or_else(|| fail("invalid texture levels"))?
+                            {
+                                let path = asset_relative(
+                                    old,
+                                    level
+                                        .as_str()
+                                        .ok_or_else(|| fail("invalid PNG reference"))?,
+                                )?;
+                                let target = pngs
+                                    .get(&path)
+                                    .ok_or_else(|| fail(format!("unplanned PNG: {path}")))?;
+                                *level = Value::String(relative_raster(new, target)?);
+                            }
+                        } else {
+                            visit(value, old, new, pngs)?;
+                        }
+                    }
+                }
+                Value::Array(array) => {
+                    for value in array {
+                        visit(value, old, new, pngs)?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        visit(
+            document,
+            &legacy_document_path(alias)?,
+            &self.documents[alias],
+            &self.pngs,
+        )
+    }
+}
+
+/// Reserves one additional texture name against the complete planned texture namespace.
+pub(super) fn reserve_path(
+    candidate: String,
+    identity: &str,
+    used: &mut BTreeSet<String>,
+) -> String {
+    TextureLayout::reserve(candidate, identity, used)
+}
+
 fn hex_digest(digest: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(digest.len() * 2);
@@ -746,9 +965,9 @@ impl Unit {
     ) -> CoreResult<Vec<Value>> {
         let mut entries = Vec::new();
         for (index, picture) in pictures.into_iter().enumerate() {
-            let logical_document = document_path(key)?;
+            let logical_document = legacy_document_path(key)?;
             let document = if let Some((parent, offset)) = self.raster_origins.get(key) {
-                document_path(&format!("{parent}#offset:{offset}"))?
+                legacy_document_path(&format!("{parent}#offset:{offset}"))?
             } else {
                 logical_document.clone()
             };
@@ -1046,6 +1265,7 @@ pub fn plan_source(inventory: &super::inventory::Inventory) -> CoreResult<Textur
         roots.push(resource.clone());
     }
     bake_variants(&mut state, &no_write, &|name| inventory.get(name).is_some())?;
+    let layout = std::sync::Arc::new(TextureLayout::new(&state)?);
     let mut documents = Vec::with_capacity(state.sources.len());
     let mut document_names = BTreeSet::new();
     let mut aliases = BTreeSet::new();
@@ -1054,13 +1274,14 @@ pub fn plan_source(inventory: &super::inventory::Inventory) -> CoreResult<Textur
         let alias = entry["source"]
             .as_str()
             .ok_or_else(|| fail("texture source missing"))?;
-        let name = document_path(alias)?;
+        let name = layout.documents[alias].clone();
         if !aliases.insert(alias.to_ascii_lowercase())
             || !document_names.insert(name.to_ascii_lowercase())
         {
             return Err(fail(format!("document collision: {name}")));
         }
-        let document = runtime_document(entry)?;
+        let mut document = runtime_document(entry)?;
+        layout.document(alias, &mut document)?;
         let bytes = serde_json::to_vec(&document)?;
         let job_name = name.clone();
         jobs.push(Job {
@@ -1078,8 +1299,9 @@ pub fn plan_source(inventory: &super::inventory::Inventory) -> CoreResult<Textur
             document,
         });
     }
-    let png_names = state.written.clone();
+    let png_names = layout.pngs.values().cloned().collect();
     for resource in roots {
+        let layout = layout.clone();
         let label = resource.alias.clone();
         let estimate = resource.len().saturating_mul(3).max(1 << 20);
         jobs.push(Job {
@@ -1087,10 +1309,13 @@ pub fn plan_source(inventory: &super::inventory::Inventory) -> CoreResult<Textur
             label,
             work: 1 + (resource.len() as u64).div_ceil(256 << 10),
             estimated_bytes: estimate,
-            run: Box::new(move |sink| emit_base_rasters(&resource, sink)),
+            run: Box::new(move |sink| emit_base_rasters(&resource, sink, &layout)),
         });
     }
-    for variant in state.variants {
+    for mut variant in state.variants {
+        for name in &mut variant.names {
+            *name = layout.pngs[name].clone();
+        }
         let label = variant.names.first().cloned().unwrap_or_default();
         let estimate = variant
             .picture
@@ -1230,10 +1455,17 @@ fn audio_owned_root(inventory: &super::inventory::Inventory, key: &str) -> bool 
     })
 }
 
-fn emit_base_rasters(resource: &ResourceRef, sink: &AssetSink) -> CoreResult<()> {
+fn emit_base_rasters(
+    resource: &ResourceRef,
+    sink: &AssetSink,
+    layout: &TextureLayout,
+) -> CoreResult<()> {
     let write = |name: &str, width: usize, height: usize, pixels: &[u8]| {
         sink.submit(
-            name,
+            layout
+                .pngs
+                .get(name)
+                .ok_or_else(|| fail(format!("unplanned raster: {name}")))?,
             ArtifactBytes::Owned(png_rgba(width, height, pixels)?),
             Category::Texture,
         )
@@ -1442,7 +1674,7 @@ fn bake_variants(
         }
         let mut levels = Vec::new();
         let mut assets = Vec::new();
-        let logical_document = document_path(&dest.source)?;
+        let logical_document = legacy_document_path(&dest.source)?;
         for level in &dest.picture.levels {
             let rgba = if state.plan_only {
                 Vec::new()
@@ -1665,6 +1897,16 @@ pub fn convert_source_with_progress(
         write_output(&output.join("data").join(name), &content)
     };
     bake_variants(&mut state, &write, &|name| source.contains(name))?;
+    let layout = TextureLayout::new(&state)?;
+    for (old, new) in &layout.pngs {
+        let source = output.join("data").join(old);
+        let target = output.join("data").join(new);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(source, target)?;
+    }
+    state.written = layout.pngs.values().cloned().collect();
     phase.inc(finalize_work / 2);
     let mut documents = BTreeSet::new();
     let mut aliases = BTreeSet::new();
@@ -1674,12 +1916,13 @@ pub fn convert_source_with_progress(
         let key = source["source"]
             .as_str()
             .ok_or_else(|| fail("texture source missing"))?;
-        let path = document_path(key)?;
+        let path = layout.documents[key].clone();
         if !aliases.insert(key.to_ascii_lowercase()) || !documents.insert(path.to_ascii_lowercase())
         {
             return Err(fail(format!("document collision: {path}")));
         }
-        let document = runtime_document(source)?;
+        let mut document = runtime_document(source)?;
+        layout.document(key, &mut document)?;
         let content = pretty_json(&document)?;
         writes.push((path.clone(), content));
         converted_documents.push(ConvertedTextureDocument {
@@ -1751,7 +1994,10 @@ fn asset_relative(document_path: &str, reference: &str) -> CoreResult<String> {
     Ok(path)
 }
 
-fn picture_assets(document_path: &str, document: &Value) -> CoreResult<BTreeSet<String>> {
+pub(super) fn picture_assets(
+    document_path: &str,
+    document: &Value,
+) -> CoreResult<BTreeSet<String>> {
     let mut assets = BTreeSet::new();
     let entries = document["entries"]
         .as_array()
@@ -1827,7 +2073,6 @@ pub fn remove_embedded(
         if !aliases.insert(item.source_alias.clone())
             || !alias_keys.insert(item.source_alias.to_ascii_lowercase())
             || !paths.insert(item.document_path.to_ascii_lowercase())
-            || document_path(&item.source_alias)? != item.document_path
         {
             return Err(fail("invalid or duplicate texture inventory source"));
         }
@@ -2135,7 +2380,7 @@ mod tests {
         assert_eq!(script[0]["args"][0]["text"], "%82%A0");
     }
     #[test]
-    fn named_images_after_empty_pack_members_keep_historical_png_paths() {
+    fn named_images_after_empty_pack_members_relocate_shared_rasters() {
         fn pack(entries: &[(&str, &[u8])]) -> Vec<u8> {
             let mut output = Vec::new();
             for (name, payload) in entries {
@@ -2185,22 +2430,19 @@ mod tests {
         let report = convert_tree(&raw, &output, 2).unwrap();
         assert_inventory(&output, &report);
         assert_eq!(report.documents[0].source_alias, "bundle.pac/frametex.img");
-        assert_eq!(
-            report.documents[0].document_path,
-            "bundle.pac/frametex.json"
-        );
+        assert_eq!(report.documents[0].document_path, "textures/frametex.json");
         assert_eq!(
             report.documents[0].document["entries"][0]["pictures"][0]["levels"][0],
             format!("embedded-offset-{}_0.png", offsets[0])
         );
         assert_eq!(
             report.documents[1].document["entries"][0]["pictures"][0]["levels"][0],
-            format!("../embedded-offset-{}_0.png", offsets[1])
+            format!("embedded-offset-{}_0.png", offsets[1])
         );
         for offset in offsets {
             assert!(
                 output
-                    .join(format!("data/bundle.pac/embedded-offset-{offset}_0.png"))
+                    .join(format!("data/textures/embedded-offset-{offset}_0.png"))
                     .is_file()
             );
         }
@@ -2229,21 +2471,104 @@ mod tests {
         assert!(parse_tim2(&b, false, false).is_err());
     }
     #[test]
-    fn document_paths_handle_markers_and_case() {
-        assert_eq!(document_path("img/FOO.IMG").unwrap(), "img/FOO.json");
+    fn texture_layout_flattens_containers_and_names_character_rasters() {
         assert_eq!(
-            document_path("model.chr#offset:80").unwrap(),
+            document_path("img/menu-img/panel.img").unwrap(),
+            "textures/img/menu-img/panel.json"
+        );
+        assert_eq!(
+            document_path("map/room.pac/hero.chr#offset:80").unwrap(),
+            "textures/map/hero-embedded-offset-80.json"
+        );
+        assert_eq!(
+            document_path("map/room.pac/part.ipk/panel.img").unwrap(),
+            "textures/map/panel.json"
+        );
+        let mut tim2 = vec![0; 16];
+        tim2[..4].copy_from_slice(b"TIM2");
+        tim2[6] = 1;
+        tim2.extend(picture_t8());
+        let mut state = Unit::new();
+        state.plan_only = true;
+        let noop = |_: &str, _: usize, _: usize, _: &[u8]| Ok(());
+        for alias in [
+            "chara/hero.chr/first.img",
+            "chara/hero.chr/second.img",
+            "chara/hero.chr_/first.img",
+            "chara/hero.chr#entry:1/first.img",
+            "chara/hero.chr/texA/first.img",
+            "chara/hero.chr/texB/second.img",
+            "map/icon.img",
+            "map/one.pac/icon.img",
+            "map/two.pac/icon.img",
+            "map/THREE.PAC/ICON.IMG",
+        ] {
+            state.transform(&noop, &tim2, alias, 0).unwrap();
+        }
+        let layout = TextureLayout::new(&state).unwrap();
+        assert_eq!(
+            layout.pngs["chara/hero.chr/first_0.png"],
+            "textures/chara/hero_0.png"
+        );
+        assert_eq!(
+            layout.pngs["chara/hero.chr/second_0.png"],
+            "textures/chara/hero_1.png"
+        );
+        assert_eq!(
+            layout.pngs["chara/hero.chr_/first_0.png"],
+            "textures/chara/hero__0.png"
+        );
+        assert_eq!(
+            layout.pngs["chara/hero.chr/texA/first_0.png"],
+            "textures/chara/texA/hero_0.png"
+        );
+        assert_eq!(
+            layout.pngs["chara/hero.chr/texB/second_0.png"],
+            "textures/chara/texB/hero_0.png"
+        );
+        let duplicate = &layout.pngs["chara/hero-entry-1.json/first_0.png"];
+        assert!(duplicate.starts_with("textures/chara/hero-"));
+        assert!(duplicate.ends_with("_0.png"));
+        assert_eq!(layout.documents["map/icon.img"], "textures/map/icon.json");
+        let names: BTreeSet<_> = layout
+            .pngs
+            .values()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+        assert_eq!(names.len(), layout.pngs.len());
+        for source in &state.sources {
+            let alias = source["source"].as_str().unwrap();
+            let mut document = runtime_document(source).unwrap();
+            layout.document(alias, &mut document).unwrap();
+            let assets = picture_assets(&layout.documents[alias], &document).unwrap();
+            assert!(
+                assets
+                    .iter()
+                    .all(|path| names.contains(&path.to_ascii_lowercase()))
+            );
+        }
+        let long = format!("img/{}/hero.chr/texture.img", "x".repeat(170));
+        assert!(document_path(&long).unwrap().len() <= 160);
+    }
+    #[test]
+    fn document_paths_handle_markers_and_case() {
+        assert_eq!(legacy_document_path("img/FOO.IMG").unwrap(), "img/FOO.json");
+        assert_eq!(
+            legacy_document_path("model.chr#offset:80").unwrap(),
             "model.chr/embedded-offset-80.json"
         );
         assert_eq!(
-            document_path("outer.img/inner.img#entry:2").unwrap(),
+            legacy_document_path("outer.img/inner.img#entry:2").unwrap(),
             "outer-img/inner-entry-2.json"
         );
         assert_eq!(
-            document_path("outer.img#entry:1#offset:80").unwrap(),
+            legacy_document_path("outer.img#entry:1#offset:80").unwrap(),
             "outer-entry-1.json/embedded-offset-80.json"
         );
-        assert_eq!(document_path("../bad.img").unwrap(), "%2E%2E/bad.json");
+        assert_eq!(
+            legacy_document_path("../bad.img").unwrap(),
+            "%2E%2E/bad.json"
+        );
     }
     #[test]
     fn original_hex_encodes_every_byte_without_changing_case_or_width() {
@@ -2268,7 +2593,8 @@ mod tests {
         assert_eq!(report.sources, 2);
         assert_inventory(&out, &report);
         let document: Value =
-            serde_json::from_slice(&fs::read(out.join("data/UPPER.json")).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(out.join("data/textures/UPPER.json")).unwrap())
+                .unwrap();
         assert_eq!(
             document
                 .as_object()
@@ -2291,7 +2617,8 @@ mod tests {
             "copy_variant"
         );
         let empty: Value =
-            serde_json::from_slice(&fs::read(out.join("data/empty.json")).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(out.join("data/textures/empty.json")).unwrap())
+                .unwrap();
         assert_eq!(empty, json!({"schema_version":3,"groups":[0],"entries":[]}));
         assert!(document.get("original").is_none());
     }
@@ -2386,8 +2713,8 @@ mod tests {
         fs::write(raw.join("bundle.pac"), pack).unwrap();
         let output = root.join("published");
         let report = convert_tree(&raw, &output, 2).unwrap();
-        assert!(output.join("data/bundle.pac/same.json").is_file());
-        assert!(output.join("data/bundle.pac/same-entry-1.json").is_file());
+        assert!(output.join("data/textures/same.json").is_file());
+        assert!(output.join("data/textures/same-entry-1.json").is_file());
         assert_inventory(&output, &report);
         fs::remove_dir_all(root).unwrap();
     }
@@ -2481,7 +2808,7 @@ mod tests {
         assert_eq!(first.sources, 1);
         assert_eq!(first.pngs, 0);
         assert_inventory(&output, &first);
-        let bundle = output.join("data/cfg.json");
+        let bundle = output.join("data/textures/cfg.json");
         assert!(bundle.is_file());
         let source: Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
         assert_eq!(

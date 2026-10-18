@@ -4312,10 +4312,37 @@ impl FileAnalysis {
     }
 }
 
+/// Assigns unique flattened PNG names to every memory-card icon before parallel conversion.
+fn icon_texture_paths(
+    inventory: &super::inventory::Inventory,
+    png_names: &BTreeSet<String>,
+) -> CoreResult<BTreeMap<String, String>> {
+    let mut used: BTreeSet<_> = png_names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let mut paths = BTreeMap::new();
+    for alias in inventory
+        .names()
+        .filter(|alias| extension(alias).eq_ignore_ascii_case("ico"))
+    {
+        let candidate = super::textures::document_path(
+            &Path::new(alias).with_extension("img").to_string_lossy(),
+        )?
+        .replace(".json", ".png");
+        paths.insert(
+            alias.to_owned(),
+            super::textures::reserve_path(candidate, alias, &mut used),
+        );
+    }
+    Ok(paths)
+}
+
 fn analyze_file(
     source: &super::archive::SourceTree,
     alias: &str,
     all_textures: &[Texture],
+    icon_paths: &BTreeMap<String, String>,
     phase: &Phase,
     embedded_gameplay: bool,
 ) -> CoreResult<Option<FileAnalysis>> {
@@ -4331,10 +4358,10 @@ fn analyze_file(
         .filter(|resource| extension(&resource.alias).eq_ignore_ascii_case("ico"))
     {
         let path = super::configs::native_path(&icon.alias, "gltf");
-        let image = Path::new(&path)
-            .with_extension("png")
-            .to_string_lossy()
-            .replace('\\', "/");
+        let image = icon_paths
+            .get(&icon.alias)
+            .ok_or_else(|| fail(format!("unplanned icon image: {}", icon.alias)))?
+            .clone();
         let (gltf, png) = memory_card_icon(&icon.data, &relative_uri(&path, &image))?;
         icons.push(MemoryCardIcon {
             alias: icon.alias.clone(),
@@ -4826,6 +4853,7 @@ fn commit_file(
                 )));
             }
             save(&published.join("data").join(&icon.path), &icon.gltf)?;
+            fs::create_dir_all(image_path.parent().unwrap())?;
             fs::write(&image_path, &icon.png)?;
         }
         report.referenced_pngs.insert(icon.image.clone());
@@ -5192,6 +5220,7 @@ fn collect_character_gameplay(
     let documents = texture_plan.documents;
     let png_names = texture_plan.png_names;
     let all_textures = textures(Path::new("published"), &documents)?;
+    let icon_paths = icon_texture_paths(&inventory, &png_names)?;
     let mut character_roots = BTreeSet::new();
     for alias in inventory.names().filter(|alias| is_character(alias)) {
         let mut ancestor = alias;
@@ -5217,8 +5246,15 @@ fn collect_character_gameplay(
     let mut used_textures = BTreeSet::new();
     let mut gameplay = BTreeMap::new();
     for alias in files {
-        let analysis = analyze_file(source, alias, &all_textures, &Phase::noop(), false)
-            .map_err(|error| fail(format!("analyze gameplay source {alias}: {error}")))?;
+        let analysis = analyze_file(
+            source,
+            alias,
+            &all_textures,
+            &icon_paths,
+            &Phase::noop(),
+            false,
+        )
+        .map_err(|error| fail(format!("analyze gameplay source {alias}: {error}")))?;
         let Some(analysis) = analysis else { continue };
         let Some(job) = commit_file(
             Path::new("published"),
@@ -5325,6 +5361,7 @@ pub fn plan_source(
     png_names: Arc<BTreeSet<String>>,
 ) -> CoreResult<ModelPlan> {
     let all_textures = Arc::new(textures(Path::new("published"), &documents)?);
+    let icon_paths = Arc::new(icon_texture_paths(inventory, &png_names)?);
     let mut candidates = BTreeSet::new();
     for resource in inventory.leaves() {
         if !matches!(
@@ -5388,6 +5425,7 @@ pub fn plan_source(
         deferred_work += work;
         let source = source.clone();
         let all_textures = all_textures.clone();
+        let icon_paths = icon_paths.clone();
         let analyses = analyses.clone();
         jobs.push(Job {
             category: Category::Model,
@@ -5395,8 +5433,14 @@ pub fn plan_source(
             work,
             estimated_bytes: (len as usize).saturating_mul(16).max(1 << 20),
             run: Box::new(move |_| {
-                let mut analysis =
-                    analyze_file(&source, &alias, &all_textures, &Phase::noop(), true)?;
+                let mut analysis = analyze_file(
+                    &source,
+                    &alias,
+                    &all_textures,
+                    &icon_paths,
+                    &Phase::noop(),
+                    true,
+                )?;
                 if let Some(analysis) = analysis.as_mut() {
                     analysis.pack_artifacts()?;
                 }
@@ -5498,13 +5542,22 @@ pub fn convert_source(
     let total = scan_work + (scan_work / 20).max(1);
     phase.set_total(total);
     let all_textures = textures(published, documents)?;
+    let inventory = super::inventory::Inventory::build(source)?;
+    let mut png_names = BTreeSet::new();
+    for document in documents {
+        png_names.extend(super::textures::picture_assets(
+            &document.document_path,
+            &document.document,
+        )?);
+    }
+    let icon_paths = icon_texture_paths(&inventory, &png_names)?;
     let mut used_textures = BTreeSet::new();
     let mut catalog_resources = BTreeMap::<String, Value>::new();
     let mut converted = BTreeSet::new();
     let analyze = |chunk: &[&str]| -> Vec<CoreResult<Option<FileAnalysis>>> {
         chunk
             .par_iter()
-            .map(|p| analyze_file(source, p, &all_textures, phase, false))
+            .map(|p| analyze_file(source, p, &all_textures, &icon_paths, phase, false))
             .collect()
     };
     let mut chunks = files.chunks(64).zip(work.chunks(64));
@@ -6800,6 +6853,26 @@ mod tests {
         assert!(scene_extent(&b).is_err());
     }
     #[test]
+    fn flattened_icon_names_reserve_distinct_images_across_packs_and_textures() {
+        let temporary = tempfile::tempdir().unwrap();
+        for folder in ["menu/first.pac", "menu/second.pac"] {
+            fs::create_dir_all(temporary.path().join(folder)).unwrap();
+            fs::write(temporary.path().join(folder).join("icon.ico"), b"icon").unwrap();
+        }
+        let source = super::super::archive::SourceTree::directory(temporary.path()).unwrap();
+        let inventory = super::super::inventory::Inventory::build(&source).unwrap();
+        let existing = BTreeSet::from(["textures/menu/icon.png".to_owned()]);
+        let paths = icon_texture_paths(&inventory, &existing).unwrap();
+        assert_eq!(paths.len(), 2);
+        let unique: BTreeSet<_> = paths.values().collect();
+        assert_eq!(unique.len(), 2);
+        for path in paths.values() {
+            assert!(path.starts_with("textures/menu/icon-"));
+            assert!(!existing.contains(path));
+            assert!(path.len() <= 160);
+        }
+    }
+    #[test]
     fn memory_card_icon_becomes_standard_gltf_without_unnecessary_sidecar() {
         let mut raw = vec![0; 20 + 3 * 24 + 20 + 128 * 128 * 2];
         put(&mut raw, 0, 0x10000);
@@ -6826,13 +6899,16 @@ mod tests {
         convert_and_strip(&temp.path().join("raw"), &temp.path().join("out"), &[]).unwrap();
         verify(&temp.path().join("out")).unwrap();
         assert!(temp.path().join("out/data/title/icon.gltf").is_file());
-        let image = temp.path().join("out/data/title/icon.png");
+        let image = temp.path().join("out/data/textures/title/icon.png");
         assert_eq!(fs::read(&image).unwrap(), png);
         let published: Value = serde_json::from_slice(
             &fs::read(temp.path().join("out/data/title/icon.gltf")).unwrap(),
         )
         .unwrap();
-        assert_eq!(published["images"], json!([{"uri":"icon.png"}]));
+        assert_eq!(
+            published["images"],
+            json!([{"uri":"../textures/title/icon.png"}])
+        );
         fs::remove_file(&image).unwrap();
         assert!(verify(&temp.path().join("out")).is_err());
         fs::write(&image, &png).unwrap();

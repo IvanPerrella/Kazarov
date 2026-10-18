@@ -272,6 +272,7 @@ fn planned_lookup(
     resources: &ResourceInventory,
     converted_aliases: &HashSet<String>,
     profiles: &BTreeMap<String, BTreeSet<String>>,
+    texture_paths: &BTreeMap<String, String>,
 ) -> Inventory {
     let mut lookup = Inventory {
         profiles: profiles
@@ -322,7 +323,10 @@ fn planned_lookup(
         if !converted_aliases.contains(alias) && !super::configs::is_tracked(alias) {
             continue;
         }
-        let path = super::configs::native_path(alias, extension);
+        let path = texture_paths
+            .get(alias)
+            .cloned()
+            .unwrap_or_else(|| super::configs::native_path(alias, extension));
         lookup.paths.insert(normalized_alias, path.clone());
         let leaf = alias
             .rsplit('/')
@@ -363,8 +367,14 @@ pub fn plan_jobs(
     resources: &ResourceInventory,
     converted_aliases: &HashSet<String>,
     profiles: &BTreeMap<String, BTreeSet<String>>,
+    texture_paths: &BTreeMap<String, String>,
 ) -> CoreResult<(HashSet<String>, Vec<Job>)> {
-    let lookup = Arc::new(planned_lookup(resources, converted_aliases, profiles));
+    let lookup = Arc::new(planned_lookup(
+        resources,
+        converted_aliases,
+        profiles,
+        texture_paths,
+    ));
     let mut consumed = HashSet::new();
     let mut jobs = Vec::new();
     for resource in resources.leaves() {
@@ -403,10 +413,11 @@ pub fn verify_archive(
     resources: &ResourceInventory,
     converted_aliases: &HashSet<String>,
     profiles: &BTreeMap<String, BTreeSet<String>>,
+    texture_paths: &BTreeMap<String, String>,
     reader: &dyn super::publish::ArchiveReader,
     phase: &Phase,
 ) -> CoreResult<()> {
-    let lookup = planned_lookup(resources, converted_aliases, profiles);
+    let lookup = planned_lookup(resources, converted_aliases, profiles, texture_paths);
     let mut character_scripts = BTreeMap::<String, BTreeSet<String>>::new();
     for resource in resources.leaves() {
         if !is_valid_script(resource.bytes()) {

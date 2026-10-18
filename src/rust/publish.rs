@@ -205,7 +205,7 @@ fn verify_catalog_with_document(
             .ok_or_else(|| fail("catalog document path missing"))?;
         if !aliases.insert(alias.to_ascii_lowercase())
             || !paths.insert(path.to_ascii_lowercase())
-            || textures::document_path(alias)? != path
+            || !path.starts_with("textures/")
             || !path.ends_with(".json")
             || !expected.contains(path)
         {
@@ -451,6 +451,9 @@ pub fn verify_trees(root: &Path, phase: &Phase) -> CoreResult<u64> {
                         && document.get("entries").is_some()
                     {
                         verify_texture_value(&data, relative, &document, &data_files)?;
+                    }
+                    if relative.ends_with("/pack.json") {
+                        verify_pack_textures(&document, &|path| Ok(fs::read(data.join(path))?))?;
                     }
                 }
             } else {
@@ -899,6 +902,25 @@ fn audit_entry(name: &str, bytes: &[u8]) -> CoreResult<()> {
             "proprietary scene audio table published: {name}"
         )));
     }
+    let texture_document = lower.ends_with(".json")
+        && serde_json::from_slice::<Value>(bytes).is_ok_and(|value| {
+            value["schema_version"] == 3
+                && value.get("groups").is_some()
+                && value.get("entries").is_some()
+        });
+    if (lower.ends_with(".png") || texture_document)
+        && (!name.starts_with("textures/")
+            || name
+                .rsplit_once('/')
+                .unwrap()
+                .0
+                .split('/')
+                .any(|part| part.contains('.')))
+    {
+        return Err(fail(format!(
+            "texture outside flattened texture hierarchy: {name}"
+        )));
+    }
     super::packs::audit_entry(name, bytes)?;
     super::models::audit_payload(name, bytes)?;
     if bytes.len() as u64 <= 128 << 20 {
@@ -958,6 +980,29 @@ pub fn verify_with_progress(root: &Path, phase: &Phase) -> CoreResult<u64> {
     verify_open_archive(&archive, &marker, phase)
 }
 
+fn verify_pack_textures(
+    document: &Value,
+    read: &dyn Fn(&str) -> CoreResult<Vec<u8>>,
+) -> CoreResult<()> {
+    if let Some(members) = document["texture_members"].as_array() {
+        for member in members {
+            let path = member["path"]
+                .as_str()
+                .ok_or_else(|| fail("invalid PACK texture path"))?;
+            let texture: Value = serde_json::from_slice(&read(path)?)?;
+            if texture["schema_version"] != 3
+                || !texture["groups"].is_array()
+                || !texture["entries"].is_array()
+            {
+                return Err(fail(format!(
+                    "PACK member is not a texture document: {path}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn verify_open_archive(archive: &Archive, marker: &Value, phase: &Phase) -> CoreResult<u64> {
     let view = ArchiveView::new(&archive);
     let names: BTreeSet<String> = view.names().into_iter().collect();
@@ -976,6 +1021,9 @@ fn verify_open_archive(archive: &Archive, marker: &Value, phase: &Phase) -> Core
                     && document.get("entries").is_some()
                 {
                     verify_texture_archive_value(&view, name, &document, &names)?;
+                }
+                if name.ends_with("/pack.json") {
+                    verify_pack_textures(&document, &|path| view.read(path))?;
                 }
             }
             Ok(())
@@ -1000,6 +1048,7 @@ pub fn verify_stream_with_progress(
     resources: &Inventory,
     converted_aliases: &HashSet<String>,
     profiles: &BTreeMap<String, BTreeSet<String>>,
+    texture_paths: &BTreeMap<String, String>,
     phase: &Phase,
 ) -> CoreResult<u64> {
     let marker = read_marker(root)?;
@@ -1032,6 +1081,7 @@ pub fn verify_stream_with_progress(
                 resources,
                 converted_aliases,
                 profiles,
+                texture_paths,
                 &view,
                 phase,
             )
@@ -1135,20 +1185,37 @@ mod tests {
     fn texture_verifier_rejects_old_fields_and_missing_png() {
         let temp = tempfile::tempdir().unwrap();
         let port = temp.path();
-        let catalog = serde_json::json!({"schema_version":3,"sources":{"foo.img":"foo.json"}});
-        let assets = BTreeSet::from(["foo.json".to_owned(), "foo_0.png".to_owned()]);
-        fs::write(port.join("foo_0.png"), b"png").unwrap();
+        fs::create_dir_all(port.join("textures")).unwrap();
+        let catalog =
+            serde_json::json!({"schema_version":3,"sources":{"foo.img":"textures/foo.json"}});
+        let assets = BTreeSet::from([
+            "textures/foo.json".to_owned(),
+            "textures/foo_0.png".to_owned(),
+        ]);
+        fs::write(port.join("textures/foo_0.png"), b"png").unwrap();
         let mut doc = serde_json::json!({"schema_version":3,"groups":[0],"entries":[
             {"name":"foo","pictures":[{"levels":["foo_0.png"]}]}
         ]});
-        fs::write(port.join("foo.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
+        fs::write(
+            port.join("textures/foo.json"),
+            serde_json::to_vec(&doc).unwrap(),
+        )
+        .unwrap();
         verify_catalog(port, &catalog, &assets).unwrap();
         doc["original"] = serde_json::json!({"bytes":"00"});
-        fs::write(port.join("foo.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
+        fs::write(
+            port.join("textures/foo.json"),
+            serde_json::to_vec(&doc).unwrap(),
+        )
+        .unwrap();
         assert!(verify_catalog(port, &catalog, &assets).is_err());
         doc.as_object_mut().unwrap().remove("original");
         doc["entries"][0]["pictures"][0]["levels"][0] = "missing.png".into();
-        fs::write(port.join("foo.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
+        fs::write(
+            port.join("textures/foo.json"),
+            serde_json::to_vec(&doc).unwrap(),
+        )
+        .unwrap();
         assert!(verify_catalog(port, &catalog, &assets).is_err());
     }
 
@@ -1156,12 +1223,18 @@ mod tests {
     fn texture_verifier_accepts_script_only_empty_groups() {
         let temp = tempfile::tempdir().unwrap();
         let port = temp.path();
-        let catalog = serde_json::json!({"schema_version":3,"sources":{"cfg.img":"cfg.json"}});
-        let assets = BTreeSet::from(["cfg.json".to_owned()]);
+        fs::create_dir_all(port.join("textures")).unwrap();
+        let catalog =
+            serde_json::json!({"schema_version":3,"sources":{"cfg.img":"textures/cfg.json"}});
+        let assets = BTreeSet::from(["textures/cfg.json".to_owned()]);
         let doc = serde_json::json!({"schema_version":3,"groups":[],"entries":[
             {"name":"#texanime","script":[{"command":"TEX_ANIME_DATA_END","args":[]}]}
         ]});
-        fs::write(port.join("cfg.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
+        fs::write(
+            port.join("textures/cfg.json"),
+            serde_json::to_vec(&doc).unwrap(),
+        )
+        .unwrap();
         verify_catalog(port, &catalog, &assets).unwrap();
     }
 
@@ -1170,7 +1243,8 @@ mod tests {
         fs::create_dir_all(data.join("audio")).unwrap();
         fs::write(data.join("script.stb"), b"unrelated script").unwrap();
         fs::write(data.join("audio/sample.wav"), b"RIFF converted PCM").unwrap();
-        fs::write(data.join("audio/sample.png"), b"png").unwrap();
+        fs::create_dir_all(data.join("textures/audio")).unwrap();
+        fs::write(data.join("textures/audio/sample.png"), b"png").unwrap();
         fs::write(data.join("manifest.json"), b"stale manifest").unwrap();
         for (name, bytes) in super::super::configs::embedded_documents() {
             let path = data.join(name);
@@ -1210,7 +1284,11 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["audio/sample.png", "audio/sample.wav", "script.stb"]
+            [
+                "audio/sample.wav",
+                "script.stb",
+                "textures/audio/sample.png"
+            ]
         );
         drop(archive);
         let mut changed = read_marker(&root).unwrap();

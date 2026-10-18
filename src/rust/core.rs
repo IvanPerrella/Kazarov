@@ -512,6 +512,16 @@ fn extract_stages(
     });
     let texture_plan = texture_plan?;
     let audio_plan = audio_plan?;
+    let texture_paths: std::collections::BTreeMap<String, String> = texture_plan
+        .documents
+        .iter()
+        .map(|document| {
+            (
+                document.source_alias.clone(),
+                document.document_path.clone(),
+            )
+        })
+        .collect();
     let texture_sources = texture_plan.documents.len() as u64;
     let pngs = texture_plan.png_names.len() as u64;
     let mut model_plan = pool.install(|| {
@@ -529,14 +539,30 @@ fn extract_stages(
     consumed.extend(configs::gameplay_source_aliases(&inventory));
     let converted_aliases = consumed.clone();
     let (script_consumed, script_jobs) =
-        native_scripts::plan_jobs(&inventory, &converted_aliases, &profiles)?;
+        native_scripts::plan_jobs(&inventory, &converted_aliases, &profiles, &texture_paths)?;
     consumed.extend(script_consumed);
+    let texture_members = texture_plan
+        .documents
+        .iter()
+        .filter(|document| {
+            !model_plan
+                .embedded_texture_sources
+                .contains(&document.source_alias)
+                && !model_plan.consumed.contains(&document.source_alias)
+        })
+        .map(|document| {
+            (
+                document.source_alias.clone(),
+                document.document_path.clone(),
+            )
+        })
+        .collect();
     let mut all_jobs = texture_plan
         .into_jobs_without_documents(&model_plan.embedded_texture_sources, &model_plan.consumed);
     all_jobs.extend(audio_plan.jobs);
     all_jobs.extend(model_plan.into_initial_jobs());
     all_jobs.extend(script_jobs);
-    all_jobs.extend(packs::plan_jobs(&inventory, &consumed)?);
+    all_jobs.extend(packs::plan_jobs(&inventory, &consumed, &texture_members)?);
     let gameplay_documents: Vec<_> = configs::embedded_documents().collect();
     for chunk in gameplay_documents.chunks(128) {
         let documents = chunk.to_vec();
@@ -637,6 +663,7 @@ fn extract_stages(
             &inventory,
             &converted_aliases,
             &profiles,
+            &texture_paths,
             &phase,
         )
     })?;

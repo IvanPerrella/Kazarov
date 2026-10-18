@@ -122,13 +122,18 @@ pub fn assemble_retained(
 }
 
 /// Plans independent ZIP jobs for source bytes not claimed by a converter.
-pub fn plan_jobs(inventory: &Inventory, consumed: &HashSet<String>) -> CoreResult<Vec<Job>> {
+pub fn plan_jobs(
+    inventory: &Inventory,
+    consumed: &HashSet<String>,
+    texture_documents: &BTreeMap<String, String>,
+) -> CoreResult<Vec<Job>> {
     fn visit(
         inventory: &Inventory,
         consumed: &HashSet<String>,
         alias: &str,
         nested: bool,
         jobs: &mut Vec<Job>,
+        texture_documents: &BTreeMap<String, String>,
     ) -> CoreResult<()> {
         if consumed.contains(alias) {
             return Ok(());
@@ -145,7 +150,8 @@ pub fn plan_jobs(inventory: &Inventory, consumed: &HashSet<String>) -> CoreResul
                 "{}/pack.json",
                 folder_path(alias).to_string_lossy().replace('\\', "/")
             );
-            let bytes = serde_json::to_vec(&json!({"schema_version":1,"kind":"asset_directory"}))?;
+            let bytes =
+                serde_json::to_vec(&directory_marker(inventory, alias, texture_documents)?)?;
             jobs.push(Job {
                 category: Category::Pack,
                 label: name.clone(),
@@ -162,7 +168,14 @@ pub fn plan_jobs(inventory: &Inventory, consumed: &HashSet<String>) -> CoreResul
                     {
                         continue;
                     }
-                    visit(inventory, consumed, &member.alias, true, jobs)?;
+                    visit(
+                        inventory,
+                        consumed,
+                        &member.alias,
+                        true,
+                        jobs,
+                        texture_documents,
+                    )?;
                 }
             }
             return Ok(());
@@ -194,9 +207,92 @@ pub fn plan_jobs(inventory: &Inventory, consumed: &HashSet<String>) -> CoreResul
     }
     let mut jobs = Vec::new();
     for root in inventory.roots() {
-        visit(inventory, consumed, &root.alias, false, &mut jobs)?;
+        visit(
+            inventory,
+            consumed,
+            &root.alias,
+            false,
+            &mut jobs,
+            texture_documents,
+        )?;
     }
     Ok(jobs)
+}
+
+/// Records only relocated direct texture members belonging to this PACK.
+fn directory_marker(
+    inventory: &Inventory,
+    alias: &str,
+    texture_documents: &BTreeMap<String, String>,
+) -> CoreResult<Value> {
+    let mut document = json!({"schema_version":1,"kind":"asset_directory"});
+    let mut textures = BTreeMap::new();
+    for member in inventory.members(alias).unwrap_or_default() {
+        if let Some(path) = texture_documents.get(&member.alias) {
+            let logical = super::textures::legacy_document_path(&member.alias)?;
+            let name = logical.rsplit('/').next().unwrap_or(&logical);
+            if textures
+                .insert(name.to_ascii_lowercase(), json!({"name":name,"path":path}))
+                .is_some()
+            {
+                return Err(fail(format!(
+                    "duplicate logical texture member: {alias}/{name}"
+                )));
+            }
+        }
+    }
+    if !textures.is_empty() {
+        document["texture_members"] = Value::Array(textures.into_values().collect());
+    }
+    Ok(document)
+}
+
+/// Accepts safe direct logical names and explicit physical texture paths.
+fn valid_marker(document: &Value) -> bool {
+    let Some(object) = document.as_object() else {
+        return false;
+    };
+    if object.get("schema_version") != Some(&json!(1))
+        || object.get("kind") != Some(&json!("asset_directory"))
+        || object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "schema_version" | "kind" | "texture_members"))
+    {
+        return false;
+    }
+    let Some(members) = object.get("texture_members") else {
+        return true;
+    };
+    let Some(members) = members.as_array() else {
+        return false;
+    };
+    let mut names = BTreeSet::new();
+    let safe = |value: &str| {
+        !value.is_empty()
+            && !value.contains(['\\', ':', '\0'])
+            && value
+                .split('/')
+                .all(|part| !matches!(part, "" | "." | ".."))
+    };
+    members.iter().all(|member| {
+        let Some(object) = member.as_object() else {
+            return false;
+        };
+        let (Some(name), Some(path)) = (
+            object.get("name").and_then(Value::as_str),
+            object.get("path").and_then(Value::as_str),
+        ) else {
+            return false;
+        };
+        object.len() == 2
+            && safe(name)
+            && !name.contains('/')
+            && name.to_ascii_lowercase().ends_with(".json")
+            && safe(path)
+            && path.starts_with("textures/")
+            && path.to_ascii_lowercase().ends_with(".json")
+            && names.insert(name.to_ascii_lowercase())
+    })
 }
 
 fn fail(message: impl Into<String>) -> CoreError {
@@ -324,7 +420,7 @@ fn publish_pack(
     let marker = target.join("pack.json");
     if marker.is_file() {
         let document: Value = serde_json::from_slice(&fs::read(&marker)?)?;
-        if document != json!({"schema_version":1,"kind":"asset_directory"}) {
+        if !valid_marker(&document) {
             return Err(fail("PACK marker collides with an existing asset"));
         }
     }
@@ -527,7 +623,7 @@ pub(crate) fn audit_entry(name: &str, bytes: &[u8]) -> CoreResult<()> {
     let file_name = name.rsplit(['/', '\\']).next().unwrap_or(name);
     if file_name == "pack.json" {
         let document: Value = serde_json::from_slice(bytes)?;
-        if document != json!({"schema_version":1,"kind":"asset_directory"}) {
+        if !valid_marker(&document) {
             return Err(fail("invalid asset directory marker"));
         }
     }
@@ -554,6 +650,54 @@ mod tests {
         }
         output.extend([0; 80]);
         output
+    }
+    #[test]
+    fn marker_preserves_only_direct_texture_members() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = pack(&[("other.img", b"image")]);
+        fs::write(
+            temp.path().join("one.pac"),
+            pack(&[("owned.img", b"image"), ("nested.pac", &nested)]),
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("two.pac"),
+            pack(&[("unrelated.img", b"image")]),
+        )
+        .unwrap();
+        let source = super::super::archive::SourceTree::directory(temp.path()).unwrap();
+        let inventory = Inventory::build(&source).unwrap();
+        let documents = BTreeMap::from([
+            (
+                "one.pac/owned.img".into(),
+                "textures/shared/owned.json".into(),
+            ),
+            (
+                "one.pac/nested.pac/other.img".into(),
+                "textures/shared/other.json".into(),
+            ),
+            (
+                "two.pac/unrelated.img".into(),
+                "textures/shared/unrelated.json".into(),
+            ),
+        ]);
+        let marker = directory_marker(&inventory, "one.pac", &documents).unwrap();
+        assert_eq!(
+            marker["texture_members"],
+            json!([{"name":"owned.json","path":"textures/shared/owned.json"}])
+        );
+        assert!(valid_marker(&marker));
+        audit_entry("one.pac/pack.json", &serde_json::to_vec(&marker).unwrap()).unwrap();
+        for members in [
+            json!([{"name":"../bad.json","path":"textures/a.json"}]),
+            json!([{"name":"a.json","path":"textures/../a.json"}]),
+            json!([{"name":"a.json","path":"data/a.json"}]),
+            json!([{"name":"a.json","path":"textures/a.json"},{"name":"A.json","path":"textures/b.json"}]),
+        ] {
+            assert!(!valid_marker(
+                &json!({"schema_version":1,"kind":"asset_directory","texture_members":members})
+            ));
+        }
     }
     #[test]
     fn folders_preserve_surviving_members_and_never_restore_converted_payloads() {
