@@ -17,6 +17,7 @@
 
 #include "gfx/context.hpp"
 #include "gfx/displaylist.hpp"
+#include "kazarov/log.hpp"
 
 namespace gfx {
 
@@ -26,17 +27,21 @@ Context g;
 
 namespace {
 
-// Writes a message to stderr and, on Android, where stderr is not shown, to the system log.
-void Report([[maybe_unused]] bool fatal, const char *format, std::va_list args) {
+// Formats a message, writes it to the Android system log, where stderr is not shown, and returns it.
+std::string Format([[maybe_unused]] bool fatal, const char *format, std::va_list args) {
+    std::va_list size_args{};
+    va_copy(size_args, args);
+    int size = std::vsnprintf(nullptr, 0, format, size_args);
+    va_end(size_args);
+    std::string message(static_cast<std::size_t>(std::max(size, 0)), '\0');
 #ifdef __ANDROID__
     std::va_list log_args{};
     va_copy(log_args, args);
     __android_log_vprint(fatal ? ANDROID_LOG_ERROR : ANDROID_LOG_WARN, "gfx", format, log_args);
     va_end(log_args);
 #endif
-    std::fputs("gfx: ", stderr);
-    std::vfprintf(stderr, format, args);
-    std::fputc('\n', stderr);
+    std::vsnprintf(message.data(), message.size() + 1, format, args);
+    return message;
 }
 
 } // namespace
@@ -44,8 +49,9 @@ void Report([[maybe_unused]] bool fatal, const char *format, std::va_list args) 
 void Fatal(const char *format, ...) {
     std::va_list args;
     va_start(args, format);
-    Report(true, format, args);
+    std::string message = Format(true, format, args);
     va_end(args);
+    kz::Fatal("gfx", message, /*unimplemented=*/false);
     std::exit(1);
 }
 
@@ -55,8 +61,9 @@ void Error(const char *format, ...) {
     }
     std::va_list args;
     va_start(args, format);
-    Report(false, format, args);
+    std::string message = Format(false, format, args);
     va_end(args);
+    kz::Log(kz::LogLevel::Error, "gfx", message);
 }
 
 void Check(VkResult result, const char *call) {
@@ -72,7 +79,7 @@ VkCommandPool g_oneshot_pool = VK_NULL_HANDLE;
 VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT,
                                              VkDebugUtilsMessageTypeFlagsEXT             types,
                                              const VkDebugUtilsMessengerCallbackDataEXT *data, void *) {
-    std::fprintf(stderr, "Vulkan validation: %s\n", data->pMessage);
+    kz::Log(kz::LogLevel::Warning, "Vulkan validation", data->pMessage);
     // General messages are the loader's (layer/driver version notes), not misuse of the API.
     if (types &
         (VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)) {
@@ -262,11 +269,12 @@ void PickPhysicalDevice() {
     g.triangle_fans = g.config.triangle_fans && !chosen.portability_subset;
     g.separate_stencil_masks =
         g.config.separate_stencil_masks && (!chosen.portability_subset || chosen.portability.separateStencilMaskRef);
-    std::fprintf(stderr, "Vulkan: using %s (Vulkan %u.%u.%u)%s\n", g.properties.deviceName,
-                 VK_API_VERSION_MAJOR(g.properties.apiVersion), VK_API_VERSION_MINOR(g.properties.apiVersion),
-                 VK_API_VERSION_PATCH(g.properties.apiVersion), g.offscreen ? ", offscreen" : "");
+    kz::Logf(kz::LogLevel::Info, "Vulkan", "using {} (Vulkan {}.{}.{}){}",
+             static_cast<const char *>(g.properties.deviceName),
+             VK_API_VERSION_MAJOR(g.properties.apiVersion), VK_API_VERSION_MINOR(g.properties.apiVersion),
+             VK_API_VERSION_PATCH(g.properties.apiVersion), g.offscreen ? ", offscreen" : "");
     if (std::vector<std::string> workarounds = PortabilityWorkarounds(chosen); !workarounds.empty()) {
-        std::fprintf(stderr, "Vulkan: portability subset: %s\n", Join(workarounds).c_str());
+        kz::Logf(kz::LogLevel::Info, "Vulkan", "portability subset: {}", Join(workarounds));
     }
 }
 

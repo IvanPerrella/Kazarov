@@ -18,6 +18,8 @@
 #include <system_error>
 #include <vector>
 
+#include "kazarov/log.hpp"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -197,11 +199,9 @@ void PathsSetSaveRoot(const fs::path &root) {
 
 const fs::path &PathsDataRoot() {
     if (!data_root) {
-        std::optional<fs::path> chosen = data_override ? data_override :
-                                         run_override ? std::optional<fs::path>(*run_override / "data") :
-                                                        FromEnvironment(config.env_data.c_str());
-        data_root = Absolute(chosen.value_or(config.coherent_default_root ? Installed("data") :
-                                                                          Local("data").value_or(Installed("data"))));
+        std::optional<fs::path> chosen = data_override ? data_override : run_override ? std::optional<fs::path>(*run_override / "data")
+                                                                                      : FromEnvironment(config.env_data.c_str());
+        data_root = Absolute(chosen.value_or(config.coherent_default_root ? Installed("data") : Local("data").value_or(Installed("data"))));
     }
     return *data_root;
 }
@@ -212,9 +212,8 @@ const fs::path &PathsSaveRoot() {
     if (save_root) {
         return *save_root;
     }
-    std::optional<fs::path> chosen = save_override ? save_override :
-                                     run_override ? std::optional<fs::path>(*run_override / "saves") :
-                                                    FromEnvironment(config.env_save.c_str());
+    std::optional<fs::path> chosen = save_override ? save_override : run_override ? std::optional<fs::path>(*run_override / "saves")
+                                                                                  : FromEnvironment(config.env_save.c_str());
     std::vector<fs::path>   candidates;
     if (chosen) {
         candidates.push_back(Absolute(*chosen));
@@ -236,7 +235,7 @@ const fs::path &PathsSaveRoot() {
             return *(save_root = candidate);
         }
     }
-    std::fprintf(stderr, "cannot create the save directory %s: %s\n", PathsDisplay(candidates[0]).c_str(),
-                 error.message().c_str());
+    kz::Logf(kz::LogLevel::Error, "paths", "cannot create the save directory {}: {}", PathsDisplay(candidates[0]),
+             error.message());
     return *(save_root = candidates[0]);
 }

@@ -7,7 +7,6 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
-#include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <numbers>
@@ -17,10 +16,11 @@
 #include <utility>
 #include <vector>
 
+#include "kazarov/log.hpp"
 #include "platform/clock.hpp"
-#include "platform/settings.hpp"
 #include "platform/gamepad_map.hpp"
 #include "platform/mouse.hpp"
+#include "platform/settings.hpp"
 #include "platform/touchpad.hpp"
 #include "platform/window.hpp"
 
@@ -161,8 +161,8 @@ struct PadSlot {
     bool         rumble_sent = false;
     Uint64       rumble_time = 0;
     // The lightbar colour the game asked for, kept to restore when the pad reconnects.
-    bool         led_wanted = false;
-    Uint8        led[3] = {};
+    bool  led_wanted = false;
+    Uint8 led[3] = {};
 };
 
 // Which device the player touched last (InputActiveGlyphFamily): false until a key or the mouse is
@@ -542,7 +542,7 @@ void SyncGamepads() {
             if (slot.gamepad == nullptr) {
                 slot.gamepad = SDL_OpenGamepad(ids[i]);
                 if (slot.gamepad == nullptr) {
-                    std::fprintf(stderr, "input: SDL_OpenGamepad: %s\n", SDL_GetError());
+                    kz::Logf(kz::LogLevel::Warning, "input", "SDL_OpenGamepad: {}", SDL_GetError());
                 } else {
                     EnableGyro(slot.gamepad);
                     SDL_SetGamepadPlayerIndex(slot.gamepad, static_cast<int>(&slot - g_slots.data()));
@@ -689,7 +689,7 @@ void InputInit() {
     if (SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
         g_gamepad_subsystem = true;
     } else {
-        std::fprintf(stderr, "input: no gamepads: %s\n", SDL_GetError());
+        kz::Logf(kz::LogLevel::Warning, "input", "no gamepads: {}", SDL_GetError());
     }
     InputApplyConfig(SettingsGet());
     WindowAddEventHook(InputHandleEvent);
@@ -701,7 +701,7 @@ void InputApplyConfig(const HostSettings &config) {
     for (const ConfigKeyBinding &binding : config.key_bindings) {
         std::vector<std::string_view> names(binding.keys.begin(), binding.keys.end());
         if (!InputBindKeys(binding.action, names)) {
-            std::fprintf(stderr, "input: cannot bind %s\n", binding.action.c_str());
+            kz::Logf(kz::LogLevel::Warning, "input", "cannot bind {}", binding.action);
         }
     }
     g_stick_sensitivity = config.stick_sensitivity;
@@ -732,7 +732,7 @@ void InputApplyConfig(const HostSettings &config) {
     for (const std::string &name : config.mouse_release_keys) {
         int scancode = InputScancodeFromName(name);
         if (scancode < 0) {
-            std::fprintf(stderr, "input: unknown mouse_release key %s\n", name.c_str());
+            kz::Logf(kz::LogLevel::Warning, "input", "unknown mouse_release key {}", name);
             continue;
         }
         mouse.release_scancodes.push_back(scancode);
@@ -848,8 +848,7 @@ void InputPoll() {
             ReadGamepad(g_slots[pad].gamepad, state);
         }
         g_device[pad] = state;
-        if (pad == 0 && g_slots[0].gamepad != nullptr && (state.buttons != 0 || Deflected(state.left_x) || Deflected(state.left_y) ||
-                                                           Deflected(state.right_x) || Deflected(state.right_y))) {
+        if (pad == 0 && g_slots[0].gamepad != nullptr && (state.buttons != 0 || Deflected(state.left_x) || Deflected(state.left_y) || Deflected(state.right_x) || Deflected(state.right_y))) {
             g_last_keyboard = false;
         }
         Compose(pad);
