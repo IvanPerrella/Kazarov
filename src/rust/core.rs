@@ -297,15 +297,25 @@ pub fn extract_with_progress(
     jobs: usize,
     progress: &(dyn Fn(f32, &'static str) + Sync),
 ) -> CoreResult<ExtractReport> {
-    Reporter::new(progress).run(|reporter| {
-        extract_stages(
-            source,
-            data_out,
-            jobs,
-            reporter,
-            ScriptPublicationPolicy::Retain,
-        )
-    })
+    extract_with_progress_policy(
+        source,
+        data_out,
+        jobs,
+        progress,
+        ScriptPublicationPolicy::Retain,
+    )
+}
+
+/// Extracts and publishes data under an explicit compiled-script publication policy.
+pub fn extract_with_progress_policy(
+    source: &Path,
+    data_out: &Path,
+    jobs: usize,
+    progress: &(dyn Fn(f32, &'static str) + Sync),
+    script_policy: ScriptPublicationPolicy,
+) -> CoreResult<ExtractReport> {
+    Reporter::new(progress)
+        .run(|reporter| extract_stages(source, data_out, jobs, reporter, script_policy))
 }
 
 const WORKER_STACK: usize = 16 << 20;
@@ -918,10 +928,11 @@ mod tests {
         assert!(retained_names.contains(&"bar.stb_"));
 
         let luau_root = temp.path().join("luau-only");
-        extract_with_policy(
+        extract_with_progress_policy(
             &source,
             &luau_root.join("data"),
             2,
+            &|_, _| {},
             ScriptPublicationPolicy::LuauOnly,
         )
         .unwrap();

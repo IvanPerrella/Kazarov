@@ -50,6 +50,12 @@ mod ffi {
         ) -> Result<bool>;
         /// Runs first-run setup on the main thread; false means the user closed it.
         fn setup_data(title: &str, data_root: &str) -> Result<bool>;
+        /// Runs first-run setup under an explicit compiled-script publication policy.
+        fn setup_data_with_script_policy(
+            title: &str,
+            data_root: &str,
+            policy: ScriptPublicationPolicy,
+        ) -> Result<bool>;
 
         /// Immutable, thread-safe view of a ZIP asset archive.
         type Archive;
@@ -80,6 +86,15 @@ fn setup_data(title: &str, data_root: &str) -> Result<bool, core::CoreError> {
     setup::run(title, data_root.as_ref())
 }
 
+fn setup_data_with_script_policy(
+    title: &str,
+    data_root: &str,
+    policy: ffi::ScriptPublicationPolicy,
+) -> Result<bool, core::CoreError> {
+    let policy = core_script_publication_policy(policy)?;
+    setup::run_with_policy(title, data_root.as_ref(), policy)
+}
+
 fn bridge_smoke(value: &str) -> Result<String, core::CoreError> {
     if value == "error" {
         return Err(core::CoreError("bridge smoke error".into()));
@@ -107,11 +122,7 @@ fn extract_with_script_policy(
     jobs: usize,
     policy: ffi::ScriptPublicationPolicy,
 ) -> Result<ffi::ExtractReport, core::CoreError> {
-    let policy = match policy {
-        ffi::ScriptPublicationPolicy::Retain => core::ScriptPublicationPolicy::Retain,
-        ffi::ScriptPublicationPolicy::LuauOnly => core::ScriptPublicationPolicy::LuauOnly,
-        _ => return Err(core::CoreError("invalid script publication policy".into())),
-    };
+    let policy = core_script_publication_policy(policy)?;
     let report = core::extract_with_policy(source.as_ref(), data_out.as_ref(), jobs, policy)?;
     Ok(ffi::ExtractReport {
         files: report.files,
@@ -133,9 +144,31 @@ fn script_publication_policy_from_repr(
     }
 }
 
+fn core_script_publication_policy(
+    policy: ffi::ScriptPublicationPolicy,
+) -> Result<core::ScriptPublicationPolicy, core::CoreError> {
+    match policy {
+        ffi::ScriptPublicationPolicy::Retain => Ok(core::ScriptPublicationPolicy::Retain),
+        ffi::ScriptPublicationPolicy::LuauOnly => Ok(core::ScriptPublicationPolicy::LuauOnly),
+        _ => Err(core::CoreError("invalid script publication policy".into())),
+    }
+}
+
 #[cfg(test)]
 mod script_publication_policy_tests {
     use super::*;
+
+    #[test]
+    fn maps_both_publication_policies() {
+        assert_eq!(
+            core_script_publication_policy(ffi::ScriptPublicationPolicy::Retain).unwrap(),
+            core::ScriptPublicationPolicy::Retain
+        );
+        assert_eq!(
+            core_script_publication_policy(ffi::ScriptPublicationPolicy::LuauOnly).unwrap(),
+            core::ScriptPublicationPolicy::LuauOnly
+        );
+    }
 
     #[test]
     fn rejects_unknown_policy_values() {
@@ -529,11 +562,7 @@ fn current_with_script_policy(
     data_root: &str,
     policy: ffi::ScriptPublicationPolicy,
 ) -> Result<bool, core::CoreError> {
-    let policy = match policy {
-        ffi::ScriptPublicationPolicy::Retain => core::ScriptPublicationPolicy::Retain,
-        ffi::ScriptPublicationPolicy::LuauOnly => core::ScriptPublicationPolicy::LuauOnly,
-        _ => return Err(core::CoreError("invalid script publication policy".into())),
-    };
+    let policy = core_script_publication_policy(policy)?;
     core::current_with_policy(source.as_ref(), data_root.as_ref(), policy)
 }
 
