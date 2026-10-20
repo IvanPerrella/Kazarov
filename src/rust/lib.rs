@@ -16,9 +16,20 @@ mod ffi {
         textures: u64,
     }
 
+    enum ScriptPublicationPolicy {
+        Retain,
+        LuauOnly,
+    }
+
     extern "Rust" {
         fn bridge_smoke(value: &str) -> Result<String>;
         fn extract(source: &str, data_out: &str, jobs: usize) -> Result<ExtractReport>;
+        fn extract_with_script_policy(
+            source: &str,
+            data_out: &str,
+            jobs: usize,
+            policy: ScriptPublicationPolicy,
+        ) -> Result<ExtractReport>;
         fn list(source: &str) -> Result<String>;
         fn sound(source: &str) -> Result<String>;
         fn refresh_configs(source: &str, config_dir: &str) -> Result<usize>;
@@ -32,6 +43,11 @@ mod ffi {
         ) -> Result<usize>;
         fn check(data_root: &str) -> Result<CheckReport>;
         fn current(source: &str, data_root: &str) -> Result<bool>;
+        fn current_with_script_policy(
+            source: &str,
+            data_root: &str,
+            policy: ScriptPublicationPolicy,
+        ) -> Result<bool>;
         /// Runs first-run setup on the main thread; false means the user closed it.
         fn setup_data(title: &str, data_root: &str) -> Result<bool>;
 
@@ -83,6 +99,49 @@ fn extract(
         texture_sources: report.texture_sources,
         pngs: report.pngs,
     })
+}
+
+fn extract_with_script_policy(
+    source: &str,
+    data_out: &str,
+    jobs: usize,
+    policy: ffi::ScriptPublicationPolicy,
+) -> Result<ffi::ExtractReport, core::CoreError> {
+    let policy = match policy {
+        ffi::ScriptPublicationPolicy::Retain => core::ScriptPublicationPolicy::Retain,
+        ffi::ScriptPublicationPolicy::LuauOnly => core::ScriptPublicationPolicy::LuauOnly,
+        _ => return Err(core::CoreError("invalid script publication policy".into())),
+    };
+    let report = core::extract_with_policy(source.as_ref(), data_out.as_ref(), jobs, policy)?;
+    Ok(ffi::ExtractReport {
+        files: report.files,
+        bytes: report.bytes,
+        texture_sources: report.texture_sources,
+        pngs: report.pngs,
+    })
+}
+
+fn script_publication_policy_from_repr(
+    value: u8,
+) -> Result<core::ScriptPublicationPolicy, core::CoreError> {
+    match value {
+        0 => Ok(core::ScriptPublicationPolicy::Retain),
+        1 => Ok(core::ScriptPublicationPolicy::LuauOnly),
+        _ => Err(core::CoreError(format!(
+            "invalid script publication policy value: {value}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod script_publication_policy_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_unknown_policy_values() {
+        assert!(script_publication_policy_from_repr(2).is_err());
+        assert!(script_publication_policy_from_repr(u8::MAX).is_err());
+    }
 }
 
 fn list(source: &str) -> Result<String, core::CoreError> {
@@ -463,6 +522,19 @@ fn check(data_root: &str) -> Result<ffi::CheckReport, core::CoreError> {
 
 fn current(source: &str, data_root: &str) -> Result<bool, core::CoreError> {
     core::current(source.as_ref(), data_root.as_ref())
+}
+
+fn current_with_script_policy(
+    source: &str,
+    data_root: &str,
+    policy: ffi::ScriptPublicationPolicy,
+) -> Result<bool, core::CoreError> {
+    let policy = match policy {
+        ffi::ScriptPublicationPolicy::Retain => core::ScriptPublicationPolicy::Retain,
+        ffi::ScriptPublicationPolicy::LuauOnly => core::ScriptPublicationPolicy::LuauOnly,
+        _ => return Err(core::CoreError("invalid script publication policy".into())),
+    };
+    core::current_with_policy(source.as_ref(), data_root.as_ref(), policy)
 }
 
 fn open_archive(path: &str) -> Result<Box<Archive>, core::CoreError> {
