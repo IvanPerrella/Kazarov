@@ -1,5 +1,40 @@
 #include "platform/memory.hpp"
 
+#ifdef __PSP__
+
+#include <cstdlib>
+#include <malloc.h>
+#include <cstring>
+#include <format>
+
+#include "kazarov/log.hpp"
+
+// No virtual memory: an arena is real RAM from the first byte, without a guard page.
+// ponytail: overflows are caught only by the arenas' own limit checks, not by a fault.
+std::size_t ArenaMemoryPageSize() { return 64; }
+
+ArenaMemory ArenaMemoryMap(std::size_t bytes, std::size_t lead) {
+    std::size_t capacity = (bytes == 0 ? 64 : bytes + 63) / 64 * 64;
+    std::size_t map_size = (lead + capacity + 63) / 64 * 64;
+    auto       *map = static_cast<unsigned char *>(memalign(64, map_size));
+    if (map == nullptr) {
+        kz::Abort("arena", std::format("cannot allocate {} bytes", map_size));
+    }
+    std::memset(map, 0, map_size);
+    return {map, map_size, map + map_size - capacity, capacity, lead};
+}
+
+void ArenaMemoryZero(const ArenaMemory &memory) { std::memset(memory.map, 0, memory.map_size); }
+void ArenaMemoryZeroByRemap(const ArenaMemory &memory) { ArenaMemoryZero(memory); }
+const unsigned char *ArenaMemoryGuard(const ArenaMemory &memory) { return memory.base + memory.capacity; }
+
+void ArenaMemoryUnmap(ArenaMemory &memory) {
+    std::free(memory.map);
+    memory = {};
+}
+
+#else
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -107,3 +142,5 @@ void ArenaMemoryUnmap(ArenaMemory &memory) {
     }
     memory = {};
 }
+
+#endif // __PSP__

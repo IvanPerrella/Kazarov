@@ -36,6 +36,11 @@ void ArenaRequireOneAbove4GiB(const void *const *bases, std::size_t count);
 // the one nearest an address inside the image is the one that was truncated. Exact wherever the
 // image sits.
 inline std::uintptr_t WidenNear(std::uintptr_t anchor, std::uint32_t low) {
+#if UINTPTR_MAX == 0xFFFFFFFF
+    // 32-bit pointers (PSP): nothing was truncated.
+    (void)anchor;
+    return low;
+#else
     constexpr std::uintptr_t kWindow = std::uintptr_t{1} << 32;
     std::uintptr_t           candidate = (anchor & ~(kWindow - 1)) | low;
     if (candidate > anchor && candidate - anchor > kWindow / 2 && candidate >= kWindow) {
@@ -44,6 +49,7 @@ inline std::uintptr_t WidenNear(std::uintptr_t anchor, std::uint32_t low) {
         candidate += kWindow;
     }
     return candidate;
+#endif
 }
 
 // A pointer into the executable's image (a global, a static, a literal) back from the int the game

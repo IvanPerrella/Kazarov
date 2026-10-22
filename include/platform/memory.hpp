@@ -28,5 +28,5 @@ void                 ArenaMemoryUnmap(ArenaMemory &memory);
 std::size_t          ArenaMemoryPageSize();
 
 inline bool IsAbove4GiB(const void *pointer) {
-    return reinterpret_cast<std::uintptr_t>(pointer) >> 32 != 0;
+    return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer)) >> 32 != 0;
 }
