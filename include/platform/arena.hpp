@@ -8,7 +8,12 @@
 // Every arena the port carves gets this many times the quadwords retail asked
 // for: the game sizes many allocations with the host's sizeof, which grows
 // with 8-byte pointers.
+#ifdef __PSP__
+// 32-bit pointers lay the game's objects out at the PS2's sizes, and 64 MB has no room for more.
+constexpr int kArenaHeadroom = 1;
+#else
 constexpr int kArenaHeadroom = 4;
+#endif
 
 // A zeroed, 64-byte aligned block of at least `bytes`, with `lead` usable
 // bytes before it, kept for `owner` and handed back to it while it fits. An
