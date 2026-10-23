@@ -35,7 +35,13 @@ function(kz_port_host_library target)
     if(NOT PSP)
         include(${CMAKE_CURRENT_FUNCTION_LIST_DIR}/KazarovGltf.cmake)
     endif()
-    if(NOT TARGET SDL3::SDL3)
+    if(PSP)
+        # The PSP's platform layer is its own (platform_psp/). What is left of SDL is headers, which
+        # the toolchain's include path has; its library would bring a 2D renderer of its own.
+        if(NOT TARGET SDL3::SDL3)
+            add_library(SDL3::SDL3 INTERFACE IMPORTED GLOBAL)
+        endif()
+    elseif(NOT TARGET SDL3::SDL3)
         find_package(SDL3 REQUIRED CONFIG)
     endif()
     if(PSP)
@@ -120,9 +126,11 @@ function(kz_port_host_library target)
         list(FILTER host_sources EXCLUDE REGEX "/gfx/tim2\\.cpp$")
     endif()
     if(PSP)
-        # game_icon.cpp writes desktop icons and shortcuts; the Vulkan renderer gives way to the GE's.
-        list(FILTER host_sources EXCLUDE REGEX "/gfx/[^/]*\\.cpp$|/platform/game_icon\\.cpp$")
-        file(GLOB psp_sources CONFIGURE_DEPENDS ${KZ_PORT_ROOT}/gfx_psp/*.cpp)
+        # game_icon.cpp writes desktop icons and shortcuts; the Vulkan renderer gives way to the GE's,
+        # and SDL's window, input, audio and mouse to the PSP's own.
+        list(FILTER host_sources EXCLUDE REGEX
+             "/gfx/[^/]*\\.cpp$|/platform/(game_icon|window|input|audio|mouse)\\.cpp$")
+        file(GLOB psp_sources CONFIGURE_DEPENDS ${KZ_PORT_ROOT}/gfx_psp/*.cpp ${KZ_PORT_ROOT}/platform_psp/*.cpp)
         list(APPEND host_sources ${psp_sources})
     endif()
 
@@ -131,7 +139,7 @@ function(kz_port_host_library target)
     target_include_directories(${target} PRIVATE ${KZ_PORT_INCLUDE_ROOT} ${generated_dir} ${vendor_dirs})
     if(PSP)
         target_link_libraries(${target} PRIVATE SDL3::SDL3 nlohmann_json::nlohmann_json)
-        target_link_libraries(${target} PUBLIC pspgu pspge pspdisplay)
+        target_link_libraries(${target} PUBLIC pspgu pspge pspdisplay pspaudio pspctrl psppower)
     else()
         target_link_libraries(${target} PRIVATE SDL3::SDL3 Vulkan::Vulkan nlohmann_json::nlohmann_json fastgltf::fastgltf)
     endif()

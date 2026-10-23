@@ -245,6 +245,12 @@ std::vector<DisplayModeSize> WindowDisplayModes() {
     return sizes;
 }
 
+void WindowRequestQuit() {
+    SDL_Event event{};
+    event.type = SDL_EVENT_QUIT;
+    SDL_PushEvent(&event);
+}
+
 bool WindowPollEvents() {
     bool      running = true;
     SDL_Event event;

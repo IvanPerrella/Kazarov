@@ -28,6 +28,18 @@ void ArenaClearAll();
 // Retired blocks count: the game can still hold a pointer into one.
 bool ArenaContains(const void *pointer);
 
+#ifdef __PSP__
+// The PSP has no virtual memory to give each arena a block of its own, nor room for retail's
+// 27 MB GlobalDataBuffer beside the program on a PSP-1000. Arenas are carved one after another,
+// as retail carves them, from a pool of the memory there is: the 4 MB of volatile memory and as
+// much of the heap as the rest of the program can spare. A zeroed, 64-byte aligned block with
+// `lead` bytes of the pool before it (which overlap the block carved before, as in retail).
+unsigned char *ArenaPoolCarve(std::size_t bytes, std::size_t lead = 0);
+
+// Zeroes what was carved and starts again at the pool's start: retail's clear of GlobalDataBuffer.
+void ArenaPoolReset();
+#endif
+
 // Takes the bases rather than reading the blocks, so tests drive the check ArenaBlock runs.
 void ArenaRequireOneAbove4GiB(const void *const *bases, std::size_t count);
 

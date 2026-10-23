@@ -50,9 +50,11 @@ constexpr int      kFrameStride = 512;
 constexpr uint32_t kFrameBytes = kFrameStride * kScreenHeight * 4;
 constexpr uint32_t kDepthOffset = kFrameBytes * 2;
 constexpr uint32_t kTargetPoolStart = kDepthOffset + kFrameStride * kScreenHeight * 2;
-constexpr uint32_t kListBytes = 1u << 20;
+constexpr uint32_t kListBytes = 384u << 10;
 // Room a draw may need in the list before it is flushed: its commands, vertices and a palette copy.
-constexpr uint32_t kListMargin = 96u << 10;
+constexpr uint32_t kListMargin = 64u << 10;
+// Vertex data past this size goes to the heap instead of the list, until the GE is done with it.
+constexpr uint32_t kSpillBytes = 64u << 10;
 constexpr uint32_t kMaxTextureSize = 512;
 
 alignas(64) uint32_t g_list[kListBytes / 4];
@@ -127,6 +129,7 @@ struct State {
     bool          interp_no_interpolation = false;
     Interp2D      interp_2d;
     bool          warned_prog0 = false;
+    std::vector<void *> spills;
 } g;
 
 uint8_t *VramCached(uint32_t offset) {
@@ -310,6 +313,10 @@ void CloseList() {
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
     g.list_open = false;
     g.serial++;
+    for (void *spill : g.spills) {
+        std::free(spill);
+    }
+    g.spills.clear();
 }
 
 // Waits for what the GE has queued, so memory its draws read can change, and goes on in a new list.
@@ -321,15 +328,32 @@ void Flush() {
     OpenList();
 }
 
+// Room in the list for a draw's commands and what of its data stays in the list: reserved before
+// its state is sent, so nothing flushes the list between the two.
 void EnsureListRoom(uint32_t bytes) {
     if (g.list_open && static_cast<uint32_t>(sceGuCheckList()) + bytes + kListMargin > kListBytes) {
         Flush();
     }
 }
 
+// What of a draw's data of this size lands in the list rather than spilling to the heap.
+uint32_t InList(uint32_t bytes) { return bytes > kSpillBytes ? 0 : (bytes + 15) & ~15u; }
+
+// Data a reserved draw puts in the list, or on the heap when it is large.
 void *ListMemory(uint32_t bytes) {
-    EnsureListRoom(bytes);
-    return sceGuGetMemory(static_cast<int>((bytes + 15) & ~15u));
+    bytes = (bytes + 15) & ~15u;
+    if (bytes > kSpillBytes) {
+        void *spill = memalign(16, bytes);
+        if (spill == nullptr) {
+            Flush();
+            spill = memalign(16, bytes);
+        }
+        g.spills.push_back(spill);
+        // Written through the uncached mirror, as the list is; no stale line may be written over it.
+        sceKernelDcacheWritebackInvalidateRange(spill, bytes);
+        return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(spill) | 0x40000000u);
+    }
+    return sceGuGetMemory(static_cast<int>(bytes));
 }
 
 void Present() {
@@ -671,7 +695,7 @@ void Draw2DNow(Primitive primitive, std::span<const Vertex2D> vertices, const Te
     if (count == 0) {
         return;
     }
-    EnsureListRoom(count * sizeof(GeVertex2D) + 2048);
+    EnsureListRoom(InList(count * sizeof(GeVertex2D)) + 4096);
     ApplyCommon(state);
     TexelMap texels;
     ApplyTexture(binding, state, false, texels);
@@ -957,12 +981,14 @@ GeVertex3D ToGe(const Vertex3D &v) {
 constexpr int kMeshVertexType =
     GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_NORMAL_32BITF | GU_VERTEX_32BITF | GU_INDEX_16BIT | GU_TRANSFORM_3D;
 
+// The caller has reserved kMeshCommandBytes in the list.
+constexpr uint32_t kMeshCommandBytes = 8192;
+
 void DrawMeshNow(const GeVertex3D *vertices, const uint16_t *indices, uint32_t count, const MeshConstants &k,
                  const TextureBinding &binding, const DrawState &state) {
     if (!g.list_open || count == 0 || !TargetOf(g.target).drawable) {
         return;
     }
-    EnsureListRoom(4096);
     ApplyCommon(state);
     TexelMap texels;
     ApplyTexture(binding, state, true, texels);
@@ -1050,6 +1076,7 @@ bool CpuBlit(TextureHandle src, Rect sr, TextureHandle dst, Rect dr) {
 
 // A copy or blit drawn by the GE into a render target or the frame.
 bool GpuBlit(TextureHandle src, Rect sr, TextureHandle dst, Rect dr, Filter filter) {
+    EnsureListRoom(4096);
     TextureHandle previous = g.target;
     if (previous != dst) {
         g.target = dst;
@@ -1566,6 +1593,7 @@ void DrawMesh(MeshHandle handle, uint32_t first_index, uint32_t index_count, con
     if (g.list) {
         g.list->stats.mesh_draws++;
     }
+    EnsureListRoom(kMeshCommandBytes);
     m->bound_serial = g.serial;
     DrawMeshNow(m->vertices, m->indices.data() + first_index, index_count, constants, texture, state);
 }
@@ -1581,7 +1609,7 @@ void DrawMeshImmediate(std::span<const Vertex3D> vertices, std::span<const uint3
     }
     const uint32_t vertex_bytes = static_cast<uint32_t>(vertices.size() * sizeof(GeVertex3D));
     const uint32_t index_bytes = static_cast<uint32_t>((indices.size() * sizeof(uint16_t) + 15) & ~size_t{15});
-    EnsureListRoom(vertex_bytes + index_bytes + 4096);
+    EnsureListRoom(InList(vertex_bytes) + InList(index_bytes) + kMeshCommandBytes);
     auto *v = static_cast<GeVertex3D *>(ListMemory(vertex_bytes));
     auto *i = static_cast<uint16_t *>(ListMemory(index_bytes));
     for (size_t n = 0; n < vertices.size(); n++) {

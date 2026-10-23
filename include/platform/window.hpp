@@ -92,5 +92,8 @@ struct DisplayModeSize {
 std::vector<DisplayModeSize> WindowDisplayModes();
 // Pumps events; false once the window is asked to close. A pixel-size change reaches the renderer.
 bool WindowPollEvents();
+
+// Ends the program as closing the window does: the next WindowPollEvents returns false.
+void WindowRequestQuit();
 // Sees every event WindowPollEvents pumps, before the window handles it.
 void WindowAddEventHook(void (*hook)(const SDL_Event &event));
