@@ -130,8 +130,9 @@ std::vector<Region> g_regions;
 // sound banks, the game's containers.
 // ponytail: a fixed guess until a PSP-1000 run measures it.
 constexpr std::size_t kHeapReserve = 5u << 20;
-// Retail's GlobalDataBuffer: more is never asked for.
-constexpr std::size_t kRetailBytes = 1690000u * 16;
+// The most a mode carves: the town, with the port's cut of its DataBuffer__2 (Chronicle's
+// dataset.cpp), 1396000 quadwords. Retail's whole GlobalDataBuffer would starve the heap.
+constexpr std::size_t kPoolBytes = 1400000u * 16;
 
 void AcquirePool() {
     std::size_t largest = 0;
@@ -146,9 +147,9 @@ void AcquirePool() {
             too_big = size;
         }
     }
-    std::size_t want = largest > kHeapReserve ? std::min(largest - kHeapReserve, kRetailBytes) : 0;
+    std::size_t want = largest > kHeapReserve ? std::min(largest - kHeapReserve, kPoolBytes) : 0;
     std::size_t have = 0;
-    if (want < kRetailBytes) {
+    if (want < kPoolBytes) {
         // A PSP-1000: its volatile memory too. The system drops that memory's contents when it
         // sleeps, so sleep is held off while it holds the game's arenas.
         void *volatile_memory = nullptr;

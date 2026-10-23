@@ -6,7 +6,7 @@
 // differently from the game's types.h.
 
 // Calls request_stop when the HOME menu's "quit" is chosen, and ends the program a few seconds
-// later if it is still running.
+// later if it is still running. Also sets the CPU to its full 333 MHz.
 void PspInstallExitCallback(void (*request_stop)());
 
 // Bytes the heap has handed out and not had back.

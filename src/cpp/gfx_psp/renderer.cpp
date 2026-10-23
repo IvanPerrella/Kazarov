@@ -19,6 +19,7 @@
 #include <malloc.h>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <pspdisplay.h>
@@ -88,10 +89,11 @@ struct GeVertex2D {
     float    x, y, z;
 };
 
+// Normals in bytes: 28 bytes a vertex rather than 36, for the heap a town's meshes fill.
 struct GeVertex3D {
     float    u, v;
     uint32_t color;
-    float    nx, ny, nz;
+    int8_t   nx, ny, nz, pad;
     float    x, y, z;
 };
 
@@ -361,6 +363,17 @@ void *ListMemory(uint32_t bytes) {
     return sceGuGetMemory(static_cast<int>(bytes));
 }
 
+// The heap is what runs out on a PSP; a move of a megabyte or more is worth a line.
+void ReportMemory() {
+    const std::size_t held = g.texture_bytes + g.mesh_bytes;
+    if (held > g.reported_bytes + (1u << 20) || held + (1u << 20) < g.reported_bytes) {
+        g.reported_bytes = held;
+        std::fprintf(stderr, "gfx: textures %u KiB, meshes %u KiB; the heap holds %u KiB\n",
+                     static_cast<unsigned>(g.texture_bytes >> 10), static_cast<unsigned>(g.mesh_bytes >> 10),
+                     static_cast<unsigned>(mallinfo().uordblks >> 10));
+    }
+}
+
 void Present() {
     CloseList();
     if (g.present_mode == PresentMode::Fifo) {
@@ -368,13 +381,7 @@ void Present() {
     }
     g.display_offset = g.draw_offset;
     g.draw_offset = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sceGuSwapBuffers()));
-    // The heap is what runs out on a PSP; a move of a megabyte or more is worth a line.
-    const std::size_t held = g.texture_bytes + g.mesh_bytes;
-    if (held > g.reported_bytes + (1u << 20) || held + (1u << 20) < g.reported_bytes) {
-        g.reported_bytes = held;
-        std::fprintf(stderr, "gfx: textures %u KiB, meshes %u KiB\n", static_cast<unsigned>(g.texture_bytes >> 10),
-                     static_cast<unsigned>(g.mesh_bytes >> 10));
-    }
+    ReportMemory();
 }
 
 // ---- State ------------------------------------------------------------------------------------
@@ -987,13 +994,17 @@ void ApplyMeshTransform(const MeshConstants &k, const DrawState &s) {
     }
 }
 
+int8_t NormalByte(float n) {
+    return static_cast<int8_t>(std::lround(std::clamp(n, -1.0f, 1.0f) * 127.0f));
+}
+
 GeVertex3D ToGe(const Vertex3D &v) {
-    return {v.uv[0], v.uv[1], Pack(v.color), v.normal[0], v.normal[1], v.normal[2],
+    return {v.uv[0], v.uv[1], Pack(v.color), NormalByte(v.normal[0]), NormalByte(v.normal[1]), NormalByte(v.normal[2]), 0,
             v.position[0], v.position[1], v.position[2]};
 }
 
 constexpr int kMeshVertexType =
-    GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_NORMAL_32BITF | GU_VERTEX_32BITF | GU_INDEX_16BIT | GU_TRANSFORM_3D;
+    GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_NORMAL_8BIT | GU_VERTEX_32BITF | GU_INDEX_16BIT | GU_TRANSFORM_3D;
 
 // The caller has reserved kMeshCommandBytes in the list.
 constexpr uint32_t kMeshCommandBytes = 8192;
@@ -1063,22 +1074,40 @@ bool CpuBlit(TextureHandle src, Rect sr, TextureHandle dst, Rect dr) {
     y1 = std::clamp(y1, 0, static_cast<int>(d->pixel_height));
     const uint32_t dbytes = d->desc.format == TextureFormat::Index8 ? 1 : 4;
     uint8_t       *dbase = d->vram ? VramUncached(d->vram_offset) : d->pixels;
-    for (int y = y0; y < y1; y++) {
-        float fy = (static_cast<float>(y) + 0.5f - dm.offset_y) / dm.scale_y; // logical in dst
-        float ty = dr.h != 0 ? (fy - dr.y) / static_cast<float>(dr.h) : 0.0f;
-        float ly = static_cast<float>(sr.y) + ty * static_cast<float>(sr.h);
-        int   sy = std::clamp(static_cast<int>(ly * sm.scale_y + sm.offset_y), 0, static_cast<int>(sh) - 1);
-        for (int x = x0; x < x1; x++) {
-            float    fx = (static_cast<float>(x) + 0.5f - dm.offset_x) / dm.scale_x;
-            float    tx = dr.w != 0 ? (fx - dr.x) / static_cast<float>(dr.w) : 0.0f;
-            float    lx = static_cast<float>(sr.x) + tx * static_cast<float>(sr.w);
-            int      sx = std::clamp(static_cast<int>(lx * sm.scale_x + sm.offset_x), 0, static_cast<int>(sw) - 1);
-            uint32_t sbytes = 0;
-            const uint8_t *s = TexelAt(src, static_cast<uint32_t>(sx), static_cast<uint32_t>(sy), sbytes);
-            if (sbytes != dbytes) {
-                return false;
+    // The source column of each destination column, worked out once: a frame-sized copy is a few
+    // hundred thousand texels, too many for float divides apiece.
+    std::vector<uint32_t> columns;
+    columns.reserve(static_cast<size_t>(std::max(x1 - x0, 0)));
+    for (int x = x0; x < x1; x++) {
+        float fx = (static_cast<float>(x) + 0.5f - dm.offset_x) / dm.scale_x; // logical in dst
+        float tx = dr.w != 0 ? (fx - dr.x) / static_cast<float>(dr.w) : 0.0f;
+        float lx = static_cast<float>(sr.x) + tx * static_cast<float>(sr.w);
+        columns.push_back(static_cast<uint32_t>(std::clamp(static_cast<int>(lx * sm.scale_x + sm.offset_x), 0, static_cast<int>(sw) - 1)));
+    }
+    const bool straight = columns.empty() || columns.back() - columns.front() + 1 == columns.size();
+    for (int y = y0; y < y1 && !columns.empty(); y++) {
+        float          fy = (static_cast<float>(y) + 0.5f - dm.offset_y) / dm.scale_y;
+        float          ty = dr.h != 0 ? (fy - dr.y) / static_cast<float>(dr.h) : 0.0f;
+        float          ly = static_cast<float>(sr.y) + ty * static_cast<float>(sr.h);
+        int            sy = std::clamp(static_cast<int>(ly * sm.scale_y + sm.offset_y), 0, static_cast<int>(sh) - 1);
+        uint32_t       sbytes = 0;
+        const uint8_t *row = TexelAt(src, 0, static_cast<uint32_t>(sy), sbytes);
+        if (sbytes != dbytes) {
+            return false;
+        }
+        uint8_t *out = dbase + (static_cast<uint32_t>(y) * d->stride + static_cast<uint32_t>(x0)) * dbytes;
+        if (straight) {
+            std::memcpy(out, row + columns.front() * dbytes, columns.size() * dbytes);
+        } else if (dbytes == 4) {
+            const auto *in = reinterpret_cast<const uint32_t *>(row);
+            auto       *to = reinterpret_cast<uint32_t *>(out);
+            for (size_t i = 0; i < columns.size(); i++) {
+                to[i] = in[columns[i]];
             }
-            std::memcpy(dbase + (static_cast<uint32_t>(y) * d->stride + static_cast<uint32_t>(x)) * dbytes, s, dbytes);
+        } else {
+            for (size_t i = 0; i < columns.size(); i++) {
+                out[i] = row[columns[i]];
+            }
         }
     }
     if (!d->vram) {
@@ -1259,13 +1288,14 @@ TextureHandle CreateTexture(const TextureDesc &desc) {
     t.stride = std::max<uint32_t>(t.pot_width, 16);
     const uint32_t size = t.stride * t.pot_height * bytes;
     t.pixels = static_cast<uint8_t *>(memalign(64, size));
-    t.bytes = size;
-    g.texture_bytes += size;
     if (t.pixels == nullptr) {
         std::fprintf(stderr, "gfx: no memory for a %ux%u texture\n", desc.width, desc.height);
         t.used = false;
         return kNullTexture;
     }
+    t.bytes = size;
+    g.texture_bytes += size;
+    ReportMemory();
     std::memset(t.pixels, 0, size);
     sceKernelDcacheWritebackRange(t.pixels, size);
     return handle;
@@ -1327,6 +1357,15 @@ TextureHandle CreateRenderTarget(uint32_t logical_width, uint32_t logical_height
         t.pixels = VramCached(t.vram_offset);
         auto *pixels = reinterpret_cast<uint32_t *>(VramUncached(t.vram_offset));
         std::fill(pixels, pixels + t.stride * h, 0x80000000u);
+    } else if (share_main_depth) {
+        // A target for drawing with the frame's depth is no use where draws do not reach: none. Asked
+        // for again every frame, it is said once.
+        static bool said = false;
+        if (!std::exchange(said, true)) {
+            std::fprintf(stderr, "gfx: no VRAM for render targets drawn with the frame's depth\n");
+        }
+        t = Texture{};
+        return kNullTexture;
     } else {
         // ponytail: out of VRAM the target is an image in RAM, which copies reach but draws do not.
         std::fprintf(stderr, "gfx: no VRAM for a %ux%u render target; it is drawn into only by copies\n", w, h);
@@ -1338,6 +1377,7 @@ TextureHandle CreateRenderTarget(uint32_t logical_width, uint32_t logical_height
         }
         t.bytes = size;
         g.texture_bytes += size;
+        ReportMemory();
         auto *pixels = reinterpret_cast<uint32_t *>(t.pixels);
         std::fill(pixels, pixels + t.stride * h, 0x80000000u);
         sceKernelDcacheWritebackRange(t.pixels, size);
@@ -1536,6 +1576,7 @@ MeshHandle CreateMesh(std::span<const Vertex3D> vertices, std::span<const uint32
     }
     m.indices.assign(indices.begin(), indices.end());
     g.mesh_bytes += vertices.size() * sizeof(GeVertex3D) + m.indices.size() * sizeof(uint16_t);
+    ReportMemory();
     sceKernelDcacheWritebackRange(m.vertices, vertices.size() * sizeof(GeVertex3D));
     sceKernelDcacheWritebackRange(m.indices.data(), m.indices.size() * sizeof(uint16_t));
     return handle;
