@@ -16,7 +16,12 @@ namespace ttffont {
 
 namespace {
 
+#ifdef __PSP__
+// Glyphs drawn for a 480x272 screen are small, and the GE addresses no image past 512 texels.
+constexpr int kAtlasSize = 512;
+#else
 constexpr int kAtlasSize = 2048;
+#endif
 // Space round each bitmap, so linear sampling at a quad's edge reads transparent texels.
 constexpr int kPad = 1;
 
