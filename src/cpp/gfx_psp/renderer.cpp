@@ -967,6 +967,8 @@ void ApplyMeshTransform(const MeshConstants &k, const DrawState &s) {
     uint8_t material[4] = {255, 255, 255, Unit(k.diffuse[3], 128.0f)};
     sceGuColorMaterial(vertex_color ? GU_AMBIENT_AND_DIFFUSE : 0);
     sceGuModelColor(0, Pack(material), Pack(material), 0);
+    // sceGuModelColor leaves the material's alpha, which the lit alpha is made from; this sets it.
+    sceGuAmbientColor(Pack(material));
     const uint32_t lights = lighting ? std::min<uint32_t>(k.light_count, 4) : 0;
     for (uint32_t i = 0; i < 4; i++) {
         if (i >= lights) {
