@@ -2,6 +2,11 @@
 
 #include "platform/psp.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+#include <malloc.h>
+#include <new>
+
 #include <pspkernel.h>
 
 // EBOOT.PBP's module header. The heap takes all the memory but what the kernel needs for the
@@ -32,6 +37,25 @@ int ExitCallbackThread(SceSize, void *) {
 }
 
 } // namespace
+
+std::size_t PspHeapUsed() { return static_cast<std::size_t>(mallinfo().uordblks); }
+
+// Memory is what runs out on a PSP: a failed allocation says how much it wanted and what the heap
+// held, before it throws as the standard one does.
+void *operator new(std::size_t size) {
+    if (void *block = std::malloc(size == 0 ? 1 : size)) {
+        return block;
+    }
+    std::fprintf(stderr, "memory: no %u bytes left; the heap holds %u KiB\n", static_cast<unsigned>(size),
+                 static_cast<unsigned>(PspHeapUsed() >> 10));
+    throw std::bad_alloc();
+}
+
+void *operator new[](std::size_t size) { return operator new(size); }
+void  operator delete(void *block) noexcept { std::free(block); }
+void  operator delete[](void *block) noexcept { std::free(block); }
+void  operator delete(void *block, std::size_t) noexcept { std::free(block); }
+void  operator delete[](void *block, std::size_t) noexcept { std::free(block); }
 
 void PspInstallExitCallback(void (*request_stop)()) {
     g_request_stop = request_stop;

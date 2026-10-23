@@ -83,9 +83,23 @@ fs::path Installed(const char *name) {
     return base / config.app_dir / name;
 }
 
+// fs::absolute, but on the PSP a path naming its device ("ms0:/...") is already absolute, which
+// newlib's POSIX paths do not see: they would have the working directory put in front of it again.
+fs::path AbsoluteOrSelf(const fs::path &path, std::error_code &error) {
+#ifdef __PSP__
+    const std::string text = path.generic_string();
+    const auto        colon = text.find(':');
+    if (colon != std::string::npos && colon < text.find('/')) {
+        error.clear();
+        return path;
+    }
+#endif
+    return fs::absolute(path, error);
+}
+
 fs::path Absolute(const fs::path &path) {
     std::error_code error;
-    fs::path        absolute = fs::absolute(path, error);
+    fs::path        absolute = AbsoluteOrSelf(path, error);
     return error ? path : absolute.lexically_normal();
 }
 
@@ -132,7 +146,7 @@ fs::path PathsExecutable() {
     if (program.empty()) {
         return {};
     }
-    fs::path absolute = fs::absolute(program, error);
+    fs::path absolute = AbsoluteOrSelf(program, error);
     return error ? fs::path() : absolute;
 }
 

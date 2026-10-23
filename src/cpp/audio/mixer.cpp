@@ -713,7 +713,12 @@ void Mixer::Render(float *out, int frames) {
 
 // Never destroyed: SDL's audio thread may still pull from it while static destructors run.
 Mixer &DefaultMixer() {
+#ifdef __PSP__
+    // Half the SPU's rate: at 48 kHz the synth and the reverbs took most of the PSP's CPU.
+    static Mixer *mixer = new Mixer(kSpuRate / 2);
+#else
     static Mixer *mixer = new Mixer;
+#endif
     return *mixer;
 }
 

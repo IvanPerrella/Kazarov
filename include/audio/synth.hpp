@@ -85,6 +85,16 @@ struct Voice {
     double           position = 0.0;
     int              rate = 0;
 
+#ifdef __PSP__
+    // The two ADPCM blocks the interpolation last read, decoded (VagSample keeps them compressed).
+    struct Block {
+        std::int32_t index = -1;
+        std::int16_t samples[28];
+    };
+    Block blocks[2];
+    int   next_block = 0;
+#endif
+
     // Fixed at key-on from the bank: pitch offset in semitones from the note, gain and pan.
     double base_pitch = 0.0;
     float  base_gain = 1.0f;

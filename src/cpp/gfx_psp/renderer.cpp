@@ -76,6 +76,7 @@ struct Texture {
     uint32_t      vram_offset = 0;
     uint8_t      *pixels = nullptr; // RAM, or VRAM's cached mirror for a render target
     uint32_t      bound_serial = 0;
+    uint32_t      bytes = 0;        // what it takes of the heap
     // A palette's copy in the open list, so a later update cannot reach draws already queued.
     const void   *clut_copy = nullptr;
     uint32_t      clut_serial = 0;
@@ -129,7 +130,11 @@ struct State {
     bool          interp_no_interpolation = false;
     Interp2D      interp_2d;
     bool          warned_prog0 = false;
+    bool          up = false;
     std::vector<void *> spills;
+    std::size_t         texture_bytes = 0;
+    std::size_t         mesh_bytes = 0;
+    std::size_t         reported_bytes = 0;
 } g;
 
 uint8_t *VramCached(uint32_t offset) {
@@ -363,6 +368,13 @@ void Present() {
     }
     g.display_offset = g.draw_offset;
     g.draw_offset = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sceGuSwapBuffers()));
+    // The heap is what runs out on a PSP; a move of a megabyte or more is worth a line.
+    const std::size_t held = g.texture_bytes + g.mesh_bytes;
+    if (held > g.reported_bytes + (1u << 20) || held + (1u << 20) < g.reported_bytes) {
+        g.reported_bytes = held;
+        std::fprintf(stderr, "gfx: textures %u KiB, meshes %u KiB\n", static_cast<unsigned>(g.texture_bytes >> 10),
+                     static_cast<unsigned>(g.mesh_bytes >> 10));
+    }
 }
 
 // ---- State ------------------------------------------------------------------------------------
@@ -1166,6 +1178,7 @@ void RendererInit(SDL_Window *, const RendererConfig &config) {
     sceGuDisplay(GU_TRUE);
     g.draw_offset = 0;
     g.display_offset = kFrameBytes;
+    g.up = true;
     std::fprintf(stderr, "gfx: GE renderer, %u KiB of VRAM for render targets\n",
                  (g.vram_size - kTargetPoolStart) >> 10);
 }
@@ -1174,6 +1187,7 @@ RendererFeatures ActiveRendererFeatures() { return {0, false, true, false, false
 bool             HeadlessSurfaceAvailable() { return false; }
 
 void RendererShutdown() {
+    g.up = false;
     CloseList();
     sceGuTerm();
 }
@@ -1208,7 +1222,8 @@ void EndFrame() {
 
 bool        InFrame() { return g.in_frame || g.recording || (g.list && g.list->overlay); }
 uint32_t    ValidationMessageCount() { return 0; }
-uint32_t    PipelineCount() { return 0; }
+// Callers read a count above zero as "the renderer is up"; the GE has one fixed pipeline.
+uint32_t    PipelineCount() { return g.up ? 1 : 0; }
 double      PipelineCompileSeconds() { return 0.0; }
 float       RenderScale() { return RenderScaleValue(); }
 void        SetRenderScale(float) {}
@@ -1242,6 +1257,8 @@ TextureHandle CreateTexture(const TextureDesc &desc) {
     t.stride = std::max<uint32_t>(t.pot_width, 16);
     const uint32_t size = t.stride * t.pot_height * bytes;
     t.pixels = static_cast<uint8_t *>(memalign(64, size));
+    t.bytes = size;
+    g.texture_bytes += size;
     if (t.pixels == nullptr) {
         std::fprintf(stderr, "gfx: no memory for a %ux%u texture\n", desc.width, desc.height);
         t.used = false;
@@ -1309,12 +1326,19 @@ TextureHandle CreateRenderTarget(uint32_t logical_width, uint32_t logical_height
         auto *pixels = reinterpret_cast<uint32_t *>(VramUncached(t.vram_offset));
         std::fill(pixels, pixels + t.stride * h, 0x80000000u);
     } else {
-        // ponytail: out of VRAM the target is an image the GE samples but never draws into.
-        std::fprintf(stderr, "gfx: no VRAM for a %ux%u render target; it stays black\n", w, h);
-        t.pixels = static_cast<uint8_t *>(memalign(64, t.stride * t.pot_height * 4));
+        // ponytail: out of VRAM the target is an image in RAM, which copies reach but draws do not.
+        std::fprintf(stderr, "gfx: no VRAM for a %ux%u render target; it is drawn into only by copies\n", w, h);
+        t.pixels = static_cast<uint8_t *>(memalign(64, size));
+        if (t.pixels == nullptr) {
+            std::fprintf(stderr, "gfx: no memory for a %ux%u render target either\n", w, h);
+            t = Texture{};
+            return kNullTexture;
+        }
+        t.bytes = size;
+        g.texture_bytes += size;
         auto *pixels = reinterpret_cast<uint32_t *>(t.pixels);
-        std::fill(pixels, pixels + t.stride * t.pot_height, 0x80000000u);
-        sceKernelDcacheWritebackRange(t.pixels, t.stride * t.pot_height * 4);
+        std::fill(pixels, pixels + t.stride * h, 0x80000000u);
+        sceKernelDcacheWritebackRange(t.pixels, size);
     }
     return handle;
 }
@@ -1363,6 +1387,7 @@ void DestroyTexture(TextureHandle handle) {
         VramFree(t->vram_offset, t->stride * t->pixel_height * 4);
     } else {
         std::free(t->pixels);
+        g.texture_bytes -= t->bytes;
     }
     *t = Texture{};
 }
@@ -1508,6 +1533,7 @@ MeshHandle CreateMesh(std::span<const Vertex3D> vertices, std::span<const uint32
         m.vertices[i] = ToGe(vertices[i]);
     }
     m.indices.assign(indices.begin(), indices.end());
+    g.mesh_bytes += vertices.size() * sizeof(GeVertex3D) + m.indices.size() * sizeof(uint16_t);
     sceKernelDcacheWritebackRange(m.vertices, vertices.size() * sizeof(GeVertex3D));
     sceKernelDcacheWritebackRange(m.indices.data(), m.indices.size() * sizeof(uint16_t));
     return handle;
@@ -1536,6 +1562,7 @@ void DestroyMesh(MeshHandle handle) {
     if (g.list_open && m->bound_serial == g.serial) {
         Flush();
     }
+    g.mesh_bytes -= m->vertex_count * sizeof(GeVertex3D) + m->indices.size() * sizeof(uint16_t);
     std::free(m->vertices);
     *m = Mesh{};
 }

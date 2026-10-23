@@ -12,6 +12,8 @@
 #include <unordered_set>
 #include <utility>
 
+#include "platform/files.hpp"
+
 namespace vfs {
 namespace {
 
@@ -115,8 +117,8 @@ bool ReadHostInto(const fs::path &path, void *buffer, std::size_t size) {
  */
 void WalkFiles(const fs::path &root, const std::function<void(std::string, fs::path)> &visit) {
     std::error_code                  error;
-    fs::recursive_directory_iterator it(root, fs::directory_options::follow_directory_symlink | fs::directory_options::skip_permission_denied, error);
-    for (const fs::recursive_directory_iterator end; !error && it != end; it.increment(error)) {
+    RecursiveDirectoryIterator it(root, fs::directory_options::follow_directory_symlink | fs::directory_options::skip_permission_denied, error);
+    for (const RecursiveDirectoryIterator end; !error && it != end; it.increment(error)) {
         std::error_code entry_error;
         if (it->is_regular_file(entry_error) && !entry_error) {
             visit(Utf8(it->path().lexically_relative(root)), it->path());

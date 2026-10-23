@@ -92,13 +92,17 @@ void Reverb::Process(const float *in, float *out, int frames) {
                 const float delayed = comb.buffer[comb.index];
                 comb.filter = delayed * (1.0f - damp_) + comb.filter * damp_;
                 comb.buffer[comb.index] = mono * input_gain + comb.filter * feedback_;
-                comb.index = (comb.index + 1) % comb.buffer.size();
+                if (++comb.index == comb.buffer.size()) {
+                    comb.index = 0;
+                }
                 wet += delayed;
             }
             for (Allpass &allpass : allpasses_[side]) {
                 const float delayed = allpass.buffer[allpass.index];
                 allpass.buffer[allpass.index] = wet + delayed * 0.5f;
-                allpass.index = (allpass.index + 1) % allpass.buffer.size();
+                if (++allpass.index == allpass.buffer.size()) {
+                    allpass.index = 0;
+                }
                 wet = delayed - wet;
             }
             out[i * 2 + side] += wet * depth_;

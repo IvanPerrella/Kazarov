@@ -14,6 +14,12 @@ std::shared_ptr<Bank> Bank::CreateFromJson(std::string_view                     
 
 std::shared_ptr<Bank> Bank::CreateFromJsonCandidates(std::string_view                                                           text,
                                                      const std::function<std::vector<vfs::Ref>(const std::filesystem::path &)> &resolve) {
+#ifdef __PSP__
+    // A bank of WAV files is PCM, which the PSP's samples, kept as ADPCM, do not hold: retail's plays.
+    (void)text;
+    (void)resolve;
+    return nullptr;
+#else
     try {
         const auto root = nlohmann::json::parse(text);
         if (root.at("schema_version") != 1 || root.at("kind") != "bank") {
@@ -111,6 +117,7 @@ std::shared_ptr<Bank> Bank::CreateFromJsonCandidates(std::string_view           
     } catch (const nlohmann::json::exception &) {
         return nullptr;
     }
+#endif
 }
 
 int ApplyVelocityCurve(int curve, int velocity) {
@@ -154,7 +161,7 @@ int Bank::AddSampleSet(const HdSplit &split, int velocity, std::span<Layer> out,
             return;
         }
         const VagSample &vag = decoded_[sample.vag];
-        if (vag.pcm.empty() || header_.vags[sample.vag].rate == 0) {
+        if (vag.Frames() == 0 || header_.vags[sample.vag].rate == 0) {
             return;
         }
         out[count++] = Layer{&split, &sample, &vag, header_.vags[sample.vag].rate, curve};

@@ -138,7 +138,8 @@ void AcquirePool() {
     std::size_t too_big = 64u << 20;
     while (too_big - largest > (64u << 10)) {
         std::size_t size = (largest + too_big) / 2;
-        if (void *block = std::malloc(size)) {
+        // memalign, not malloc: GCC drops a malloc freed unread and takes it as having succeeded.
+        if (void *block = memalign(64, size)) {
             std::free(block);
             largest = size;
         } else {
